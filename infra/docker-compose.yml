@@ -1,0 +1,27 @@
+name: shorts-factory
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sf
+      POSTGRES_PASSWORD: sf
+      POSTGRES_DB: shorts_factory
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sf"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    volumes: [redisdata:/data]
+    command: ["redis-server", "--appendonly", "yes"]
+
+  # api / worker / web are run via `pnpm dev` locally in MVP.
+  # Production Dockerfiles will be added in epic E0 decomposition.
+
+volumes:
+  pgdata:
+  redisdata:

@@ -1,0 +1,209 @@
+{
+  "repo": "sf",
+  "note": "Правила репозитория AI Shorts Factory (pnpm + Turborepo, TypeScript strict, Fastify, BullMQ, Drizzle, Next.js). Общие пороги наследуются из rules.common.json; здесь - защищённые пути, стандарты по добавленным строкам, парные правки и гейты. Идентификаторы правил (S01…) - это то, на что ссылаются ревьюеры в колонке «Правило».",
+  "baseBranch": "main",
+  "protected": [
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.*.local",
+    "pnpm-lock.yaml",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/hooks/**",
+    ".github/workflows/**"
+  ],
+  "protectedNote": {
+    ".env": "настоящие ключи - тема владельца; шаблон .env.example не защищён",
+    "pnpm-lock.yaml": "lockfile пишет только pnpm; правка руками - рассинхрон с package.json",
+    ".claude/settings.json": "регистрация хуков и запреты; агент сам себе прав не расширяет - через unlock.txt и решение техлида",
+    ".claude/hooks/**": "код замков и правила; правятся только по решению техлида с пробой на отказ и на пропуск (harness-selftest.js), разово через unlock.txt",
+    ".github/workflows/**": "конвейер правится только в сторону усиления и только по решению техлида; разово через unlock.txt"
+  },
+  "createOnly": [
+    "packages/db/migrations/*.sql",
+    "packages/db/migrations/meta/*_snapshot.json"
+  ],
+  "createOnlyNote": {
+    "packages/db/migrations/*.sql": "применённая миграция не редактируется - только новая поверх (drizzle-kit generate)"
+  },
+  "standards": [
+    {
+      "id": "S01",
+      "kind": "line",
+      "files": ["**/*.ts", "**/*.tsx"],
+      "pattern": "(:\\s*any\\b|\\bas\\s+any\\b|<any>|\\bany\\[\\]|<[^<>]*\\bany\\b[^<>]*>)",
+      "skipIf": "any-ok:|^\\s*(//|\\*)|expect\\(|toContain|`|'[^']*\\bany\\b[^']*'|\"[^\"]*\\bany\\b[^\"]*\"",
+      "message": "Тип any запрещён во всех формах (: any, as any, <any>, any[], внутри дженерика). Замена: unknown с сужением, z.infer<typeof schema>, типы Drizzle. Безвыходный случай - строкой выше // any-ok: причина (E?-??) и слово об этом в отчёте."
+    },
+    {
+      "id": "S02",
+      "kind": "line",
+      "files": ["**/*.ts", "**/*.tsx"],
+      "pattern": "\\bas\\s+unknown\\s+as\\b",
+      "skipIf": "^\\s*(//|\\*)|\\.test\\.",
+      "message": "as unknown as - обход типизации, тот же any в две ступени. Опиши тип честно или сузь проверкой."
+    },
+    {
+      "id": "S03",
+      "kind": "line",
+      "files": [
+        "apps/api/src/**",
+        "apps/worker/src/**",
+        "packages/core/src/**",
+        "packages/db/src/**",
+        "packages/integrations/*/src/**",
+        "packages/contracts/src/**",
+        "packages/api-client/src/**",
+        "packages/storage/src/**"
+      ],
+      "pattern": "\\bconsole\\.(log|info|warn|error|debug)\\s*\\(",
+      "skipIf": "console-ok:|^\\s*(//|\\*)",
+      "message": "console.* в исходниках api/worker/пакетов. Логи - структурные, через pino (child-логгер с requestId/jobId), иначе они не попадут в общий формат и не свяжутся с job. Скрипты и тесты сюда не входят."
+    },
+    {
+      "id": "S04",
+      "kind": "line",
+      "files": ["apps/**", "packages/**", "scripts/**"],
+      "pattern": "search\\.list|youtube\\.search\\s*\\(|/youtube/v3/search",
+      "skipIf": "^\\s*(//|\\*)|NEVER|never|запрещ|no-search-list|check-no-search-list",
+      "message": "YouTube search.list стоит 100 units за вызов и запрещён проектом целиком (CLAUDE.md, System Design §7.1). Новые видео - через uploads-плейлист (playlistItems.list), снапшоты - videos.list батчами."
+    },
+    {
+      "id": "S05",
+      "kind": "line",
+      "files": [
+        "apps/api/src/**",
+        "apps/worker/src/**",
+        "apps/web/src/**",
+        "packages/core/src/**",
+        "packages/db/src/**",
+        "packages/integrations/*/src/**",
+        "packages/contracts/src/**",
+        "packages/api-client/src/**",
+        "packages/storage/src/**"
+      ],
+      "pattern": "\\bprocess\\.env\\b",
+      "skipIf": "^\\s*(//|\\*)|process\\.env\\.NODE_ENV|env-ok:|\\.test\\.",
+      "message": "process.env читается только в @sf/config (Zod-валидация, fail-fast). Возьми значение из env/limits пакета @sf/config; во web - только через серверный код и NEXT_PUBLIC_* для несекретного."
+    },
+    {
+      "id": "S06",
+      "kind": "line",
+      "files": ["apps/web/**"],
+      "pattern": "NEXT_PUBLIC_[A-Z0-9_]*(KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)",
+      "message": "NEXT_PUBLIC_* попадает в браузерный бандл. Секрет с таким префиксом - утечка ключа всем посетителям. Секреты живут только на сервере (server components / route handlers)."
+    },
+    {
+      "id": "S07",
+      "kind": "line",
+      "files": ["packages/core/**"],
+      "pattern": "from\\s+['\"](@sf/|drizzle-orm|postgres|fastify|bullmq|ioredis|next|react|googleapis|@google/genai|pino|dotenv)",
+      "message": "@sf/core ни от чего не зависит, кроме zod (System Design §6). Инфраструктурный импорт в core ломает направление зависимостей: вынеси в db/integrations/apps."
+    },
+    {
+      "id": "S08",
+      "kind": "line",
+      "files": ["packages/**", "apps/**"],
+      "pattern": "from\\s+['\"](\\.\\./)+(packages|apps)/",
+      "message": "Импорт соседнего пакета относительным путём. Пакеты подключаются только как workspace-зависимости (@sf/core, @sf/db …), иначе ломается сборка и границы модулей."
+    },
+    {
+      "id": "S09",
+      "kind": "line",
+      "files": ["**/*.ts", "**/*.tsx", "**/*.mjs", "**/*.js"],
+      "pattern": "\\b(TODO|FIXME|HACK|XXX)\\b",
+      "skipIf": "E\\d+-\\d+|#\\d+",
+      "message": "TODO/FIXME без идентификатора задачи (E1-04) живёт вечно. Либо сделай сейчас, либо привяжи к задаче трекера."
+    },
+    {
+      "id": "S10",
+      "kind": "line",
+      "files": ["apps/**/src/**", "packages/**/src/**"],
+      "pattern": "\\.(update|insert|delete)\\([^)]*\\)\\s*\\.set\\(\\{[^}]*\\b(dna|result|body|segments)\\b",
+      "skipIf": "^\\s*(//|\\*)",
+      "message": "Похоже на перезапись AI-артефакта (video_analysis.result, script.segments, brief). Правило проекта: AI-выводы не перетираются - вставляется новая версия (CLAUDE.md, System Design §1.4)."
+    },
+    {
+      "id": "S11",
+      "kind": "line",
+      "files": ["apps/web/src/**"],
+      "pattern": "from\\s+['\"]@sf/(db|config|youtube|gemini|tts)['\"]",
+      "skipIf": "^\\s*(//|\\*)|server-only",
+      "message": "Web не импортирует db/config/интеграции напрямую: секреты и соединения не должны попадать в бандл. Web ходит в api через @sf/api-client и @sf/contracts; серверный код помечается import 'server-only'."
+    },
+    {
+      "id": "S12",
+      "kind": "line",
+      "files": ["apps/worker/src/jobs/**"],
+      "pattern": "\\bnew\\s+(Queue|Worker)\\s*\\(",
+      "skipIf": "^\\s*(//|\\*)",
+      "message": "Очереди и воркеры создаются через фабрики каркаса (defineJob / реестр очередей из E0-08), а не new Queue/new Worker в файле джоба: иначе теряются дефолты ретраев, DLQ и учёт стоимости."
+    }
+  ],
+  "crossChecks": [
+    {
+      "id": "X01",
+      "ifChanged": "packages/db/src/schema/**",
+      "requireChanged": "packages/db/migrations/**",
+      "requireNew": true,
+      "message": "Изменена Drizzle-схема, а нового файла миграции в диффе нет. Схема без миграции проходит typecheck и тесты, а таблицы в базе нет. Прогони pnpm db:generate и положи миграцию в тот же дифф."
+    },
+    {
+      "id": "X02",
+      "ifChanged": "packages/config/src/**",
+      "requireChanged": ".env.example",
+      "message": "Изменён @sf/config. Если добавлена или переименована переменная окружения - она обязана появиться в .env.example (без значения). Не добавлял переменных - сними замечание строкой X02 в unlock.txt."
+    }
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "cmd": "pnpm lint",
+      "when": "always",
+      "note": "Biome check по всему репозиторию"
+    },
+    {
+      "id": "typecheck",
+      "cmd": "pnpm typecheck",
+      "when": "always",
+      "note": "tsc --noEmit по всем workspace-пакетам через turbo"
+    },
+    {
+      "id": "test",
+      "cmd": "pnpm test",
+      "when": "never",
+      "note": "Vitest, юнит-тесты без инфраструктуры. Стартует как never: до E0-02 в пакетах нет конфигов Vitest и прогон красный по причине, не относящейся к правке. Задача E0-02 переводит when -> always (через unlock.txt + пробу в harness-selftest)"
+    },
+    {
+      "id": "test:int",
+      "cmd": "pnpm test:int",
+      "when": "never",
+      "note": "интеграционные тесты против Postgres/Redis из docker compose; включается (when -> glob:{packages/db/**,apps/**}) задачей E0-02, когда появится скрипт"
+    },
+    {
+      "id": "build",
+      "cmd": "pnpm build",
+      "when": "never",
+      "note": "сборка всех приложений; тяжёлая, но именно она ловит ошибки Next.js и бандла. Стартует как never: до E0-01 нет зависимостей и конфигов Next. Задача E0-01 переводит when -> glob:{apps/**,packages/**,package.json,pnpm-lock.yaml,turbo.json,tsconfig*.json}"
+    },
+    {
+      "id": "no-search-list",
+      "cmd": "node scripts/check-no-search-list.mjs",
+      "when": "always",
+      "note": "запрет search.list по исходникам; быстрая"
+    },
+    {
+      "id": "tracker",
+      "cmd": "node scripts/tasks.mjs render --check",
+      "when": "glob:{docs/tasks/**,docs/00_STATUS.md}",
+      "note": "docs/00_STATUS.md соответствует tasks.json"
+    },
+    {
+      "id": "harness-selftest",
+      "cmd": "node .claude/hooks/harness-selftest.js",
+      "when": "glob:.claude/**",
+      "note": "самопроверка обвязки: синтаксис хуков, правила, шапки агентов, пути в settings.json, живые пробы замков"
+    }
+  ]
+}

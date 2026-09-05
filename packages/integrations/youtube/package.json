@@ -1,0 +1,14 @@
+{
+  "name": "@sf/youtube",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@sf/config": "workspace:*",
+    "@sf/core": "workspace:*",
+    "googleapis": "^144.0.0"
+  },
+  "devDependencies": { "typescript": "^5.6.0" }
+}

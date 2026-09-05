@@ -1,0 +1,10 @@
+{
+  "name": "@sf/tts",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": { "@sf/config": "workspace:*" },
+  "devDependencies": { "typescript": "^5.6.0" }
+}

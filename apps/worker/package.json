@@ -1,0 +1,23 @@
+{
+  "name": "@sf/worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sf/config": "workspace:*",
+    "@sf/core": "workspace:*",
+    "@sf/db": "workspace:*",
+    "@sf/youtube": "workspace:*",
+    "@sf/gemini": "workspace:*",
+    "@sf/tts": "workspace:*",
+    "bullmq": "^5.20.0",
+    "pino": "^9.4.0"
+  },
+  "devDependencies": { "tsx": "^4.19.0", "typescript": "^5.6.0", "vitest": "^2.1.0" }
+}

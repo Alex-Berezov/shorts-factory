@@ -1,0 +1,104 @@
+{
+  "$comment": "Обвязка агентов AI Shorts Factory. Хуки регистрируются здесь (файл коммитится), персональные разрешения - в settings.local.json (в .gitignore, пишет install.ps1). Пути через $CLAUDE_PROJECT_DIR, чтобы обвязка переезжала вместе с репозиторием.",
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.production)",
+      "Read(./**/.env)",
+      "Read(./**/.env.local)",
+      "Bash(docker compose -f infra/docker-compose.prod.yml:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(rsync:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/protect-files.js\"",
+            "timeout": 20,
+            "statusMessage": "Проверяю, не защищён ли файл"
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/scope.js\"",
+            "timeout": 20,
+            "statusMessage": "Проверяю рамки задачи"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/commit-gate.js\"",
+            "timeout": 20,
+            "statusMessage": "Проверяю, можно ли коммитить"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/standards.js\"",
+            "timeout": 20,
+            "statusMessage": "Сверяю добавленные строки с правилами проекта"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/diff-boundaries.js\"",
+            "timeout": 20,
+            "statusMessage": "Проверяю границы диффа"
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/qa-lock.js\"",
+            "timeout": 20,
+            "statusMessage": "Проверяю, был ли прогон /qa"
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/answer-length.js\"",
+            "timeout": 20,
+            "statusMessage": "Проверяю объём ответа"
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/report-honesty.js\"",
+            "timeout": 20,
+            "statusMessage": "Проверяю, подтверждён ли отчёт прогонами"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/remind-format.js\"",
+            "timeout": 10,
+            "statusMessage": "Напоминаю формат ответа"
+          }
+        ]
+      }
+    ]
+  },
+  "outputStyle": "short"
+}

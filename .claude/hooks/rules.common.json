@@ -1,0 +1,225 @@
+{
+  "baseBranch": "main",
+  "harnessRepo": false,
+  "harnessRepoNote": "Обвязка лежит внутри репозитория (.claude/**) и коммитится вместе с кодом. report-honesty.js при false не требует отдельного git у обвязки, а проверяет только честность строки «Обвязка:» в закрывающем отчёте.",
+  "qaLock": {
+    "threshold": 15
+  },
+  "answerFormat": {
+    "maxProse": 900,
+    "maxLines": 9
+  },
+  "answerFormatNote": "Отчёт /auto: до трёх строк про продукт плюс пять ключей - Задача, Решено за тебя, Проверки, Обвязка, Дальше. Восемь строк в предельном случае, порог девять: одна строка запаса на пустую строку между сутью и ключами. Проза считается без кода и таблиц. Подробности - в файл дела tasks/, не в чат.",
+  "scope": {
+    "softLimit": 12,
+    "alwaysAllowed": [
+      "**/*.md",
+      "**/*.test.ts",
+      "**/*.test.tsx",
+      "**/*.int.test.ts",
+      "**/test/**",
+      "**/__tests__/**",
+      "packages/db/migrations/**",
+      "docs/**",
+      "tasks/**"
+    ]
+  },
+  "protected": [
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.*.local",
+    "**/.env",
+    "**/.env.local"
+  ],
+  "protectedNote": {
+    ".env": "настоящие ключи; агент их не читает и не пишет - тема владельца"
+  },
+  "diffBoundaries": {
+    "forbidden": [
+      "**/*.log",
+      "**/*.tsbuildinfo",
+      "**/node_modules/**",
+      "tasks/**"
+    ],
+    "forbiddenNote": "tasks/** - файлы дела, они в .gitignore; попали в дифф - значит кто-то тронул .gitignore, и это находка."
+  },
+  "afterReviewAllowed": [
+    "sf/docs/90_WORKLOG.md",
+    "sf/docs/DECISIONS.md",
+    "sf/docs/00_STATUS.md",
+    "sf/docs/tasks/tasks.json",
+    "sf/docs/20_TZ_HIGH_LEVEL.md",
+    "sf/docs/*_TASKS.md",
+    "sf/docs/adr/*.md",
+    "sf/.claude/qa-index.md",
+    "sf/.claude/qa-lessons.md"
+  ],
+  "afterReviewAllowedNote": "Документы, которые протокол /auto пишет ПОСЛЕ ревью и гейтов (шаг «Документы»): журнал, решения, статус трекера, отметки приёмки, ADR, копилка уроков. Их появление в диффе не делает отметку /qa недействительной. Файл кода, спека или конфиг после ревью отметку сбрасывают - это правильный отказ.",
+  "commitGate": {
+    "note": "Списки для commit-gate.js. Дифф перед коммитом человек не читает, поэтому запрет машинный: правило правится здесь, код замка не трогается.",
+    "commitTypes": [
+      "feat",
+      "fix",
+      "docs",
+      "style",
+      "refactor",
+      "perf",
+      "test",
+      "build",
+      "ci",
+      "chore",
+      "revert"
+    ],
+    "forbiddenPaths": [
+      ".env",
+      ".env.local",
+      ".env.production",
+      "**/.env",
+      "**/.env.local",
+      "node_modules/**",
+      "**/node_modules/**",
+      "**/*.log",
+      "**/*.tsbuildinfo",
+      "dist/**",
+      "**/dist/**",
+      ".next/**",
+      "**/.next/**",
+      ".turbo/**",
+      "**/.turbo/**",
+      "coverage/**",
+      "**/coverage/**",
+      "data/**",
+      "tasks/**",
+      ".claude/.qa-state",
+      ".claude/.task-current",
+      ".claude/scope.txt",
+      ".claude/unlock.txt",
+      ".claude/settings.local.json"
+    ],
+    "forbiddenPathsNote": "Секреты, зависимости, логи, сборка, медиа (data/), файлы дела и изменяемое состояние обвязки. Всё это в .gitignore; появление в диффе означает, что .gitignore тронут.",
+    "weakenings": [
+      {
+        "id": "W01",
+        "pattern": "continue-on-error\\s*:\\s*(?:true|'true'|\"true\")",
+        "message": "continue-on-error: true - шаг конвейера падает и остаётся зелёным. Почини сам шаг, а не его видимость."
+      },
+      {
+        "id": "W02",
+        "pattern": "\\|\\|\\s*true\\b",
+        "message": "|| true глушит код возврата команды: проверка выполняется, но её результат никого не касается. Убери хвост и разберись с настоящей причиной падения."
+      },
+      {
+        "id": "W03",
+        "pattern": "--passWithNoTests|passWithNoTests\\s*:\\s*true",
+        "message": "passWithNoTests делает зелёным прогон, в котором не нашлось ни одного теста: опечатка в пути к тестам после этого неотличима от успеха. Исключение одно - vitest.config пакета, где тестов пока нет по плану E0-02; там оно допустимо и снимается в задаче, которая заводит первый тест."
+      },
+      {
+        "id": "W04",
+        "pattern": "\\bif\\s*:\\s*(?:false|'false'|\"false\")\\b",
+        "message": "if: false выключает шаг конвейера, оставляя его в файле как будто он работает. Либо шаг нужен и должен идти, либо не нужен и удаляется вместе со строкой."
+      },
+      {
+        "id": "W05",
+        "pattern": "\\.skip\\s*\\(",
+        "message": ".skip( гасит тест вместе с дефектом, который он держал. Почини поведение или удали тест осознанно и скажи об этом в отчёте."
+      },
+      {
+        "id": "W06",
+        "pattern": "\\bx(?:it|describe|test)\\s*\\(",
+        "message": "xit / xdescribe / xtest - тот же выключенный тест, только незаметнее. Верни его в строй или удали осознанно."
+      },
+      {
+        "id": "W07",
+        "pattern": "@ts-ignore|@ts-nocheck",
+        "message": "@ts-ignore / @ts-nocheck выключают проверку типов и молча переживают любую последующую правку. Опиши типы честно; если ошибка чужая и неустранима - @ts-expect-error с пояснением."
+      },
+      {
+        "id": "W08",
+        "pattern": "biome-ignore",
+        "skipIf": "biome-ignore\\s+\\S+\\s*:\\s*\\S",
+        "message": "biome-ignore без пояснения. Формат Biome это умеет: // biome-ignore lint/<правило>: почему так можно. Без причины отключение проверки живёт вечно."
+      },
+      {
+        "id": "W09",
+        "pattern": "\"(?:lint|typecheck|test|build)\"\\s*:\\s*\"\\s*(?:echo|true|exit\\s+0)\\b",
+        "message": "Скрипт проверки в package.json заменён заглушкой (echo/true/exit 0): гейт выглядит зелёным, ничего не проверяя. Верни настоящую команду."
+      }
+    ],
+    "weakeningExempt": [
+      "**/*.md",
+      ".claude/hooks/rules.*.json",
+      ".claude/hooks/harness-selftest.js"
+    ],
+    "weakeningExemptNote": "Документация и файлы правил держат паттерны W01-W09 литералами - иначе замок запретил бы коммит собственного правила. Самопроверка подсовывает эти паттерны как пробы. На проверку мусора в диффе исключения не распространяются.",
+    "coverageFiles": [
+      "**/vitest.config.*",
+      "**/vitest.workspace.*",
+      "package.json",
+      "**/package.json",
+      ".github/workflows/**"
+    ],
+    "coverageFilesNote": "В этих файлах числа порогов покрытия сверяются с прежними: значение, ставшее меньше, - ослабление проверки.",
+    "templateFiles": [
+      ".env.example",
+      ".env.test"
+    ],
+    "templateFilesNote": "Файлы под шаблоном forbiddenPaths, которые репозиторий обязан хранить и править. Исключение действует, только если файл отслеживается гитом и в добавленных строках нет значения, похожего на настоящий секрет (secretsInAdded).",
+    "secretMinLength": 20
+  },
+  "standards": [
+    {
+      "id": "W01",
+      "kind": "line",
+      "files": [
+        ".github/workflows/**",
+        "**/*.yml",
+        "**/*.yaml",
+        "infra/**/*.sh"
+      ],
+      "pattern": "continue-on-error\\s*:\\s*(?:true|'true'|\"true\")|\\|\\|\\s*true\\b|--passWithNoTests|\\bif\\s*:\\s*(?:false|'false'|\"false\")\\b",
+      "message": "Проверка в конвейере ослаблена: continue-on-error, || true, --passWithNoTests или if: false. Конвейер правится только в сторону усиления: почини причину падения, а не признак."
+    },
+    {
+      "id": "W02",
+      "kind": "line",
+      "files": [
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.int.test.ts",
+        "**/test/**",
+        "**/__tests__/**"
+      ],
+      "pattern": "\\.skip\\s*\\(|\\bx(?:it|describe|test)\\s*\\(|\\.only\\s*\\(",
+      "skipIf": "expect\\(|toContain|toMatch|toBe\\(",
+      "message": "Тест выключен (.skip / xit) или сужен (.only). Вместе с ним выключен дефект, который он держал, а прогон остаётся зелёным. Почини поведение либо удали тест осознанно и скажи об этом в отчёте."
+    },
+    {
+      "id": "W03",
+      "kind": "line",
+      "files": [
+        "**/*.ts",
+        "**/*.tsx"
+      ],
+      "pattern": "@ts-ignore|@ts-nocheck",
+      "skipIf": "expect\\(|toContain|toMatch",
+      "message": "@ts-ignore / @ts-nocheck выключают проверку типов и переживают любую правку молча. Опиши типы; если ошибка чужая и неустранима - @ts-expect-error с пояснением."
+    },
+    {
+      "id": "W08",
+      "kind": "line",
+      "files": [
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.js",
+        "**/*.mjs"
+      ],
+      "pattern": "biome-ignore",
+      "skipIf": "biome-ignore\\s+\\S+\\s*:\\s*\\S|expect\\(|toContain",
+      "message": "Отключение Biome без пояснения в той же строке. Формат: // biome-ignore lint/<правило>: почему иначе нельзя."
+    }
+  ],
+  "crossChecks": [],
+  "crossRepoChecks": [],
+  "gates": []
+}
