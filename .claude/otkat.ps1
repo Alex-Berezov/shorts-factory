@@ -1,4 +1,4 @@
-# Откат обвязки к снимку, сделанному install.ps1.
+﻿# Откат обвязки к снимку, сделанному install.ps1.
 # Запуск:  powershell -ExecutionPolicy Bypass -File .claude/otkat.ps1 [-Snapshot 2026-09-05_1200]
 # Для точечного отката файла, который в git, предпочтительнее: git checkout -- .claude/<файл>
 param([string]$Snapshot = "")

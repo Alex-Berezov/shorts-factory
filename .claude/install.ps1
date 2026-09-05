@@ -1,4 +1,4 @@
-# Установка обвязки агентов AI Shorts Factory.
+﻿# Установка обвязки агентов AI Shorts Factory.
 # Запуск из корня репозитория:  powershell -ExecutionPolicy Bypass -File .claude/install.ps1
 # Идемпотентно: снимок, сверка моделей, settings.local.json, самопроверка.
 

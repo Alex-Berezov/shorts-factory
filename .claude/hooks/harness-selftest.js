@@ -146,6 +146,20 @@ for (const kind of ['agents', 'commands']) {
   });
 }
 
+// ------------------------------------------------------------------ 3a. скрипты PowerShell
+check('install.ps1 / otkat.ps1 начинаются с UTF-8 BOM', () => {
+  // Windows PowerShell 5.1 читает .ps1 без BOM в системной кодировке и ломается на кириллице
+  // в строках; поймано владельцем при первом запуске установщика 05.09.2026.
+  const bad = [];
+  for (const f of ['install.ps1', 'otkat.ps1']) {
+    const p = path.join(CLAUDE, f);
+    if (!fs.existsSync(p)) { bad.push(f + ': нет файла'); continue; }
+    const b = fs.readFileSync(p);
+    if (!(b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf)) bad.push(f + ': без BOM');
+  }
+  return bad.length ? bad.join('; ') : true;
+});
+
 // ------------------------------------------------------------------ 4. settings.json
 check('settings.json: все хуки существуют на диске', () => {
   const s = readJson(path.join(CLAUDE, 'settings.json'));
