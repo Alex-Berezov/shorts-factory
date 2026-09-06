@@ -119,7 +119,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 - `loadEnv(source?)` для тестов (парсинг произвольного объекта без `process.env`).
 - Юнит-тесты: валидный пример, пустые строки, невалидный URL, отсутствующий `ADMIN_PASSWORD`.
 
-**DoD:** копия `.env.example` в `.env` запускает api/worker без ошибок парсинга; тесты схемы зелёные; попытка импортировать `env` в клиентском компоненте Next даёт ошибку сборки.
+**DoD:** копия `.env.example` в `.env`, в которой оператор задал только `ADMIN_PASSWORD`, запускает api/worker без ошибок парсинга; нетронутая копия падает ровно одной ошибкой с именем поля `ADMIN_PASSWORD` — шаблон не везёт рабочих секретов; тесты схемы зелёные; попытка импортировать `env` в клиентском компоненте Next даёт ошибку сборки.
 **Оценка:** 0.5 д. **Зависимости:** E0-02.
 
 ### E0-04. `@sf/db`: фабрика подключения, ревизия схемы, миграция 0000, первые репозитории
@@ -234,13 +234,13 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 
 **Сделать:**
 - `infra/docker/api.Dockerfile`, `worker.Dockerfile` (multi-stage: `pnpm fetch` → `pnpm install --frozen-lockfile --prod=false` → `pnpm deploy --filter <app>` → runtime `node:22-alpine` с `tsx`, решение 1), `web.Dockerfile` (Next standalone, `NEXT_OUTPUT_STANDALONE=1`).
-- Compose: сервисы `migrate` (одноразовый, `depends_on: postgres healthy`), `api`, `worker`, `web` (`depends_on: migrate completed`), `env_file: .env`, volume `media:/data/media`; наружу только web `:3000` (api — только внутри сети).
+- Compose: сервисы `migrate` (одноразовый, `depends_on: postgres healthy`), `api`, `worker`, `web` (`depends_on: migrate completed`), `env_file: .env`, volume `media:/data/media`; наружу только web `:3000` (api — только внутри сети). У api, worker и web объявить `NODE_ENV=production` явно (`environment:`), не полагаясь на fail-safe дефолт схемы: решение от 06.09 (E0-03) записывает дефолт только в `env`, а `process.env.NODE_ENV` остаётся пустым, и сторонние библиотеки уходят в dev-ветку.
 - Разделение: `docker-compose.yml` (полный стек) и профиль/override для dev, когда api/worker/web запускаются через `pnpm dev`, а в Docker — только postgres + redis (текущий сценарий).
 - Healthcheck-и api (`/health`) и worker (свежесть `worker:heartbeat`).
 - `infra/scripts/backup.sh`: ежедневный `pg_dump` с ротацией 14 дней + инструкция cron на VPS в `infra/README.md`.
 - Проверка на Windows (Docker Desktop + WSL2): перенос строк LF в скриптах (`.gitattributes`).
 
-**DoD:** на чистой машине `cp .env.example .env && docker compose up --build` → `http://localhost:3000` просит пароль, `/system` зелёный, миграции применены; `docker compose down && up` не теряет данные.
+**DoD:** на чистой машине `cp .env.example .env`, задать `ADMIN_PASSWORD` длиной не меньше 16 символов (Compose объявляет `NODE_ENV=production` явно, поэтому более короткий пароль роняет контейнеры на парсинге конфига), `docker compose up --build` → `http://localhost:3000` просит пароль, `/system` зелёный, миграции применены; `docker compose down && up` не теряет данные.
 **Оценка:** 1.5 д. **Зависимости:** E0-06, E0-08, E0-10.
 
 ### E0-12. CI: сервисы Postgres/Redis, кэш, интеграционные тесты, сборка образов

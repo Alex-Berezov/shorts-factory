@@ -5,11 +5,21 @@
   "type": "module",
   "main": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts",
+    ".": {
+      "browser": "./src/server.ts",
+      "default": "./src/index.ts"
+    },
+    "./server": "./src/server.ts",
     "./vitest/setup": "./vitest/setup.ts"
   },
-  "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run" },
-  "dependencies": { "zod": "^3.23.0", "dotenv": "^16.4.0" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "server-only": "^0.0.1",
+    "zod": "^3.23.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",

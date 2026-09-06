@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { overrideEnvFile } from "../src/env-file.js";
+import { testEnvFilePath } from "../src/paths.js";
 import { EnvSchema } from "../src/schema.js";
-import { assertVitestRun, loadTestEnv } from "./load-test-env.js";
+import { assertVitestRun } from "./assert-vitest-run.js";
 
 /**
  * Side-effect module: purges every `EnvSchema` key from `process.env` and
@@ -10,8 +11,5 @@ import { assertVitestRun, loadTestEnv } from "./load-test-env.js";
  */
 assertVitestRun(process.env);
 
-const envTestPath = fileURLToPath(
-  new URL("../../../.env.test", import.meta.url),
-);
-const fixtureText = readFileSync(envTestPath, "utf8");
-loadTestEnv(fixtureText, process.env, Object.keys(EnvSchema.shape));
+const fixtureText = readFileSync(testEnvFilePath, "utf8");
+overrideEnvFile(fixtureText, process.env, Object.keys(EnvSchema.shape));

@@ -9,7 +9,11 @@
     "typecheck": { "dependsOn": ["^typecheck"] },
     "test": {
       "dependsOn": ["^test"],
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/.env.test"]
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.env.test",
+        "$TURBO_ROOT$/.env.example"
+      ]
     },
     "test:int": { "dependsOn": ["^test:int"], "cache": false },
     "dev": { "cache": false, "persistent": true }

@@ -21,7 +21,7 @@ app.get("/health", async () => ({ ok: true, env: env.NODE_ENV }));
 
 // TODO(E0-06): basic auth, zod type provider, error handler, route registration.
 
-const port = 3001;
+const port = env.API_PORT;
 app.listen({ port, host: "0.0.0.0" }).catch((err) => {
   app.log.error(err);
   process.exit(1);
