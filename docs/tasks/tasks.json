@@ -22,8 +22,10 @@
       "E0-01"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
-    "started_at": "2026-09-06"
+    "status": "done",
+    "started_at": "2026-09-06",
+    "done_at": "2026-09-06",
+    "note": "Vitest на пакет, фикстура .env.test с чисткой ключей схемы, интеграционный контур test:int с отдельной базой"
   },
   {
     "id": "E0-03",
