@@ -52,8 +52,10 @@
       "E0-03"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
-    "started_at": "2026-09-06"
+    "status": "done",
+    "started_at": "2026-09-06",
+    "done_at": "2026-09-06",
+    "note": "фабрика подключения, ревизия схемы под §5, миграция 0000, seed и репозитории api_usage_log/app_setting"
   },
   {
     "id": "E0-05",
