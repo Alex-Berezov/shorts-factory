@@ -7,8 +7,10 @@
     "estimate_days": 0.5,
     "deps": [],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
-    "started_at": "2026-09-06"
+    "status": "done",
+    "started_at": "2026-09-06",
+    "done_at": "2026-09-06",
+    "note": "тулчейн Node 22 + pnpm, lockfile, конфиги Next/Tailwind, зелёные lint/typecheck/build"
   },
   {
     "id": "E0-02",
