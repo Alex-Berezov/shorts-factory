@@ -1,5 +1,11 @@
 import {
-  integer, jsonb, numeric, pgTable, serial, text, timestamp,
+  integer,
+  jsonb,
+  numeric,
+  pgTable,
+  serial,
+  text,
+  timestamp,
 } from "drizzle-orm/pg-core";
 
 export const experiment = pgTable("experiment", {
@@ -14,7 +20,9 @@ export const experiment = pgTable("experiment", {
 
 export const experimentRecommendation = pgTable("experiment_recommendation", {
   id: serial("id").primaryKey(),
-  generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  generatedAt: timestamp("generated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
   body: text("body").notNull(),
   confidence: numeric("confidence", { precision: 4, scale: 3 }),
   basedOn: jsonb("based_on").notNull(), // data window, features, sample sizes

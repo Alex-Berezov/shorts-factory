@@ -9,7 +9,9 @@
 import type { ContentDna } from "@sf/core";
 
 export interface AnalysisRequest {
-  source: { kind: "youtube_url"; url: string } | { kind: "local_file"; path: string };
+  source:
+    | { kind: "youtube_url"; url: string }
+    | { kind: "local_file"; path: string };
   pass: "full" | "hook_pass";
   promptVersion: string;
 }

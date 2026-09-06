@@ -4,13 +4,22 @@
  * Scans source files under apps/, packages/ and scripts/ for any of its forms.
  * Exit 1 with file:line on the first hit; exit 0 when clean.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const ROOT = new URL("..", import.meta.url).pathname.replace(
+  /^\/([A-Za-z]:)/,
+  "$1",
+);
 const SCAN = ["apps", "packages", "scripts"];
 const EXT = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs"]);
-const SKIP_DIRS = new Set(["node_modules", "dist", ".next", ".turbo", "coverage"]);
+const SKIP_DIRS = new Set([
+  "node_modules",
+  "dist",
+  ".next",
+  ".turbo",
+  "coverage",
+]);
 const BANNED = /search\.list|youtube\.search\s*\(|\/youtube\/v3\/search/;
 const SELF = /check-no-search-list|no-search-list|NEVER|never|запрещ/;
 
@@ -37,14 +46,17 @@ for (const top of SCAN) {
     if (file.endsWith("check-no-search-list.mjs")) continue; // this gate names the banned call itself
     const lines = readFileSync(file, "utf8").split(/\r?\n/);
     lines.forEach((line, i) => {
-      if (BANNED.test(line) && !SELF.test(line)) hits.push(`${relative(ROOT, file)}:${i + 1}: ${line.trim()}`);
+      if (BANNED.test(line) && !SELF.test(line))
+        hits.push(`${relative(ROOT, file)}:${i + 1}: ${line.trim()}`);
     });
   }
 }
 
 if (hits.length) {
-  console.error("YouTube search endpoint is banned (100 units/call). Use playlistItems.list + videos.list."); // no-search-list gate
-  for (const h of hits) console.error("  " + h);
+  console.error(
+    "YouTube search endpoint is banned (100 units/call). Use playlistItems.list + videos.list.",
+  ); // no-search-list gate
+  for (const h of hits) console.error(`  ${h}`);
   process.exit(1);
 }
 console.log("no-search-list: clean");

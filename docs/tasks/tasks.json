@@ -1,0 +1,1539 @@
+[
+  {
+    "id": "E0-01",
+    "epic": "E0",
+    "title": "Установка тулчейна и зелёные `lint` + `typecheck` на скелете",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [],
+    "doc": "30_E0_TASKS.md",
+    "status": "in_progress",
+    "started_at": "2026-09-06"
+  },
+  {
+    "id": "E0-02",
+    "epic": "E0",
+    "title": "Vitest: конфигурация, `.env.test`, разделение unit / integration",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-01"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-03",
+    "epic": "E0",
+    "title": "`@sf/config`: надёжный парсинг env и константы лимитов",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-02"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-04",
+    "epic": "E0",
+    "title": "`@sf/db`: фабрика подключения, ревизия схемы, миграция 0000, первые репозитории",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-03"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-05",
+    "epic": "E0",
+    "title": "`@sf/core`: базовые доменные типы, схема Content DNA, чистые хелперы",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-02",
+      "E0-04"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-06",
+    "epic": "E0",
+    "title": "`apps/api`: Fastify-скелет с auth, ошибками, логами и OpenAPI",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-04",
+      "E0-05"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-07",
+    "epic": "E0",
+    "title": "`@sf/contracts` и типизированный API-клиент",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-06"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-08",
+    "epic": "E0",
+    "title": "`apps/worker`: BullMQ-каркас, DLQ, cron-реестр, graceful shutdown, smoke-job",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E0-04",
+      "E0-05"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-09",
+    "epic": "E0",
+    "title": "Учёт стоимости внешних API и проверка бюджета",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-07",
+      "E0-08"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-10",
+    "epic": "E0",
+    "title": "`apps/web`: Next.js-скелет, layout с навигацией, basic auth, страница `/system`",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-07",
+      "E0-09"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-11",
+    "epic": "E0",
+    "title": "Docker: Dockerfile'ы api/worker/web, полный Compose, миграции, бэкап",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-06",
+      "E0-08",
+      "E0-10"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-12",
+    "epic": "E0",
+    "title": "CI: сервисы Postgres/Redis, кэш, интеграционные тесты, сборка образов",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-11"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-13",
+    "epic": "E0",
+    "title": "Документация разработчика, ADR, закрытие эпика",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-12"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-01",
+    "epic": "E1",
+    "title": "`@sf/youtube`: клиент Data API для публичных чтений",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-05",
+      "E0-09"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-02",
+    "epic": "E1",
+    "title": "Каналы: парсинг ввода, резолв, CRUD, API и контракты",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-06",
+      "E0-07",
+      "E1-01"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-03",
+    "epic": "E1",
+    "title": "Job `radar.sync-channels`: новые видео, фильтр Shorts, backfill",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-08",
+      "E1-02"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-04",
+    "epic": "E1",
+    "title": "Job `radar.snapshot`: тик, выбор due-точек, батч-снапшоты, недоступные видео",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E1-03"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-05",
+    "epic": "E1",
+    "title": "Базлайн канала: расчёт, backfill, ежедневный пересчёт",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E1-04"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-06",
+    "epic": "E1",
+    "title": "Job `radar.score` и `trend_signal`",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E1-05"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-07",
+    "epic": "E1",
+    "title": "Job `radar.cluster`: LLM-группировка сюжетов",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E0-09",
+      "E1-06"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-08",
+    "epic": "E1",
+    "title": "Квота YouTube: автопауза, автовозобновление, алерты",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-09",
+      "E1-03"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-09",
+    "epic": "E1",
+    "title": "API сигналов, видео и кластеров (контракты + роуты)",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E1-06",
+      "E1-07"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-10",
+    "epic": "E1",
+    "title": "UI «Radar»: каналы, таблица сигналов, карточка видео, кластеры",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E0-10",
+      "E1-09"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E1-11",
+    "epic": "E1",
+    "title": "Обкатка на реальных каналах, тюнинг, документация",
+    "estimate": "1 д (размазан по 2–3 календарным дням наблюдения)",
+    "estimate_days": 1,
+    "deps": [
+      "E1-10"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E2-01",
+    "epic": "E2",
+    "title": "Спайк: Gemini video understanding по YouTube URL",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-03"
+    ],
+    "doc": "32_E2_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E2-02",
+    "epic": "E2",
+    "title": "Реестр промптов и синк `prompt_version`",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-04"
+    ],
+    "doc": "32_E2_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E2-03",
+    "epic": "E2",
+    "title": "`VideoAnalysisClient`: полный проход по URL",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-09",
+      "E2-01",
+      "E2-02"
+    ],
+    "doc": "32_E2_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E2-04",
+    "epic": "E2",
+    "title": "Hook pass и режим локального файла",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E2-03"
+    ],
+    "doc": "32_E2_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E2-05",
+    "epic": "E2",
+    "title": "БД: миграция `0002_intel`, репозиторий анализов",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E2-04"
+    ],
+    "doc": "32_E2_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E2-06",
+    "epic": "E2",
+    "title": "Джобы `intel.analyze-video` и `intel.hook-pass`, автозапуск",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-08",
+      "E1-06",
+      "E2-05"
+    ],
+    "doc": "32_E2_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E2-07",
+    "epic": "E2",
+    "title": "API и контракты Intelligence",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E2-06"
+    ],
+    "doc": "32_E2_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E2-08",
+    "epic": "E2",
+    "title": "UI: карточка Content DNA",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E1-10",
+      "E2-07"
+    ],
+    "doc": "32_E2_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E2-09",
+    "epic": "E2",
+    "title": "Бюджет Gemini на `/system`",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-09",
+      "E2-06"
+    ],
+    "doc": "32_E2_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E2-10",
+    "epic": "E2",
+    "title": "Оценочный набор и проверка качества",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E2-08"
+    ],
+    "doc": "32_E2_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E3-01",
+    "epic": "E3",
+    "title": "`@sf/core`: схема карточки, ранжирование, дедупликация, статусы",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-05"
+    ],
+    "doc": "33_E3_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E3-02",
+    "epic": "E3",
+    "title": "БД: миграция `0003_inbox`, репозитории",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-04",
+      "E3-01"
+    ],
+    "doc": "33_E3_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E3-03",
+    "epic": "E3",
+    "title": "Отбор кандидатов и генерация карточки через LLM",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E1-07",
+      "E2-05",
+      "E3-01"
+    ],
+    "doc": "33_E3_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E3-04",
+    "epic": "E3",
+    "title": "Job `inbox.build`",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E3-02",
+      "E3-03"
+    ],
+    "doc": "33_E3_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E3-05",
+    "epic": "E3",
+    "title": "Job `inbox.later-return` и истечение",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E3-04"
+    ],
+    "doc": "33_E3_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E3-06",
+    "epic": "E3",
+    "title": "API и контракты Inbox",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E3-05"
+    ],
+    "doc": "33_E3_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E3-07",
+    "epic": "E3",
+    "title": "UI Inbox",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E0-10",
+      "E3-06"
+    ],
+    "doc": "33_E3_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E3-08",
+    "epic": "E3",
+    "title": "Страница Ideas (конвейер) и переходы статусов",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E3-07"
+    ],
+    "doc": "33_E3_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E3-09",
+    "epic": "E3",
+    "title": "Обкатка: 5 утренних сборок, тюнинг весов",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E3-08"
+    ],
+    "doc": "33_E3_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E4-01",
+    "epic": "E4",
+    "title": "`@sf/core`: схемы брифа и правило верификации",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-05"
+    ],
+    "doc": "34_E4_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E4-02",
+    "epic": "E4",
+    "title": "`LlmClient`: grounding, urlContext, нормализация источников",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E1-07"
+    ],
+    "doc": "34_E4_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E4-03",
+    "epic": "E4",
+    "title": "Промпты `research.plan`, `research.verify`, `research.brief`",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E2-02",
+      "E4-01",
+      "E4-02"
+    ],
+    "doc": "34_E4_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E4-04",
+    "epic": "E4",
+    "title": "БД: миграция `0004_research`, репозиторий версий",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E4-01"
+    ],
+    "doc": "34_E4_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E4-05",
+    "epic": "E4",
+    "title": "Job `research.run`: оркестрация plan → verify → brief",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E3-06",
+      "E4-03",
+      "E4-04"
+    ],
+    "doc": "34_E4_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E4-06",
+    "epic": "E4",
+    "title": "API и контракты Research",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E4-05"
+    ],
+    "doc": "34_E4_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E4-07",
+    "epic": "E4",
+    "title": "UI: страница брифа",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E3-07",
+      "E4-06"
+    ],
+    "doc": "34_E4_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E4-08",
+    "epic": "E4",
+    "title": "Оценка качества на 10 идеях",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E4-07"
+    ],
+    "doc": "34_E4_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E5-01",
+    "epic": "E5",
+    "title": "`@sf/core`: схема скрипта, теги, оценка длительности, анти-плагиат, проверка claims",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-05",
+      "E4-01"
+    ],
+    "doc": "35_E5_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E5-02",
+    "epic": "E5",
+    "title": "Промпты `script.hooks`, `script.master`, `script.revise`",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E2-02",
+      "E5-01"
+    ],
+    "doc": "35_E5_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E5-03",
+    "epic": "E5",
+    "title": "БД: миграция `0005_script`, репозиторий",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E5-01"
+    ],
+    "doc": "35_E5_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E5-04",
+    "epic": "E5",
+    "title": "Job `script.generate` (+ regenerate / revise)",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E4-06",
+      "E5-02",
+      "E5-03"
+    ],
+    "doc": "35_E5_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E5-05",
+    "epic": "E5",
+    "title": "API и контракты Script",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E5-04"
+    ],
+    "doc": "35_E5_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E5-06",
+    "epic": "E5",
+    "title": "UI: редактор скрипта",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E4-07",
+      "E5-05"
+    ],
+    "doc": "35_E5_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E5-07",
+    "epic": "E5",
+    "title": "Проверка качества на 5 идеях",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E5-06"
+    ],
+    "doc": "35_E5_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E6-01",
+    "epic": "E6",
+    "title": "`@sf/core`: схема пакета, построитель таймлайна, Markdown-рендер",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E5-01"
+    ],
+    "doc": "36_E6_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E6-02",
+    "epic": "E6",
+    "title": "Промпт `production.package` и job",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E2-02",
+      "E5-05",
+      "E6-01"
+    ],
+    "doc": "36_E6_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E6-03",
+    "epic": "E6",
+    "title": "БД: миграция `0006_production`, репозитории",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E6-01"
+    ],
+    "doc": "36_E6_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E6-04",
+    "epic": "E6",
+    "title": "API и контракты Production",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E6-02",
+      "E6-03"
+    ],
+    "doc": "36_E6_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E6-05",
+    "epic": "E6",
+    "title": "UI: страница пакета",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E5-06",
+      "E6-04"
+    ],
+    "doc": "36_E6_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E6-06",
+    "epic": "E6",
+    "title": "Первый реальный Short по пакету",
+    "estimate": "1 д (без учёта времени монтажа)",
+    "estimate_days": 1,
+    "deps": [
+      "E6-05"
+    ],
+    "doc": "36_E6_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E7-01",
+    "epic": "E7",
+    "title": "Google OAuth2 offline flow и шифрование токена",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-06",
+      "E0-09"
+    ],
+    "doc": "37_E7_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E7-02",
+    "epic": "E7",
+    "title": "Свой канал как `tracked_channel`, реестр `own_video`",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E1-03",
+      "E7-01"
+    ],
+    "doc": "37_E7_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E7-03",
+    "epic": "E7",
+    "title": "`AnalyticsApiClient`",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E7-01"
+    ],
+    "doc": "37_E7_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E7-04",
+    "epic": "E7",
+    "title": "Job `analytics.ingest`",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E7-02",
+      "E7-03"
+    ],
+    "doc": "37_E7_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E7-05",
+    "epic": "E7",
+    "title": "Витрина `own_video_metrics` и миграция `0007_analytics`",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E1-05",
+      "E7-04"
+    ],
+    "doc": "37_E7_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E7-06",
+    "epic": "E7",
+    "title": "Журнал дабов `dub_track`: форма и API",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E7-02"
+    ],
+    "doc": "37_E7_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E7-07",
+    "epic": "E7",
+    "title": "API и контракты Analytics",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E7-05",
+      "E7-06"
+    ],
+    "doc": "37_E7_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E7-08",
+    "epic": "E7",
+    "title": "UI Analytics",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E0-10",
+      "E7-07"
+    ],
+    "doc": "37_E7_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E7-09",
+    "epic": "E7",
+    "title": "Сверка с YouTube Studio, ADR",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E7-08"
+    ],
+    "doc": "37_E7_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E8-01",
+    "epic": "E8",
+    "title": "`@sf/core`: схема фич с провенансом и автозаполнение",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E2-04",
+      "E5-01"
+    ],
+    "doc": "38_E8_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E8-02",
+    "epic": "E8",
+    "title": "`@sf/core/stats`",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-05"
+    ],
+    "doc": "38_E8_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E8-03",
+    "epic": "E8",
+    "title": "БД: миграция `0008_experiments`, репозитории",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E8-01"
+    ],
+    "doc": "38_E8_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E8-04",
+    "epic": "E8",
+    "title": "Job `experiment.features` и ручная правка",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E7-05",
+      "E8-03"
+    ],
+    "doc": "38_E8_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E8-05",
+    "epic": "E8",
+    "title": "Job `experiment.recompute`",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E8-02",
+      "E8-04"
+    ],
+    "doc": "38_E8_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E8-06",
+    "epic": "E8",
+    "title": "Рекомендации",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E1-07",
+      "E8-05"
+    ],
+    "doc": "38_E8_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E8-07",
+    "epic": "E8",
+    "title": "Планировщик экспериментов",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E5-04",
+      "E8-06"
+    ],
+    "doc": "38_E8_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E8-08",
+    "epic": "E8",
+    "title": "API и контракты Experiments",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E8-07"
+    ],
+    "doc": "38_E8_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E8-09",
+    "epic": "E8",
+    "title": "UI Experiments",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E8-08"
+    ],
+    "doc": "38_E8_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E8-10",
+    "epic": "E8",
+    "title": "Валидация на реальных данных, ADR",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E8-09"
+    ],
+    "doc": "38_E8_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E9-01",
+    "epic": "E9",
+    "title": "Матрица языков",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E7-06"
+    ],
+    "doc": "39_E9_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E9-02",
+    "epic": "E9",
+    "title": "Mode A: сетка ревью авто-дабов и сравнительная таблица",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E9-01"
+    ],
+    "doc": "39_E9_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E9-03",
+    "epic": "E9",
+    "title": "`@sf/core`: схема локализованного скрипта, тайминг, captions, QA-правила",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E5-01"
+    ],
+    "doc": "39_E9_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E9-04",
+    "epic": "E9",
+    "title": "Промпты `localize.script`, `localize.metadata`, `localize.tighten`, `localize.qa`",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E2-02",
+      "E9-03"
+    ],
+    "doc": "39_E9_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E9-05",
+    "epic": "E9",
+    "title": "Job `localize.script`",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E5-05",
+      "E9-04"
+    ],
+    "doc": "39_E9_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E9-06",
+    "epic": "E9",
+    "title": "БД: миграция `0009_localization`, репозитории, `@sf/storage`",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E9-03"
+    ],
+    "doc": "39_E9_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E9-07",
+    "epic": "E9",
+    "title": "API, контракты и UI локализации по видео",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E5-06",
+      "E9-05",
+      "E9-06"
+    ],
+    "doc": "39_E9_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E9-08",
+    "epic": "E9",
+    "title": "Handoff-пакет",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E9-07"
+    ],
+    "doc": "39_E9_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E9-09",
+    "epic": "E9",
+    "title": "Пилот: 2 языка × 2 видео, ADR",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E9-08"
+    ],
+    "doc": "39_E9_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E10-01",
+    "epic": "E10",
+    "title": "Интерфейс провайдера, реестр адаптеров, аудио-утилиты",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-11",
+      "E9-06"
+    ],
+    "doc": "40_E10_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E10-02",
+    "epic": "E10",
+    "title": "Адаптер ElevenLabs",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E10-01"
+    ],
+    "doc": "40_E10_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E10-03",
+    "epic": "E10",
+    "title": "Адаптеры Google Chirp 3 HD и Gemini TTS",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E10-01"
+    ],
+    "doc": "40_E10_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E10-04",
+    "epic": "E10",
+    "title": "Адаптеры OpenAI TTS и Cartesia",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E10-01"
+    ],
+    "doc": "40_E10_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E10-05",
+    "epic": "E10",
+    "title": "Реестр голосов `voice_profile`",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E10-02",
+      "E10-04"
+    ],
+    "doc": "40_E10_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E10-06",
+    "epic": "E10",
+    "title": "Bake-off: раннер и UI оценок",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E10-05",
+      "E9-07"
+    ],
+    "doc": "40_E10_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E10-07",
+    "epic": "E10",
+    "title": "Job `tts.generate`: финальная дорожка Mode B",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E10-06",
+      "E9-08"
+    ],
+    "doc": "40_E10_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E10-08",
+    "epic": "E10",
+    "title": "Бюджет TTS",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E10-06"
+    ],
+    "doc": "40_E10_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E10-09",
+    "epic": "E10",
+    "title": "Проведение bake-off и решение, ADR",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E10-08"
+    ],
+    "doc": "40_E10_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E11-01",
+    "epic": "E11",
+    "title": "Расширение OAuth scopes и загрузка медиа в приложение",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E7-01",
+      "E9-06"
+    ],
+    "doc": "41_E11_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E11-02",
+    "epic": "E11",
+    "title": "Операции записи Data API",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E1-01",
+      "E1-08",
+      "E11-01"
+    ],
+    "doc": "41_E11_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E11-03",
+    "epic": "E11",
+    "title": "Планировщик и job'ы `publish.upload`, `publish.sync-status`",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E11-02",
+      "E6-04",
+      "E7-02"
+    ],
+    "doc": "41_E11_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E11-04",
+    "epic": "E11",
+    "title": "Публикация локализованных метаданных и captions",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E11-03",
+      "E9-07"
+    ],
+    "doc": "41_E11_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E11-05",
+    "epic": "E11",
+    "title": "Чек-лист кастомного аудио (ручной шаг Studio)",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E11-03",
+      "E13-05",
+      "E9-08"
+    ],
+    "doc": "41_E11_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E11-06",
+    "epic": "E11",
+    "title": "API и контракты Publishing",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E11-04"
+    ],
+    "doc": "41_E11_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E11-07",
+    "epic": "E11",
+    "title": "UI: календарь и страница публикации",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E11-06",
+      "E6-05"
+    ],
+    "doc": "41_E11_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E11-08",
+    "epic": "E11",
+    "title": "Первая реальная публикация через приложение, ADR",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E11-07"
+    ],
+    "doc": "41_E11_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E12-01",
+    "epic": "E12",
+    "title": "`@sf/core`: схема журнала и CSV-парсер",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-05"
+    ],
+    "doc": "42_E12_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E12-02",
+    "epic": "E12",
+    "title": "API: импорт с dry-run, форма записи",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-06",
+      "E12-01"
+    ],
+    "doc": "42_E12_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E12-03",
+    "epic": "E12",
+    "title": "UI: форма и CSV-импорт",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-10",
+      "E12-02"
+    ],
+    "doc": "42_E12_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E12-04",
+    "epic": "E12",
+    "title": "Форма результатов теста авто-дабов",
+    "estimate": "0.5–1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E12-03"
+    ],
+    "doc": "42_E12_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E12-05",
+    "epic": "E12",
+    "title": "Маппинг на синк и фичи для E8 (после E7)",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E7-02",
+      "E8-01"
+    ],
+    "doc": "42_E12_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E13-01",
+    "epic": "E13",
+    "title": "Навигация и оболочка",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-10"
+    ],
+    "doc": "43_E13_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E13-02",
+    "epic": "E13",
+    "title": "Очереди, планировщики, DLQ — просмотр и управление",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-08",
+      "E0-09"
+    ],
+    "doc": "43_E13_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E13-03",
+    "epic": "E13",
+    "title": "История расходов и прогнозы",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-09"
+    ],
+    "doc": "43_E13_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E13-04",
+    "epic": "E13",
+    "title": "Центр алертов",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E13-03"
+    ],
+    "doc": "43_E13_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E13-05",
+    "epic": "E13",
+    "title": "Внешние условия",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-06"
+    ],
+    "doc": "43_E13_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E13-06",
+    "epic": "E13",
+    "title": "Здоровье интеграций",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-09",
+      "E7-01"
+    ],
+    "doc": "43_E13_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E13-07",
+    "epic": "E13",
+    "title": "Защита доступа",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-10"
+    ],
+    "doc": "43_E13_TASKS.md",
+    "status": "todo"
+  },
+  {
+    "id": "E0-01A",
+    "epic": "E0",
+    "title": "Включить гейт build в rules.sf.json",
+    "estimate": "0.1 д",
+    "estimate_days": 0.1,
+    "deps": [
+      "E0-01"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "todo",
+    "added_at": "2026-09-06"
+  }
+]

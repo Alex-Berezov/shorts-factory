@@ -4,3 +4,4 @@ _Добавляется автоматически командами `node scri
 
 - 2026-09-05 📝 Декомпозированы эпики E0–E13 (`docs/30_E0_TASKS.md` … `docs/43_E13_TASKS.md`), заведён трекер задач (`docs/tasks/tasks.json`, `scripts/tasks.mjs`, `docs/00_STATUS.md`).
 - 2026-09-05 🛠 Собрана обвязка автономной разработки: `.claude/` (11 агентов, 10 команд, 8 хуков, правила, самопроверка), `docs/60_HARNESS.md`, `docs/61_HOW_TO_WORK.md`, `docs/DECISIONS.md`, `docs/TECH_DEBT.md`; репозиторий инициализирован (`git init`, ветка `main`).
+- 2026-09-06 ➕ **E0-01A** Включить гейт build в rules.sf.json (добавлена в трекер)

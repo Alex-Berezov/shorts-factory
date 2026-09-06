@@ -1,5 +1,5 @@
-import Fastify from "fastify";
 import { env } from "@sf/config";
+import Fastify from "fastify";
 
 /**
  * REST API entry point. Route modules are registered per epic:
@@ -19,7 +19,7 @@ const app = Fastify({ logger: true });
 
 app.get("/health", async () => ({ ok: true, env: env.NODE_ENV }));
 
-// TODO(E0): basic auth, zod type provider, error handler, route registration.
+// TODO(E0-06): basic auth, zod type provider, error handler, route registration.
 
 const port = 3001;
 app.listen({ port, host: "0.0.0.0" }).catch((err) => {

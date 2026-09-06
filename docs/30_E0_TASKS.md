@@ -40,6 +40,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 5. **Идемпотентность через детерминированный `jobId`.** Каждый тип job объявляет функцию `jobIdFrom(payload)`; повторная постановка с тем же id BullMQ игнорирует. Чистые билдеры id живут в `@sf/core`.
 6. **Тесты двух видов.** Юнит-тесты (`*.test.ts`) — без инфраструктуры, всегда. Интеграционные (`*.int.test.ts`) — против настоящих Postgres/Redis из Compose, запускаются, когда задан `DATABASE_URL`/`REDIS_URL` (локально и в CI через services). Testcontainers не берём.
 7. **Локальная разработка на Windows.** Скрипты в `package.json` кросс-платформенные (никакого bash). Docker Desktop + WSL2 backend. Bash-скрипты допустимы только в `infra/scripts` (запуск на VPS).
+8. **`apps/web` собирается как обычное Next-приложение по умолчанию.** `output: "standalone"` включается только флагом `NEXT_OUTPUT_STANDALONE=1` при сборке образа (`web.Dockerfile`, решает `next.config.ts`) — обычная сборка (локально, CI) не создаёт trace-копию `node_modules` и не требует прав на symlink.
 
 ---
 
@@ -54,14 +55,28 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 **Сделать:**
 - Зафиксировать Node 22 (`.nvmrc`/`.node-version`), corepack + `packageManager` (уже есть), `.editorconfig`.
 - `pnpm install`, закоммитить `pnpm-lock.yaml` (закрывает D1).
+- Починить `.github/workflows/ci.yml`: `pnpm/action-setup@v4` падает с «Multiple versions of pnpm specified» - убрать `with: { version: 9 }`, версию задаёт `packageManager` в `package.json` (первый прогон CI 05.09.2026, run #1). Правка конвейера идёт через `unlock.txt` и решение техлида; ни один шаг не снимается.
 - Довести `biome.json`: JSX/TSX, `organizeImports`, игнор `migrations/**`.
-- Добавить недостающее в `apps/web`: `next.config.ts` (`transpilePackages`, `output: "standalone"`), `next-env.d.ts`, `@types/node`, `@types/react-dom`, `postcss.config`, `tailwind.config` (часть D4; сам UI — в E0-10).
+- Добавить недостающее в `apps/web`: `next.config.ts` (`output` по `NEXT_OUTPUT_STANDALONE=1`), `next-env.d.ts`, `@types/node`, `@types/react-dom`, `postcss.config`, `tailwind.config` (часть D4; сам UI — в E0-10).
 - Убрать из `turbo.json` зависимость `typecheck`/`test` от `^build` (у пакетов нет build — см. решение 1) или оставить с пояснением; добавить `lint` как turbo-task не нужно — Biome запускается из корня.
 - Убедиться, что `pnpm lint` и `pnpm typecheck` проходят по всем workspace-пакетам.
-- Включить гейт `build` в `.claude/hooks/rules.sf.json` (`when: never` → `glob:{apps/**,packages/**,package.json,pnpm-lock.yaml,turbo.json,tsconfig*.json}`): он выключен на старте, потому что до этой задачи сборка красная по причине, не относящейся к правке. Правка обвязки идёт через `unlock.txt` и решение техлида, с пробой в `harness-selftest.js` и зелёным `pnpm build`.
+- Включение гейта `build` — отдельная задача E0-01A (внешнее предусловие: разрешение владельца на правку `.claude/hooks/**`).
 
-**DoD:** на чистом клоне `pnpm install && pnpm lint && pnpm typecheck && pnpm build` зелёные; lockfile в репозитории; гейт `build` включён.
+**DoD:** на чистом клоне `pnpm install && pnpm lint && pnpm typecheck && pnpm build` зелёные; lockfile в репозитории. Гейт `build` — см. E0-01A.
 **Оценка:** 0.5 д. **Зависимости:** нет.
+
+### E0-01A. Включить гейт build в rules.sf.json
+
+**Цель:** усилить обвязку так, чтобы любая правка `apps/**`/`packages/**`/корневых конфигов, ломающая `next build`, не уходила в коммит без сборки.
+
+**Сделать:**
+- `.claude/hooks/rules.sf.json`: у гейта `build` `when: "never"` → `"glob:{apps/**,packages/**,package.json,pnpm-lock.yaml,turbo.json,tsconfig*.json}"`, текст `note` переписать (сейчас он обещает включение в E0-01 — обещание не выполнено, гейт остался выключен).
+- `.claude/hooks/harness-selftest.js`: две пробы L-008 — на выбор гейта `build` при изменённом файле под glob и на пропуск при изменении только `docs/**`.
+
+**DoD:** `node .claude/hooks/harness-selftest.js` зелёный со включёнными пробами L-008; полный `node .claude/hooks/gates.js` при изменении файлов под glob запускает `build`.
+**Оценка:** 0.1 д. **Зависимости:** E0-01.
+
+Причина отдельной задачи: внешнее предусловие — разрешение владельца на правку `.claude/hooks/**`; правка отклоняется системой разрешений сессии.
 
 ### E0-02. Vitest: конфигурация, `.env.test`, разделение unit / integration
 
@@ -202,7 +217,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 **Цель:** `docker compose up` поднимает весь стек с нуля (AC эпика, закрывает D6).
 
 **Сделать:**
-- `infra/docker/api.Dockerfile`, `worker.Dockerfile` (multi-stage: `pnpm fetch` → `pnpm install --frozen-lockfile --prod=false` → `pnpm deploy --filter <app>` → runtime `node:22-alpine` с `tsx`, решение 1), `web.Dockerfile` (Next standalone).
+- `infra/docker/api.Dockerfile`, `worker.Dockerfile` (multi-stage: `pnpm fetch` → `pnpm install --frozen-lockfile --prod=false` → `pnpm deploy --filter <app>` → runtime `node:22-alpine` с `tsx`, решение 1), `web.Dockerfile` (Next standalone, `NEXT_OUTPUT_STANDALONE=1`).
 - Compose: сервисы `migrate` (одноразовый, `depends_on: postgres healthy`), `api`, `worker`, `web` (`depends_on: migrate completed`), `env_file: .env`, volume `media:/data/media`; наружу только web `:3000` (api — только внутри сети).
 - Разделение: `docker-compose.yml` (полный стек) и профиль/override для dev, когда api/worker/web запускаются через `pnpm dev`, а в Docker — только postgres + redis (текущий сценарий).
 - Healthcheck-и api (`/health`) и worker (свежесть `worker:heartbeat`).

@@ -1,9 +1,20 @@
 import {
-  integer, jsonb, numeric, pgEnum, pgTable, serial, text, timestamp,
+  integer,
+  jsonb,
+  numeric,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
 } from "drizzle-orm/pg-core";
 import { trackedVideo } from "./radar.js";
 
-export const analysisKind = pgEnum("analysis_kind", ["full", "hook_pass", "own_video"]);
+export const analysisKind = pgEnum("analysis_kind", [
+  "full",
+  "hook_pass",
+  "own_video",
+]);
 
 /**
  * Every Gemini analysis result. dna JSONB is validated against
@@ -19,5 +30,7 @@ export const videoAnalysis = pgTable("video_analysis", {
   promptVersion: text("prompt_version").notNull(),
   dna: jsonb("dna").notNull(),
   costUsd: numeric("cost_usd", { precision: 10, scale: 4 }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 });

@@ -6,9 +6,10 @@ dist/
 *.local
 /data/
 coverage/
+*.tsbuildinfo
 
 # agent harness: mutable state and case files
-tasks/
+/tasks/
 .claude/settings.local.json
 .claude/.qa-state
 .claude/.task-current

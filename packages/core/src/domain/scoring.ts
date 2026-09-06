@@ -40,5 +40,7 @@ export function trendScore(
   // log-dampened to avoid mega-channels drowning everything
   const lv = Math.log10(Math.max(vph, 1));
   const la = Math.sign(accel) * Math.log10(Math.abs(accel) + 1);
-  return w.velocity * lv + w.acceleration * la + w.baselineRatio * baselineRatio;
+  return (
+    w.velocity * lv + w.acceleration * la + w.baselineRatio * baselineRatio
+  );
 }

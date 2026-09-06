@@ -6,7 +6,9 @@ import { z } from "zod";
  * Every service imports `env` from here; startup crashes on invalid config.
  */
 const EnvSchema = z.object({
-  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  NODE_ENV: z
+    .enum(["development", "test", "production"])
+    .default("development"),
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
   MEDIA_DIR: z.string().default("./data/media"),
