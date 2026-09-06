@@ -1535,7 +1535,9 @@
       "E0-01"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "todo",
-    "added_at": "2026-09-06"
+    "status": "blocked",
+    "added_at": "2026-09-06",
+    "started_at": "2026-09-06",
+    "blocked_reason": "внешнее предусловие: session permission layer запрещает Write/Edit/Bash-запись в .claude/.task-current, .claude/scope.txt, .claude/unlock.txt даже в режиме dontAsk/bypassPermissions - нужна ручная проверка режима разрешений сессии"
   }
 ]

@@ -68,7 +68,7 @@ Say "модели команд и агентов сверены" "Green"
 $localPath = Join-Path $ClaudeDir "settings.local.json"
 $local = if (Test-Path $localPath) { Get-Content $localPath -Raw -Encoding UTF8 | ConvertFrom-Json } else { [PSCustomObject]@{} }
 $permissions = [PSCustomObject]@{
-    defaultMode = "dontAsk"
+    defaultMode = "bypassPermissions"
     allow = @("Read", "Grep", "Glob", "Write", "Edit", "MultiEdit", "Bash", "Task", "Skill(code-review)", "Skill(qa)")
     ask = @()
 }
@@ -76,7 +76,7 @@ if ($null -ne $local.PSObject.Properties["permissions"]) { $local.permissions = 
 else { $local | Add-Member -NotePropertyName "permissions" -NotePropertyValue $permissions }
 $json = $local | ConvertTo-Json -Depth 20
 [System.IO.File]::WriteAllText($localPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-Say "settings.local.json записан (dontAsk + allow)" "Green"
+Say "settings.local.json записан (bypassPermissions + allow)" "Green"
 
 # --- 5. Самопроверка ---
 $selftest = Join-Path $ClaudeDir "hooks\harness-selftest.js"

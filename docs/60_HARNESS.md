@@ -144,7 +144,9 @@ node .claude/hooks/harness-selftest.js
 ```
 
 Установщик делает снимок `.claude/` в `../.claude-snapshots/` (10 последних), сверяет модели
-у команд и агентов, пишет `settings.local.json` (режим разрешений `dontAsk`, allow-список),
+у команд и агентов, пишет `settings.local.json` (режим разрешений `bypassPermissions`, allow-список; режим `dontAsk`
+молча отклонял встроенные запросы Claude Code на запись в `.claude/**`, и `/auto` не мог вести
+`.task-current`, `unlock.txt`, `scope.txt`),
 гоняет самопроверку. Хуки подхватываются новой сессией.
 
 Откат: правил руками и стало хуже - `git checkout -- .claude/<файл>` (обвязка в git вместе
