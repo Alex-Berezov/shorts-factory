@@ -98,6 +98,9 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 
 **Сделать:**
 - `.claude/hooks/rules.sf.json`: у гейта `test` `when: "never"` → `"always"`; у гейта `test:int` `"never"` → `"glob:{packages/db/**,apps/**}"`; текст `note` переписать под факт.
+- `.claude/hooks/rules.sf.json`: `note` правила про `.env*` привести к формулировке CLAUDE.md
+  темы владельца 1 (исключение для корневых `.env.example`/`.env.test`) - в E0-02 недостижимо
+  слоем разрешений сессии.
 - `.claude/hooks/harness-selftest.js`: пробы L-008 на выбор и на пропуск обоих гейтов.
 
 **DoD:** `node .claude/hooks/harness-selftest.js` зелёный со включёнными пробами; `node .claude/hooks/gates.js --list` показывает `test` и `test:int` в списке запускаемого.

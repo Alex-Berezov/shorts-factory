@@ -4,7 +4,15 @@
   "private": true,
   "type": "module",
   "main": "src/index.ts",
-  "scripts": { "typecheck": "tsc --noEmit" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./vitest/setup": "./vitest/setup.ts"
+  },
+  "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run" },
   "dependencies": { "zod": "^3.23.0", "dotenv": "^16.4.0" },
-  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^5.6.0" }
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
 }

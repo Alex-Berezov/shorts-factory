@@ -124,7 +124,7 @@ shorts_factory_project/
 | lint | `pnpm lint` | всегда |
 | typecheck | `pnpm typecheck` | всегда |
 | test | `pnpm test` | всегда |
-| test:int | `pnpm test:int` | `never` до E0-02 (там включается на `packages/db/**`, `apps/**`) |
+| test:int | `pnpm test:int` | `never` до E0-02A (там включается на `packages/db/**`, `apps/**`) |
 | build | `pnpm build` | изменены `apps/**`, `packages/**`, корневые конфиги |
 | no-search-list | `node scripts/check-no-search-list.mjs` | всегда |
 | tracker | `node scripts/tasks.mjs render --check` | изменены `docs/tasks/**`, `docs/00_STATUS.md` |

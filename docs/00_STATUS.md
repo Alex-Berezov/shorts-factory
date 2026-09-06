@@ -6,27 +6,25 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-09-06. **Не �
 
 - **Прогресс:** `░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 1/123 задач, 0.5 / 139.2 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** ничего — возьмите задачу из «Следующие»
-- **Заблокировано:** [E0-01A](30_E0_TASKS.md#e0-01a-включить-гейт-build-в-rulessfjson) (внешнее предусловие: session permission layer запрещает Write/Edit/Bash-запись в .claude/.task-current, .claude/scope.txt, .claude/unlock.txt даже в режиме dontAsk/bypassPermissions - нужна ручная проверка режима разрешений сессии); [E0-02A](30_E0_TASKS.md#e0-02a-включить-гейты-test-и-testint-в-rulessfjson) (внешнее предусловие: слой разрешений сессии отклоняет любую запись в .claude/** (Write/Edit/Bash) при bypassPermissions и явном allow - снимается только вручную владельцем; исполняется одним заходом с E0-01A)
+- **В работе:** [E0-02](30_E0_TASKS.md#e0-02-vitest-конфигурация-envtest-разделение-unit-integration) Vitest: конфигурация, `.env.test`, разделение unit / integration
+- **Заблокировано:** [E0-01A](30_E0_TASKS.md#e0-01a-включить-гейт-build-в-rulessfjson) (запись в .claude/hooks/rules.sf.json отклоняется инструментами Write/Edit (проверено 06.09 в заходе E0-02: 4 попытки у worker и 1 у оркестратора, текст отказа - denied because Claude Code is running in don't ask mode); источник отказа в этом заходе установить не удалось - deny-правила на .claude/** нет ни в глобальном, ни в проектном settings, allow есть; успешной записи в .claude/hooks/** в заходе не было ни разу; обход через Bash запрещён правилами, снимает только владелец); [E0-02A](30_E0_TASKS.md#e0-02a-включить-гейты-test-и-testint-в-rulessfjson) (запись в .claude/hooks/rules.sf.json отклоняется инструментами Write/Edit (проверено 06.09 в заходе E0-02: 4 попытки у worker и 1 у оркестратора, текст отказа - denied because Claude Code is running in don't ask mode); источник отказа установить не удалось - deny-правила на .claude/** нет ни в глобальном, ни в проектном settings, allow есть; обход через Bash запрещён, снимает только владелец; исполняется одним заходом с E0-01A)
 
 ## Сейчас в работе
 
-_Нет задач в работе._
+| Задача | Название | Оценка | Начата |
+|---|---|---|---|
+| [E0-02](30_E0_TASKS.md#e0-02-vitest-конфигурация-envtest-разделение-unit-integration) | Vitest: конфигурация, `.env.test`, разделение unit / integration | 0.5 д | 2026-09-06 |
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
-| Задача | Название | Оценка | Эпик |
-|---|---|---|---|
-| [E0-02](30_E0_TASKS.md#e0-02-vitest-конфигурация-envtest-разделение-unit-integration) | Vitest: конфигурация, `.env.test`, разделение unit / integration | 0.5 д | E0 |
-
-Взять в работу: `node scripts/tasks.mjs start E0-02`
+_Нет доступных задач: всё либо сделано, либо ждёт зависимостей._
 
 ## Заблокировано
 
 | Задача | Название | Причина |
 |---|---|---|
-| [E0-01A](30_E0_TASKS.md#e0-01a-включить-гейт-build-в-rulessfjson) | Включить гейт build в rules.sf.json | внешнее предусловие: session permission layer запрещает Write/Edit/Bash-запись в .claude/.task-current, .claude/scope.txt, .claude/unlock.txt даже в режиме dontAsk/bypassPermissions - нужна ручная проверка режима разрешений сессии |
-| [E0-02A](30_E0_TASKS.md#e0-02a-включить-гейты-test-и-testint-в-rulessfjson) | Включить гейты test и test:int в rules.sf.json | внешнее предусловие: слой разрешений сессии отклоняет любую запись в .claude/** (Write/Edit/Bash) при bypassPermissions и явном allow - снимается только вручную владельцем; исполняется одним заходом с E0-01A |
+| [E0-01A](30_E0_TASKS.md#e0-01a-включить-гейт-build-в-rulessfjson) | Включить гейт build в rules.sf.json | запись в .claude/hooks/rules.sf.json отклоняется инструментами Write/Edit (проверено 06.09 в заходе E0-02: 4 попытки у worker и 1 у оркестратора, текст отказа - denied because Claude Code is running in don't ask mode); источник отказа в этом заходе установить не удалось - deny-правила на .claude/** нет ни в глобальном, ни в проектном settings, allow есть; успешной записи в .claude/hooks/** в заходе не было ни разу; обход через Bash запрещён правилами, снимает только владелец |
+| [E0-02A](30_E0_TASKS.md#e0-02a-включить-гейты-test-и-testint-в-rulessfjson) | Включить гейты test и test:int в rules.sf.json | запись в .claude/hooks/rules.sf.json отклоняется инструментами Write/Edit (проверено 06.09 в заходе E0-02: 4 попытки у worker и 1 у оркестратора, текст отказа - denied because Claude Code is running in don't ask mode); источник отказа установить не удалось - deny-правила на .claude/** нет ни в глобальном, ни в проектном settings, allow есть; обход через Bash запрещён, снимает только владелец; исполняется одним заходом с E0-01A |
 
 ## Прогресс по эпикам
 
@@ -57,11 +55,11 @@ _Нет задач в работе._
 |---|---|---|---|---|---|---|
 | ✅ | [E0-01](30_E0_TASKS.md#e0-01-установка-тулчейна-и-зелёные-lint-typecheck-на-скелете) | Установка тулчейна и зелёные `lint` + `typecheck` на скелете | 0.5 д | — | 2026-09-06 | 2026-09-06 |
 | ⛔ | [E0-01A](30_E0_TASKS.md#e0-01a-включить-гейт-build-в-rulessfjson) | Включить гейт build в rules.sf.json | 0.1 д | ✅E0-01 | 2026-09-06 |  |
-| ⬜ | [E0-02](30_E0_TASKS.md#e0-02-vitest-конфигурация-envtest-разделение-unit-integration) | Vitest: конфигурация, `.env.test`, разделение unit / integration | 0.5 д | ✅E0-01 | 2026-09-06 |  |
-| ⛔ | [E0-02A](30_E0_TASKS.md#e0-02a-включить-гейты-test-и-testint-в-rulessfjson) | Включить гейты test и test:int в rules.sf.json | 0.1 д | ⬜E0-02 |  |  |
-| ⬜ | [E0-03](30_E0_TASKS.md#e0-03-sfconfig-надёжный-парсинг-env-и-константы-лимитов) | `@sf/config`: надёжный парсинг env и константы лимитов | 0.5 д | ⬜E0-02 |  |  |
+| 🔄 | [E0-02](30_E0_TASKS.md#e0-02-vitest-конфигурация-envtest-разделение-unit-integration) | Vitest: конфигурация, `.env.test`, разделение unit / integration | 0.5 д | ✅E0-01 | 2026-09-06 |  |
+| ⛔ | [E0-02A](30_E0_TASKS.md#e0-02a-включить-гейты-test-и-testint-в-rulessfjson) | Включить гейты test и test:int в rules.sf.json | 0.1 д | 🔄E0-02 |  |  |
+| ⬜ | [E0-03](30_E0_TASKS.md#e0-03-sfconfig-надёжный-парсинг-env-и-константы-лимитов) | `@sf/config`: надёжный парсинг env и константы лимитов | 0.5 д | 🔄E0-02 |  |  |
 | ⬜ | [E0-04](30_E0_TASKS.md#e0-04-sfdb-фабрика-подключения-ревизия-схемы-миграция-0000-первые-репозитории) | `@sf/db`: фабрика подключения, ревизия схемы, миграция 0000, первые репозитории | 1.5 д | ⬜E0-03 |  |  |
-| ⬜ | [E0-05](30_E0_TASKS.md#e0-05-sfcore-базовые-доменные-типы-схема-content-dna-чистые-хелперы) | `@sf/core`: базовые доменные типы, схема Content DNA, чистые хелперы | 1 д | ⬜E0-02 ⬜E0-04 |  |  |
+| ⬜ | [E0-05](30_E0_TASKS.md#e0-05-sfcore-базовые-доменные-типы-схема-content-dna-чистые-хелперы) | `@sf/core`: базовые доменные типы, схема Content DNA, чистые хелперы | 1 д | 🔄E0-02 ⬜E0-04 |  |  |
 | ⬜ | [E0-06](30_E0_TASKS.md#e0-06-appsapi-fastify-скелет-с-auth-ошибками-логами-и-openapi) | `apps/api`: Fastify-скелет с auth, ошибками, логами и OpenAPI | 1.5 д | ⬜E0-04 ⬜E0-05 |  |  |
 | ⬜ | [E0-07](30_E0_TASKS.md#e0-07-sfcontracts-и-типизированный-api-клиент) | `@sf/contracts` и типизированный API-клиент | 0.5–1 д | ⬜E0-06 |  |  |
 | ⬜ | [E0-08](30_E0_TASKS.md#e0-08-appsworker-bullmq-каркас-dlq-cron-реестр-graceful-shutdown-smoke-job) | `apps/worker`: BullMQ-каркас, DLQ, cron-реестр, graceful shutdown, smoke-job | 2 д | ⬜E0-04 ⬜E0-05 |  |  |

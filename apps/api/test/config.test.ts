@@ -11,6 +11,10 @@ describe("@sf/config env wiring", () => {
     expect(env.DATABASE_URL).toBe(
       "postgresql://sf:sf@localhost:5432/shorts_factory_test",
     );
-    expect(env.REDIS_URL).toBe("redis://localhost:6379");
+    expect(env.REDIS_URL).toBe("redis://localhost:6379/1");
+  });
+
+  it("purges schema keys absent from .env.test instead of leaking the shell", () => {
+    expect(env.GEMINI_API_KEY).toBeUndefined();
   });
 });
