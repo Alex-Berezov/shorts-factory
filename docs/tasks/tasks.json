@@ -22,7 +22,8 @@
       "E0-01"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "todo"
+    "status": "todo",
+    "started_at": "2026-09-06"
   },
   {
     "id": "E0-03",
@@ -1539,5 +1540,19 @@
     "added_at": "2026-09-06",
     "started_at": "2026-09-06",
     "blocked_reason": "внешнее предусловие: session permission layer запрещает Write/Edit/Bash-запись в .claude/.task-current, .claude/scope.txt, .claude/unlock.txt даже в режиме dontAsk/bypassPermissions - нужна ручная проверка режима разрешений сессии"
+  },
+  {
+    "id": "E0-02A",
+    "epic": "E0",
+    "title": "Включить гейты test и test:int в rules.sf.json",
+    "estimate": "0.1 д",
+    "estimate_days": 0.1,
+    "deps": [
+      "E0-02"
+    ],
+    "doc": "30_E0_TASKS.md",
+    "status": "blocked",
+    "added_at": "2026-09-06",
+    "blocked_reason": "внешнее предусловие: слой разрешений сессии отклоняет любую запись в .claude/** (Write/Edit/Bash) при bypassPermissions и явном allow - снимается только вручную владельцем; исполняется одним заходом с E0-01A"
   }
 ]

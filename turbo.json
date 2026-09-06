@@ -8,6 +8,7 @@
     },
     "typecheck": { "dependsOn": ["^typecheck"] },
     "test": { "dependsOn": ["^test"] },
+    "test:int": { "dependsOn": ["^test:int"], "cache": false },
     "dev": { "cache": false, "persistent": true }
   }
 }

@@ -55,7 +55,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 **Сделать:**
 - Зафиксировать Node 22 (`.nvmrc`/`.node-version`), corepack + `packageManager` (уже есть), `.editorconfig`.
 - `pnpm install`, закоммитить `pnpm-lock.yaml` (закрывает D1).
-- Починить `.github/workflows/ci.yml`: `pnpm/action-setup@v4` падает с «Multiple versions of pnpm specified» - убрать `with: { version: 9 }`, версию задаёт `packageManager` в `package.json` (первый прогон CI 05.09.2026, run #1). Правка конвейера идёт через `unlock.txt` и решение техлида; ни один шаг не снимается.
+- Починить `.github/workflows/ci.yml`: `pnpm/action-setup@v4` падает с «Multiple versions of pnpm specified» - убрать `with: { version: 9 }`, версию задаёт `packageManager` в `package.json` (первый прогон CI 05.09.2026, run #1). Правка конвейера идёт по решению техлида; ни один шаг не снимается.
 - Довести `biome.json`: JSX/TSX, `organizeImports`, игнор `migrations/**`.
 - Добавить недостающее в `apps/web`: `next.config.ts` (`output` по `NEXT_OUTPUT_STANDALONE=1`), `next-env.d.ts`, `@types/node`, `@types/react-dom`, `postcss.config`, `tailwind.config` (часть D4; сам UI — в E0-10).
 - Убрать из `turbo.json` зависимость `typecheck`/`test` от `^build` (у пакетов нет build — см. решение 1) или оставить с пояснением; добавить `lint` как turbo-task не нужно — Biome запускается из корня.
@@ -83,14 +83,27 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 **Цель:** `pnpm test` работает во всех пакетах, включая те, где тестов пока нет.
 
 **Сделать:**
-- Единая `vitest.config.ts` на пакет (или общий пресет в `packages/config/vitest`), `passWithNoTests: true` (закрывает D7).
-- Конвенция `*.test.ts` (unit) и `*.int.test.ts` (integration); проект-ы Vitest или отдельный скрипт `test:int`, который пропускается без `DATABASE_URL`.
+- Единая `vitest.config.ts` на пакет (или общий пресет в `packages/config/vitest`), `passWithNoTests: true` (закрывает D7) - отменено, см. DECISIONS 06.09 (развилка A): вместо этого в каждом пакете со скриптом `test` есть содержательная канарейка.
+- Конвенция `*.test.ts` (unit) и `*.int.test.ts` (integration); проект-ы Vitest или отдельный скрипт `test:int`, который пропускается без `DATABASE_URL` - пункт про пропуск отменён, см. DECISIONS 06.09 (развилка B): `test:int` = `turbo run test:int`, без Compose честно красный, база отдельная `shorts_factory_test`.
 - `.env.test` (не секретный, коммитится) с локальными URL Compose; `setupFiles` подгружает его до импорта `@sf/config`.
 - Существующий `scoring.test.ts` проходит; добавить тест-«канарейку» в `apps/api` и `apps/worker`.
-- Включить гейты `test` (`when: never` → `always`) и `test:int` (`never` → `glob:{packages/db/**,apps/**}`) в `.claude/hooks/rules.sf.json`: они выключены на старте, потому что до этой задачи `pnpm test` красный без конфигов Vitest. Через `unlock.txt`, решение техлида, проба в `harness-selftest.js`.
+- Включение гейтов `test` и `test:int` в `.claude/hooks/rules.sf.json` - отдельная задача E0-02A (внешнее предусловие: разрешение владельца на правку `.claude/hooks/**`, тот же блок, что в E0-01A).
 
-**DoD:** `pnpm test` зелёный без запущенной инфраструктуры; `pnpm test:int` зелёный при поднятом Compose; гейты `test` и `test:int` включены.
+**DoD:** `pnpm test` зелёный без запущенной инфраструктуры; `pnpm test:int` зелёный при поднятом Compose. Гейты `test`/`test:int` - см. E0-02A.
 **Оценка:** 0.5 д. **Зависимости:** E0-01.
+
+### E0-02A. Включить гейты `test` и `test:int` в `rules.sf.json`
+
+**Цель:** усилить обвязку так, чтобы правка, ломающая `pnpm test`/`pnpm test:int`, не уходила в коммит без прогона.
+
+**Сделать:**
+- `.claude/hooks/rules.sf.json`: у гейта `test` `when: "never"` → `"always"`; у гейта `test:int` `"never"` → `"glob:{packages/db/**,apps/**}"`; текст `note` переписать под факт.
+- `.claude/hooks/harness-selftest.js`: пробы L-008 на выбор и на пропуск обоих гейтов.
+
+**DoD:** `node .claude/hooks/harness-selftest.js` зелёный со включёнными пробами; `node .claude/hooks/gates.js --list` показывает `test` и `test:int` в списке запускаемого.
+**Оценка:** 0.1 д. **Зависимости:** E0-02.
+
+Причина отдельной задачи: внешнее предусловие - разрешение владельца на правку `.claude/hooks/**`; правка отклоняется системой разрешений сессии (тот же блок, что в E0-01A).
 
 ### E0-03. `@sf/config`: надёжный парсинг env и константы лимитов
 

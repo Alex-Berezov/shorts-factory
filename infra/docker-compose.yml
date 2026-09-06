@@ -7,7 +7,11 @@ services:
       POSTGRES_PASSWORD: sf
       POSTGRES_DB: shorts_factory
     ports: ["5432:5432"]
-    volumes: [pgdata:/var/lib/postgresql/data]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # init scripts run once, only on a fresh volume; on an existing volume
+      # re-create with `docker compose down -v` or run the SQL by hand.
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sf"]
       interval: 5s
