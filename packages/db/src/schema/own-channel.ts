@@ -1,6 +1,7 @@
 import {
   bigint,
   date,
+  index,
   integer,
   jsonb,
   numeric,
@@ -9,6 +10,7 @@ import {
   serial,
   text,
   timestamp,
+  unique,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { idea } from "./idea-flow.js";
@@ -21,19 +23,23 @@ export const dubStatus = pgEnum("dub_status", [
   "rejected",
 ]);
 
-export const ownVideo = pgTable("own_video", {
-  id: serial("id").primaryKey(),
-  ytVideoId: text("yt_video_id").notNull().unique(),
-  ideaId: integer("idea_id").references(() => idea.id), // null for manual Phase 0 videos
-  publishedAt: timestamp("published_at", { withTimezone: true }),
-  title: text("title").notNull(),
-  language: text("language").notNull().default("en"),
-  experimentFeatures: jsonb("experiment_features"), // blueprint §5.11 feature set
-  manualLog: jsonb("manual_log"), // imported Phase-0 journal fields
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+export const ownVideo = pgTable(
+  "own_video",
+  {
+    id: serial("id").primaryKey(),
+    ytVideoId: text("yt_video_id").notNull().unique(),
+    ideaId: integer("idea_id").references(() => idea.id), // null for manual Phase 0 videos
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    title: text("title").notNull(),
+    language: text("language").notNull().default("en"),
+    experimentFeatures: jsonb("experiment_features"), // blueprint §5.11 feature set
+    manualLog: jsonb("manual_log"), // imported Phase-0 journal fields
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("own_video_idea_idx").on(t.ideaId)],
+);
 
 export const analyticsDaily = pgTable(
   "analytics_daily",
@@ -58,8 +64,27 @@ export const analyticsDaily = pgTable(
     subsGained: integer("subs_gained"),
     subsLost: integer("subs_lost"),
     revenueUsd: numeric("revenue_usd", { precision: 10, scale: 4 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // The row is updated in place: a day keeps settling for a while, and
+    // `analytics.ingest` (E7) upserts it on `analytics_uq` on every run.
+    // Without this column "yesterday is still being refined" looks exactly
+    // like "the ingest has been down for three days".
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
-  (t) => [uniqueIndex("analytics_uq").on(t.ownVideoId, t.day, t.country)],
+  (t) => [
+    // A unique constraint with NULLS NOT DISTINCT, not a plain unique index:
+    // `country` is null for the all-countries total, and by default Postgres
+    // treats every null as a different value, so the total row would not be
+    // protected and `ON CONFLICT (own_video_id, day, country)` would insert a
+    // duplicate on every ingest run instead of updating (E7 analytics.ingest).
+    unique("analytics_uq")
+      .on(t.ownVideoId, t.day, t.country)
+      .nullsNotDistinct(),
+  ],
 );
 
 export const dubTrack = pgTable(

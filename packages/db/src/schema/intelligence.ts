@@ -1,4 +1,5 @@
 import {
+  index,
   integer,
   jsonb,
   numeric,
@@ -21,16 +22,20 @@ export const analysisKind = pgEnum("analysis_kind", [
  * ContentDnaSchema (@sf/core) on write and read. Never overwritten —
  * re-analysis inserts a new row.
  */
-export const videoAnalysis = pgTable("video_analysis", {
-  id: serial("id").primaryKey(),
-  videoId: integer("video_id").references(() => trackedVideo.id), // null for local own files
-  localFilePath: text("local_file_path"),
-  kind: analysisKind("kind").notNull(),
-  model: text("model").notNull(),
-  promptVersion: text("prompt_version").notNull(),
-  dna: jsonb("dna").notNull(),
-  costUsd: numeric("cost_usd", { precision: 10, scale: 4 }),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+export const videoAnalysis = pgTable(
+  "video_analysis",
+  {
+    id: serial("id").primaryKey(),
+    videoId: integer("video_id").references(() => trackedVideo.id), // null for local own files
+    localFilePath: text("local_file_path"),
+    kind: analysisKind("kind").notNull(),
+    model: text("model").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    dna: jsonb("dna").notNull(),
+    costUsd: numeric("cost_usd", { precision: 10, scale: 4 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("video_analysis_video_idx").on(t.videoId)],
+);

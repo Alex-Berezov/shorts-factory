@@ -1,19 +1,24 @@
-import { describe, expect, it } from "vitest";
-import { QUEUES } from "../src/queues.js";
+import { QUEUE_NAMES } from "@sf/core";
+import { describe, expect, it, vi } from "vitest";
 
 /**
- * A duplicated queue name would break deterministic jobId derivation and DLQ
- * routing in E0-08 - this canary fails loudly if that ever happens.
+ * The worker has no queue list of its own: names come from the registry in
+ * `@sf/core`, which `@sf/db` also seeds into `app_setting.queues.enabled`.
+ * A second copy here would drift from the seed silently, so this canary reads
+ * what the entry point reports and compares it with the registry.
  */
-describe("QUEUES registry", () => {
-  it("has unique queue names", () => {
-    const names = Object.values(QUEUES);
-    expect(new Set(names).size).toBe(names.length);
-  });
+describe("worker queue registry", () => {
+  it("reports every queue of the shared registry", async () => {
+    const logged = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await import("../src/index.js");
 
-  it("follows the <module>.<action> naming template", () => {
-    for (const name of Object.values(QUEUES)) {
-      expect(name).toMatch(/^[a-z]+\.[a-z-]+$/);
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(logged).toHaveBeenCalledWith(
+        expect.stringContaining(`queues=${QUEUE_NAMES.length} registered`),
+      );
+    } finally {
+      logged.mockRestore();
     }
   });
 });

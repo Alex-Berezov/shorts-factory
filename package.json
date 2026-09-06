@@ -12,7 +12,8 @@
     "test": "turbo run test",
     "test:int": "turbo run test:int",
     "db:generate": "pnpm --filter @sf/db db:generate",
-    "db:migrate": "pnpm --filter @sf/db db:migrate"
+    "db:migrate": "pnpm --filter @sf/db db:migrate",
+    "db:seed": "pnpm --filter @sf/db db:seed"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",

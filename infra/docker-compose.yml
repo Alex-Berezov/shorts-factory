@@ -6,7 +6,10 @@ services:
       POSTGRES_USER: sf
       POSTGRES_PASSWORD: sf
       POSTGRES_DB: shorts_factory
-    ports: ["127.0.0.1:5432:5432"]
+    # Host port is deliberately not the Postgres default: a developer machine
+    # usually already runs another project's Postgres on 5432, and the two
+    # would fight for the binding. Container-side port stays standard.
+    ports: ["127.0.0.1:5442:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
       # init scripts run once, only on a fresh volume; on an existing volume
@@ -19,7 +22,8 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports: ["127.0.0.1:6379:6379"]
+    # Same reason as Postgres above: 6379 is usually taken on a dev machine.
+    ports: ["127.0.0.1:6389:6379"]
     volumes: [redisdata:/data]
     command: ["redis-server", "--appendonly", "yes"]
 

@@ -52,7 +52,8 @@
       "E0-03"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "todo"
+    "status": "in_progress",
+    "started_at": "2026-09-06"
   },
   {
     "id": "E0-05",

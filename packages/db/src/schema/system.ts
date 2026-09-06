@@ -1,4 +1,5 @@
 import {
+  index,
   integer,
   jsonb,
   numeric,
@@ -10,19 +11,25 @@ import {
 } from "drizzle-orm/pg-core";
 
 /** Every external API call cost — quota units, tokens, dollars. */
-export const apiUsageLog = pgTable("api_usage_log", {
-  id: serial("id").primaryKey(),
-  provider: text("provider").notNull(), // youtube_data | youtube_analytics | gemini | elevenlabs | ...
-  operation: text("operation").notNull(),
-  units: integer("units"), // YouTube quota units
-  tokensIn: integer("tokens_in"),
-  tokensOut: integer("tokens_out"),
-  costUsd: numeric("cost_usd", { precision: 10, scale: 5 }),
-  jobId: text("job_id"),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+export const apiUsageLog = pgTable(
+  "api_usage_log",
+  {
+    id: serial("id").primaryKey(),
+    provider: text("provider").notNull(), // youtube_data | youtube_analytics | gemini | elevenlabs | ...
+    operation: text("operation").notNull(),
+    units: integer("units"), // YouTube quota units
+    tokensIn: integer("tokens_in"),
+    tokensOut: integer("tokens_out"),
+    costUsd: numeric("cost_usd", { precision: 10, scale: 5 }),
+    jobId: text("job_id"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  // Daily and monthly spend per provider: the aggregates in
+  // `repos/api-usage-log.ts` scan exactly this pair.
+  (t) => [index("api_usage_provider_created_idx").on(t.provider, t.createdAt)],
+);
 
 export const promptVersion = pgTable(
   "prompt_version",

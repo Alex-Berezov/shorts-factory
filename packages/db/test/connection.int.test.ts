@@ -5,8 +5,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 /**
  * Talks to the real Postgres from `infra/docker-compose.yml` (test database
  * `shorts_factory_test`, see `infra/postgres/init/01-test-db.sql`).
- * Does not import `@sf/db`: that module opens a connection on import (D3,
- * fixed in E0-04), which would leak a second client here.
+ * Deliberately uses the raw driver and no schema: this file answers "is the
+ * test database reachable at all", so a failure here points at the
+ * infrastructure and not at `@sf/db`.
  */
 const sql = postgres(env.DATABASE_URL);
 

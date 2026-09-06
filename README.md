@@ -44,9 +44,29 @@ docs          project documentation (RU engineering docs + original EN blueprint
 pnpm install
 docker compose -f infra/docker-compose.yml up -d
 cp .env.example .env   # set ADMIN_PASSWORD, fill in keys, uncomment NODE_ENV=development for local work
-pnpm db:generate && pnpm db:migrate
+pnpm db:migrate        # applies packages/db/migrations to DATABASE_URL
+pnpm db:seed           # default app_setting rows, merged under the stored ones: missing rows
+                       # and keys are added, your values win, an idle run leaves updated_at alone
 pnpm dev
 ```
+
+Compose publishes Postgres on `localhost:5442` and Redis on `localhost:6389` - deliberately
+not the default ports, so the stack starts next to another project's Postgres or Redis;
+`.env.example` and `.env.test` already point there.
+
+**If your `.env` predates this change, edit it:** the host ports moved from 5432/6379 to
+5442/6389, so `DATABASE_URL` must end in `localhost:5442/shorts_factory` and `REDIS_URL` in
+`localhost:6389`. Nothing cross-checks them: left at 5432, `pnpm db:migrate` goes to whatever
+Postgres happens to own that port - most likely another project's, where it either fails
+authentication or creates our 21 tables in a foreign database.
+
+`pnpm db:migrate` and `pnpm db:seed` are entry points of `@sf/db`: they read `DATABASE_URL`
+through `@sf/config` (so the root `.env` is enough) and stay silent on success. Changing the
+schema in `packages/db/src/schema/**` is followed by `pnpm db:generate --name <epic>`, which
+writes the next `migrations/NNNN_<epic>.sql` (`0001_radar` and so on, per §5 of the system
+design). The `--name` is not optional in practice: without it drizzle-kit invents a random
+name, and renaming the file afterwards breaks the runner, which looks migrations up by the
+name recorded in `migrations/meta/_journal.json`. An applied migration file is never edited.
 
 ## Environment
 

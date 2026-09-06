@@ -1,5 +1,5 @@
 import { env } from "@sf/config";
-import { QUEUES } from "./queues.js";
+import { QUEUE_NAMES } from "@sf/core";
 
 /**
  * Worker entry point.
@@ -11,5 +11,5 @@ import { QUEUES } from "./queues.js";
  *  - exponential backoff retries,
  *  - budget/quota guard before external calls.
  */
-const message = `[worker] env=${env.NODE_ENV} queues=${Object.values(QUEUES).length} registered (stub)`;
+const message = `[worker] env=${env.NODE_ENV} queues=${QUEUE_NAMES.length} registered (stub)`;
 console.log(message); // console-ok: scaffold entry point, pino appears in E0-08

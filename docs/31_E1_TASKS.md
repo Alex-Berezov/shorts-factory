@@ -46,7 +46,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E1), `10_SYSTEM_
 | `tracked_channel` | `+ handle text`, `+ thumbnail_url`, `+ subscriber_count bigint`, `+ last_synced_at`, `+ last_sync_error text`, `+ updated_at` | ввод по handle, диагностика синка |
 | `tracked_video` | `+ is_backfill bool`, `+ is_available bool default true`, `+ radar_status enum(new, ignored, promoted)`, `+ thumbnail_url`, `+ tags jsonb`, `+ last_snapshot_at` | решения 4, 6; удалённые/приватные видео |
 | `video_stats_snapshot` | `+ is_late bool default false`; `views/likes/comments` — без изменений | решение 2 |
-| `trend_signal` | `views_per_hour`, `acceleration`, `baseline_ratio`, `score` → `real` (вместо int×100); `- status` (переезжает в `tracked_video.radar_status`); `+ point snapshot_point` | дроби без хака, привязка к точке |
+| `trend_signal` | `views_per_hour`, `acceleration`, `baseline_ratio`, `score` → `real` (вместо int×100); `- status` (переезжает в `tracked_video.radar_status`) + `DROP TYPE trend_signal_status` — тип заведён миграцией `0000_core` (E0-04, решение техлида 06.09); `+ point snapshot_point` | дроби без хака, привязка к точке |
 | `story_cluster` | `+ updated_at`, `+ status enum(active, faded, promoted)`, `+ channel_count int`, `+ summary text` | момент и жизненный цикл кластера |
 | `app_setting` (ключи) | `radar.sync_interval_min` (60), `radar.snapshot_tick_min` (5), `radar.shorts_max_duration_sec` (180), `radar.backfill_count` (50), `radar.weights` ({velocity, acceleration, baselineRatio}), `radar.cluster.min_score`, `radar.cluster.window_h` (48), `radar.baseline_curve_default` | настраиваемость без деплоя |
 

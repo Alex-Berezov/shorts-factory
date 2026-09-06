@@ -14,7 +14,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 - `packages/db` — Drizzle-схема всех таблиц из System Design §5 (черновик), `drizzle.config.ts`; миграций нет.
 - `packages/core` — `ContentDnaSchema` (совпадает с blueprint §5.2), `scoring.ts` с юнит-тестом, `idea.ts`.
 - `packages/integrations/{youtube,gemini,tts}` — заглушки клиентов и `QUOTA_COST`.
-- `apps/api` — Fastify с одним `/health`; `apps/worker` — реестр имён очередей `QUEUES` и пустые процессоры; `apps/web` — страницы-заглушки без `next.config`, Tailwind и типов.
+- `apps/api` — Fastify с одним `/health`; `apps/worker` — пустые процессоры (реестр имён очередей переехал в `@sf/core`, `src/domain/queues.ts`: `QUEUE_NAMES`/`QueueName`, решение 5 и E0-04); `apps/web` — страницы-заглушки без `next.config`, Tailwind и типов.
 - `infra/docker-compose.yml` — только postgres + redis; `.github/workflows/ci.yml` — lint → typecheck → test → build.
 
 ## Замеченные дефекты скелета (закрываются задачами ниже)
@@ -37,7 +37,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 2. **Auth: один admin-пароль.** Web защищён Next `middleware.ts` (HTTP Basic против `ADMIN_PASSWORD`), API — `@fastify/basic-auth` на всех роутах, кроме `/health`. API в Compose не публикуется наружу; web ходит в API только с сервера (server components / route handlers) по `API_INTERNAL_URL`. В браузерный бандл секреты не попадают.
 3. **Контракты API = общие Zod-схемы в `@sf/contracts`.** Запрос/ответ каждого роута описываются в пакете, который импортируют и api (валидация + OpenAPI через `fastify-type-provider-zod`), и web (типизированный fetch-клиент). Кодогенерация по OpenAPI не нужна.
 4. **DLQ = отдельная очередь `system.dlq`.** BullMQ не имеет встроенного DLQ: при исчерпании `attempts` обработчик `failed` копирует job (очередь, jobId, payload, ошибка, число попыток) в `system.dlq`. Оригинальные failed-записи тоже сохраняем (`removeOnFail: { count: 1000 }`), `/system` читает и то и другое.
-5. **Идемпотентность через детерминированный `jobId`.** Каждый тип job объявляет функцию `jobIdFrom(payload)`; повторная постановка с тем же id BullMQ игнорирует. Чистые билдеры id живут в `@sf/core`.
+5. **Идемпотентность через детерминированный `jobId`.** Каждый тип job объявляет функцию `jobIdFrom(payload)`; повторная постановка с тем же id BullMQ игнорирует. Чистые билдеры id живут в `@sf/core`; реестр имён очередей — там же (`src/domain/queues.ts`, `QUEUE_NAMES`/`QueueName`): имена нужны и воркеру, и `@sf/db` (ключи `queues.enabled`).
 6. **Тесты двух видов.** Юнит-тесты (`*.test.ts`) — без инфраструктуры, всегда. Интеграционные (`*.int.test.ts`) — против настоящих Postgres/Redis из Compose, запускаются, когда задан `DATABASE_URL`/`REDIS_URL` (локально и в CI через services). Testcontainers не берём.
 7. **Локальная разработка на Windows.** Скрипты в `package.json` кросс-платформенные (никакого bash). Docker Desktop + WSL2 backend. Bash-скрипты допустимы только в `infra/scripts` (запуск на VPS).
 8. **`apps/web` собирается как обычное Next-приложение по умолчанию.** `output: "standalone"` включается только флагом `NEXT_OUTPUT_STANDALONE=1` при сборке образа (`web.Dockerfile`, решает `next.config.ts`) — обычная сборка (локально, CI) не создаёт trace-копию `node_modules` и не требует прав на symlink.
@@ -187,7 +187,9 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 **Цель:** рабочий конвейер задач, соответствующий требованиям к джобам из System Design §4: идемпотентность, ретраи, DLQ, лог стоимости.
 
 **Сделать:**
-- `createRedis(url)` (ioredis, `maxRetriesPerRequest: null`), фабрика `Queue` по `QUEUES` (ленивое создание, кэш).
+- `createRedis(url)` (ioredis, `maxRetriesPerRequest: null`), фабрика `Queue` по реестру `QUEUE_NAMES` из `@sf/core` (ленивое создание, кэш); служебные очереди (`system.dlq`, `system.heartbeat`, `system.smoke`) добавляются здесь.
+- Настройка `queues.enabled` (`app_setting`, засеяна в E0-04 на весь `QUEUE_NAMES`, все `true`): решить и реализовать, **что означает `false` в рантайме** (не создавать `Worker`? не ставить джобы? пауза очереди BullMQ?) и **где ключ читается** — вопрос техлиду, открытый с E0-04 (решение PM Р8, `docs/DECISIONS.md` 06.09); ответ записать строкой в `DECISIONS.md`. Служебные очереди, добавленные здесь, попадают в реестр и в настройку тем же `pnpm db:seed`: повторный seed дописывает недостающие переключатели, не трогая изменённые оператором.
+- Условие, на котором PM принял «все 26 очередей засеяны `true`»: каждый эпик, добавляющий обработчик платной или публикующей очереди, приносит свой предохранитель **в той же задаче**, не позже (переключатели очередей предохранителем не считаются). Для E0-08 это значит: обработчиков платных очередей здесь не заводить, а `system.*` — бесплатные.
 - Хелпер `defineJob({ queue, payloadSchema, jobIdFrom, handler, opts })`: валидирует payload Zod, создаёт child-логгер с `jobId`/`queue`, дефолтные опции `attempts: 5`, `backoff: exponential 5s`, `removeOnComplete: { count: 1000 }`, `removeOnFail: { count: 1000 }`.
 - `Worker` на каждую очередь с `concurrency` из env; регистрация процессоров через реестр `src/jobs/index.ts` (текущие пустые файлы — под будущие эпики).
 - DLQ по решению 4: очередь `system.dlq`, обработчик `failed` при `attemptsMade >= attempts`.
@@ -248,7 +250,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 **Цель:** CI проверяет то же, что и локальная проверка, включая интеграционные тесты и сборку Docker-образов.
 
 **Сделать:**
-- `services: postgres, redis` в workflow с healthcheck; env для тестов из `.env.test`.
+- `services: postgres, redis` в workflow с healthcheck; env для тестов из `.env.test`. Хостовые порты сервисов публикуются те же, что в `.env.test` (`5442` и `6389`, разведены с дефолтными в E0-04), иначе тесты не найдут базу.
 - Шаги: `install --frozen-lockfile` → `lint` → `typecheck` → `test` → `db:migrate` → `test:int` → `build`.
 - Кэш pnpm store и `.turbo` (`actions/cache`).
 - Отдельный job `docker-build`: сборка трёх образов без push (ловим сломанные Dockerfile'ы).

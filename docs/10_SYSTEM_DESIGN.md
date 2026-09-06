@@ -184,6 +184,8 @@ shorts-factory/
 
 Правило зависимостей: `apps/* → packages/*`; `integrations → core, config`; `db → core`; `core` ни от чего не зависит. Скоринг (velocity/acceleration/ranking) — чистые функции в `core`, покрытые юнит-тестами.
 
+Единственное исключение: `packages/db/src/cli/**`, `packages/db/test/**` и `packages/db/vitest*.config.ts` импортируют `@sf/config`, чтобы взять `DATABASE_URL` (команды `db:migrate`, `db:seed`, тесты пакета и их конфиги, включая `setupFiles` в `vitest.int.config.ts`). Библиотечная часть `@sf/db` (`client`, `migrate`, `seed`, `repos`, `schema`) конфигурации не знает и принимает подключение параметром — см. `docs/adr/0002-db-connection-and-cli-config.md`.
+
 ---
 
 ## 7. Интеграции: ключевые решения

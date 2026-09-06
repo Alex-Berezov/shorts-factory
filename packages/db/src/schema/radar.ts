@@ -23,6 +23,13 @@ export const snapshotPoint = pgEnum("snapshot_point", [
   "adhoc",
 ]);
 
+export const trendSignalStatus = pgEnum("trend_signal_status", [
+  "new",
+  "analyzed",
+  "promoted",
+  "ignored",
+]);
+
 export const trackedChannel = pgTable("tracked_channel", {
   id: serial("id").primaryKey(),
   ytChannelId: text("yt_channel_id").notNull().unique(),
@@ -31,6 +38,9 @@ export const trackedChannel = pgTable("tracked_channel", {
   baselineStats: jsonb("baseline_stats"), // median/percentile views by video age
   isActive: boolean("is_active").notNull().default(true),
   addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 });
 
 export const trackedVideo = pgTable(
@@ -85,9 +95,12 @@ export const trendSignal = pgTable(
     acceleration: integer("acceleration").notNull(),
     baselineRatio: integer("baseline_ratio_x100").notNull(), // ratio * 100
     score: integer("score_x100").notNull(), // score * 100
-    status: text("status").notNull().default("new"), // new | analyzed | promoted | ignored
+    status: trendSignalStatus("status").notNull().default("new"),
   },
-  (t) => [index("trend_signal_score_idx").on(t.score)],
+  (t) => [
+    index("trend_signal_score_idx").on(t.score),
+    index("trend_signal_video_idx").on(t.videoId),
+  ],
 );
 
 export const storyCluster = pgTable("story_cluster", {
@@ -109,5 +122,8 @@ export const storyClusterVideo = pgTable(
       .notNull()
       .references(() => trackedVideo.id),
   },
-  (t) => [uniqueIndex("cluster_video_uq").on(t.clusterId, t.videoId)],
+  (t) => [
+    uniqueIndex("cluster_video_uq").on(t.clusterId, t.videoId),
+    index("cluster_video_video_idx").on(t.videoId),
+  ],
 );
