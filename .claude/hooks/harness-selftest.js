@@ -24,8 +24,8 @@ const ROOT = path.resolve(CLAUDE, '..');
 
 const ALLOWED_MODELS = new Set(['opus', 'sonnet', 'haiku', 'fable', 'inherit']);
 const HOOK_FILES = [
-  'lib.js', 'diff-hash.js', 'protect-files.js', 'scope.js', 'standards.js', 'commit-gate.js',
-  'diff-boundaries.js', 'qa-lock.js', 'answer-length.js', 'report-honesty.js', 'remind-format.js',
+  'lib.js', 'diff-hash.js', 'standards.js', 'commit-gate.js',
+  'answer-length.js', 'report-honesty.js', 'remind-format.js',
   'gates.js',
 ];
 
@@ -106,8 +106,6 @@ check('регулярки commitGate.weakenings компилируются', () 
 check('глобы правил компилируются', () => {
   const L = require('./lib.js');
   const globs = [].concat(
-    (repoRules && repoRules.protected) || [], (repoRules && repoRules.createOnly) || [],
-    (common && common.protected) || [], (common && common.scope && common.scope.alwaysAllowed) || [],
     (common && common.commitGate && common.commitGate.forbiddenPaths) || [],
     (common && common.afterReviewAllowed) || [],
   );
@@ -180,34 +178,13 @@ check('settings.json: все хуки существуют на диске', () 
 
 // ------------------------------------------------------------------ 5. живые пробы замков
 const CWD = ROOT;
-check('protect-files: отказ на .env', () => {
-  const r = probe('protect-files.js', { tool_input: { file_path: path.join(ROOT, '.env') } }, CWD);
-  return /"permissionDecision":"deny"/.test(r.out) ? true : 'нет отказа: ' + (r.out || r.err).slice(0, 120);
-});
-check('protect-files: отказ на pnpm-lock.yaml', () => {
-  const r = probe('protect-files.js', { tool_input: { file_path: path.join(ROOT, 'pnpm-lock.yaml') } }, CWD);
-  return /"permissionDecision":"deny"/.test(r.out) ? true : 'нет отказа';
-});
-check('protect-files: пропуск обычного файла', () => {
-  const r = probe('protect-files.js', { tool_input: { file_path: path.join(ROOT, 'packages/core/src/index.ts') } }, CWD);
-  return r.code === 0 && !r.out ? true : 'неожиданный ответ: ' + (r.out || r.err).slice(0, 120);
-});
-check('protect-files: createOnly - правка миграции запрещена, новая разрешена', () => {
-  const dir = path.join(ROOT, 'packages/db/migrations');
-  const existed = fs.existsSync(dir);
-  const existing = path.join(dir, '0000_selftest_probe.sql');
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(existing, '-- probe');
-  try {
-    const edit = probe('protect-files.js', { tool_input: { file_path: existing } }, CWD);
-    const create = probe('protect-files.js', { tool_input: { file_path: path.join(dir, '0001_selftest_new.sql') } }, CWD);
-    if (!/deny/.test(edit.out)) return 'правка существующей миграции прошла';
-    if (create.out) return 'создание новой миграции отбито: ' + create.out.slice(0, 100);
-    return true;
-  } finally {
-    fs.unlinkSync(existing);
-    if (!existed) { try { fs.rmdirSync(dir); } catch (_) { /* не пуста */ } }
-  }
+check('снятых замков нет: protect-files, scope, diff-boundaries, qa-lock не зарегистрированы', () => {
+  // Решение владельца 06.09.2026: агент правит любые файлы и закрывает ход без счётчика правок.
+  // Проба на пропуск - чтобы снятый замок не вернулся молча через settings.json или забытый файл.
+  const s = readJson(path.join(CLAUDE, 'settings.json'));
+  const text = JSON.stringify(s.hooks || {});
+  const back = ['protect-files.js', 'scope.js', 'diff-boundaries.js', 'qa-lock.js'].filter((h) => text.includes(h) || fs.existsSync(path.join(HOOKS, h)));
+  return back.length ? 'вернулись: ' + back.join(', ') : true;
 });
 check('commit-gate: отказ на --no-verify', () => {
   const r = probe('commit-gate.js', { tool_input: { command: 'git commit --no-verify -m "feat: x"' } }, CWD);

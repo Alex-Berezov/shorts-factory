@@ -47,7 +47,7 @@ Experiment Engine -> Localization/TTS -> Publishing). Один репозито�
 ```
 
 Ручной режим: `/task` (план) -> `/go` (реализация) -> `/qa` -> `/fix` -> `/done`.
-Вопрос PM/техлиду руками: `/ask`. Где мы: `/status`. Рамки: `/scope`. Проверки: `/gates`.
+Вопрос PM/техлиду руками: `/ask`. Где мы: `/status`. Проверки: `/gates`.
 
 Трекер задач - `docs/tasks/tasks.json` через `node scripts/tasks.mjs next|start|done|block|add`;
 руками файл и `docs/00_STATUS.md` не правятся.
@@ -112,9 +112,11 @@ Experiment Engine -> Localization/TTS -> Publishing). Один репозито�
 Лежит в `.claude/`: хуки (`hooks/*.js`), правила (`hooks/rules.common.json`, `hooks/rules.sf.json`),
 агенты, команды, стиль ответа. Регистрация хуков - `.claude/settings.json` (коммитится),
 персональные разрешения - `.claude/settings.local.json` (пишет `install.ps1`, в `.gitignore`).
-Защищённые файлы (`.env*`, `pnpm-lock.yaml`, `.claude/settings*.json`, `.claude/hooks/**`,
-`.github/workflows/**`) правятся через строку в `.claude/unlock.txt` и решение техлида.
-После правки обвязки: `powershell -ExecutionPolicy Bypass -File .claude/install.ps1`
+Замков на запись файлов нет (решение владельца 06.09.2026): агент правит любые файлы репозитория,
+включая обвязку, конвейер и `pnpm-lock.yaml`, столько, сколько нужно задаче. Ошибки ловят
+ревьюеры, техлид и замок коммита. Правила без замка: `.env*` не читать и не писать (секреты -
+тема владельца), lockfile пишет только pnpm, применённая миграция не редактируется, конвейер
+правится только в сторону усиления. После правки обвязки: `powershell -ExecutionPolicy Bypass -File .claude/install.ps1`
 и `node .claude/hooks/harness-selftest.js`.
 
 ## Текущее состояние

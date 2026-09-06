@@ -11,30 +11,26 @@ PM и техлида вместо одного арбитра._
 shorts_factory_project/
   CLAUDE.md                    правила для всех агентов: роли, цикл, темы владельца, hard rules
   .claude/
-    settings.json              регистрация 8 хуков (коммитится), deny на .env и прод-команды
+    settings.json              регистрация 5 хуков (коммитится), deny на .env и прод-команды
     settings.local.json        режим разрешений и allow-список (в .gitignore, пишет install.ps1)
     agents/                    11 подагентов: pm, techlead, planner, worker, review-*
-    commands/                  /auto /task /go /qa /fix /gates /done /scope /ask /status
+    commands/                  /auto /task /go /qa /fix /gates /done /ask /status
     hooks/                     хуки на Node без зависимостей + правила + самопроверка
       lib.js diff-hash.js      общие утилиты, отпечаток диффа и отметки в .qa-state
-      protect-files.js         PreToolUse Write|Edit: защищённые пути и createOnly (миграции)
-      scope.js                 PreToolUse Write|Edit: рамки задачи (зона из диффа или scope.txt)
       commit-gate.js           PreToolUse Bash: замок коммита/пуша
       standards.js             PostToolUse Write|Edit: регулярки по добавленным строкам (S01…)
-      diff-boundaries.js       Stop: мусор и защищённые файлы в диффе, парные правки X01/X02
-      qa-lock.js               Stop: >15 правок без /qa - ход не закрывается
       answer-length.js         Stop: ответ длиннее 9 строк / 900 знаков прозы - переписать
       report-honesty.js        Stop: «зелено» без прогона и ложь в строке «Обвязка:» не пройдут
       remind-format.js         UserPromptSubmit: напоминание формата на длинной сессии
       gates.js                 не хук: прогон гейтов из rules.sf.json, ставит lastGates
       harness-selftest.js      самопроверка: синтаксис, правила, шапки, пути, живые пробы замков
       rules.common.json        пороги, замок коммита (W01–W09), afterReviewAllowed, alwaysAllowed
-      rules.sf.json            защищённые пути, стандарты S01–S12, парные правки X01–X02, гейты
+      rules.sf.json            стандарты S01–S12, гейты
       repos.json               один репозиторий `sf`, путь относительный
     output-styles/short.md     форма ответа
     qa-index.md / qa-lessons.md копилка уроков ревью: индекс (читают ревьюеры) и журнал
     install.ps1 / otkat.ps1    установка (снимок, сверка моделей, settings.local.json, самопроверка) и откат
-    .qa-state .task-current scope.txt unlock.txt   изменяемое состояние (в .gitignore)
+    .qa-state .task-current    изменяемое состояние (в .gitignore)
   tasks/                       файлы дела <дата>-<id>.md (в .gitignore)
   docs/tasks/tasks.json        трекер: 121 задача, единственный источник статусов
   docs/00_STATUS.md            генерируемый дашборд трекера
@@ -104,14 +100,16 @@ shorts_factory_project/
 
 | Замок | Что не пускает | Как снять законно |
 | --- | --- | --- |
-| `protect-files` | запись в `.env*`, `pnpm-lock.yaml`, `.claude/settings*.json`, `.claude/hooks/**`, `.github/workflows/**`; правку существующей миграции | строка с путём в `.claude/unlock.txt` + решение техлида |
-| `scope` | правку вне зоны задачи (soft: после 12 файлов; strict: сразу) | `/scope zone sf/<папка>/**` для новой папки; `/scope off` осознанно |
 | `standards` | добавленные строки с `any`, `console.*`, `process.env` вне config, `search.list`, относительный импорт пакета, `TODO` без id, `biome-ignore` без причины … (S01–S12, W01–W08) | починить строку; клапан `any-ok:`/`console-ok:`/`env-ok:` с причиной - и слово в отчёте |
 | `commit-gate` | коммит без отметки `/qa` по этому диффу, без зелёных гейтов, с мусором, с ослаблением (W01–W09), с `--no-verify`/`--force`, не по conventional commits | сделать то, чего не хватает; обход - брак |
-| `diff-boundaries` | сдать ход с защищённым/мусорным файлом в диффе или с открытой парой X01/X02 | убрать из диффа; ложная пара - номер правила в `unlock.txt` + решение техлида |
-| `qa-lock` | закрыть ход после 15 правок без `/qa` | прогнать `/qa` |
 | `answer-length` | ответ длиннее 9 непустых строк или 900 знаков прозы | унести подробности в файл дела |
 | `report-honesty` | «проверки зелёные» без `lastGates{code:0}` по текущему диффу; «Обвязка: не менялась» при тронутых `.claude/**` | прогнать гейты или написать правду |
+
+Замков на запись файлов нет - решение владельца 06.09.2026: `protect-files` (защищённые пути,
+`unlock.txt`), `scope` (рамки задачи, `scope.txt`), `diff-boundaries` (парные правки X01/X02)
+и `qa-lock` (счётчик правок без `/qa`) сняты, потому что каждый запуск `/auto` останавливался
+на них раньше плана. `/qa` по-прежнему обязателен перед коммитом - это держит `commit-gate`. Агент правит любые
+файлы; ошибки ловят семь ревьюеров, техлид и замок коммита.
 
 Все замки fail-closed: упавший хук отказывает и называет причину, а не молча пропускает.
 Отпечаток диффа считается в одном месте (`diff-hash.js`) от списка файлов, поэтому отметки
@@ -144,10 +142,9 @@ node .claude/hooks/harness-selftest.js
 ```
 
 Установщик делает снимок `.claude/` в `../.claude-snapshots/` (10 последних), сверяет модели
-у команд и агентов, пишет `settings.local.json` (режим разрешений `bypassPermissions`, allow-список; режим `dontAsk`
-молча отклонял встроенные запросы Claude Code на запись в `.claude/**`, и `/auto` не мог вести
-`.task-current`, `unlock.txt`, `scope.txt`),
-гоняет самопроверку. Хуки подхватываются новой сессией.
+у команд и агентов, пишет `settings.local.json` (режим разрешений `bypassPermissions` и
+allow-список на `.claude/**`; режим `dontAsk` молча отклонял встроенные запросы Claude Code
+на запись в `.claude/**`, и `/auto` не мог вести `.task-current`), гоняет самопроверку. Хуки подхватываются новой сессией.
 
 Откат: правил руками и стало хуже - `git checkout -- .claude/<файл>` (обвязка в git вместе
 с кодом); прогнал установщик и стало хуже - `otkat.ps1` (возвращает снимок, `settings.local.json`

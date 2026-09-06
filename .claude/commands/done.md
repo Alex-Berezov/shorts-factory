@@ -40,8 +40,8 @@ allowed-tools: Bash, Read, Edit, Write, Grep, Glob, Task, Skill
 Пролистай таблицу ревью. Находка, которую worker не заметил, а ревьюер нашёл, - урок (опечатка
 и придирка - нет). Запиши в `.claude/qa-lessons.md` по формату файла и строку в
 `.claude/qa-index.md`. Урок, целиком выражаемый регуляркой по добавленной строке, - сразу
-в `standards` файла `.claude/hooks/rules.sf.json` (через `unlock.txt`, с пробой в
-`harness-selftest.js`), а не в копилку.
+в `standards` файла `.claude/hooks/rules.sf.json` (с пробой в `harness-selftest.js`),
+а не в копилку.
 
 ## 5. Коммит
 
@@ -64,7 +64,7 @@ git add docs/90_WORKLOG.md docs/00_STATUS.md docs/tasks/tasks.json
 git commit -m "chore(tracker): <id> done"
 ```
 
-Убери строки задачи из `.claude/unlock.txt` и `.claude/scope.txt`. Файл дела - раздел `## Итог`.
+Файл дела - раздел `## Итог`.
 
 ## Ответ в чат
 

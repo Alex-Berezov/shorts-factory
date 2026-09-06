@@ -10,40 +10,7 @@
     "maxLines": 9
   },
   "answerFormatNote": "Отчёт /auto: до трёх строк про продукт плюс пять ключей - Задача, Решено за тебя, Проверки, Обвязка, Дальше. Восемь строк в предельном случае, порог девять: одна строка запаса на пустую строку между сутью и ключами. Проза считается без кода и таблиц. Подробности - в файл дела tasks/, не в чат.",
-  "scope": {
-    "softLimit": 12,
-    "alwaysAllowed": [
-      "**/*.md",
-      "**/*.test.ts",
-      "**/*.test.tsx",
-      "**/*.int.test.ts",
-      "**/test/**",
-      "**/__tests__/**",
-      "packages/db/migrations/**",
-      "docs/**",
-      "tasks/**"
-    ]
-  },
-  "protected": [
-    ".env",
-    ".env.local",
-    ".env.production",
-    ".env.*.local",
-    "**/.env",
-    "**/.env.local"
-  ],
-  "protectedNote": {
-    ".env": "настоящие ключи; агент их не читает и не пишет - тема владельца"
-  },
-  "diffBoundaries": {
-    "forbidden": [
-      "**/*.log",
-      "**/*.tsbuildinfo",
-      "**/node_modules/**",
-      "tasks/**"
-    ],
-    "forbiddenNote": "tasks/** - файлы дела, они в .gitignore; попали в дифф - значит кто-то тронул .gitignore, и это находка."
-  },
+  "fileLocksNote": "Замков на запись файлов нет (решение владельца 06.09.2026): protect-files, scope и diff-boundaries вместе с unlock.txt и scope.txt сняты. Агент правит любые файлы; ошибки ловят ревьюеры, техлид и замок коммита. Секреты (.env*) в репозиторий не едут - commitGate.forbiddenPaths.",
   "afterReviewAllowed": [
     "sf/docs/90_WORKLOG.md",
     "sf/docs/DECISIONS.md",
@@ -93,8 +60,6 @@
       "tasks/**",
       ".claude/.qa-state",
       ".claude/.task-current",
-      ".claude/scope.txt",
-      ".claude/unlock.txt",
       ".claude/settings.local.json"
     ],
     "forbiddenPathsNote": "Секреты, зависимости, логи, сборка, медиа (data/), файлы дела и изменяемое состояние обвязки. Всё это в .gitignore; появление в диффе означает, что .gitignore тронут.",

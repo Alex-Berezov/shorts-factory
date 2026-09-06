@@ -145,7 +145,7 @@ function guard(fn, opts) {
         // он висит на PreToolUse, разбирает каждую команду заново и петли не образует.
         // Несданный ход безвреден, закоммиченная работа - нет; замок и есть та точка,
         // где сломанная проверка обязана остановить, а не просто пожаловаться.
-        noteHookHealth(opts.name || 'diff-boundaries.js', detail);
+        noteHookHealth(opts.name || 'stop-hook', detail);
         complain(
           who + ' сломалась и не смогла вынести решение, поэтому работа не закрыта.\n\n' +
             String(detail).split('\n').slice(0, 4).join('\n') +
@@ -267,13 +267,12 @@ function readJson(p) {
   }
 }
 
-/** Общие пороги: qaLock, answerFormat, scope. */
+/** Общие пороги: qaLock, answerFormat. */
 function commonRules() {
   return (
     readJson(path.join(HOOKS_DIR, 'rules.common.json')) || {
       qaLock: { threshold: 10 },
       answerFormat: { maxProse: 2200 },
-      scope: { softLimit: 12, alwaysAllowed: [] },
       baseBranch: 'main',
     }
   );
@@ -432,31 +431,6 @@ function addedLines(repo, rules, relPath) {
   return out;
 }
 
-// ------------------------------------------------------------------- разрешения
-
-/**
- * Разовые разрешения: пути строками в <STATE_DIR>/unlock.txt.
- * Строка пишется с именем репозитория ("books-front/next.config.js") или без него.
- */
-function unlockList() {
-  try {
-    return fs
-      .readFileSync(path.join(STATE_DIR, 'unlock.txt'), 'utf8')
-      .split(/\r?\n/)
-      .map((s) => s.trim().replace(/\\/g, '/'))
-      .filter((s) => s && !s.startsWith('#'));
-  } catch (_) {
-    return [];
-  }
-}
-
-function isUnlocked(repo, relPath) {
-  const withRepo = label(repo, relPath);
-  return unlockList().some(
-    (g) => g === relPath || g === withRepo || matchGlob(g, relPath) || matchGlob(g, withRepo),
-  );
-}
-
 // ------------------------------------------------------------------ состояние
 
 function statePath() {
@@ -485,59 +459,6 @@ function bumpEdits(n) {
   s.edits = (s.edits || 0) + (n || 1);
   writeState(s);
   return s.edits;
-}
-
-/**
- * Рамки задачи из общего scope.txt: режим и, если задана, явная зона.
- *
- * Формат файла:
- *   # комментарий - например, дата фиксации и имя задачи
- *   mode: strict            режим; допустимо и одиноким словом первой строкой
- *   books-app-docs/scripts/**   строки зоны, каждая начинается с имени репозитория
- *
- * Зона нужна там, где зоны из диффа не хватает. Она считается как «файлы диффа плюс их
- * папки», и первый файл в новой папке в неё не попадает никогда: папки ещё нет в диффе,
- * потому что в ней ещё нет файлов. В строгом режиме это означало, что новый модуль нельзя
- * начать вовсе - приходилось снимать рамки на всю задачу. Явная зона закрывает ровно этот
- * случай: человек называет папку заранее, и она становится своей до первого файла в ней.
- *
- * Возвращает { mode, entries }. Пустой entries - зона считается из диффа, как раньше.
- */
-function scopeConfig() {
-  let lines;
-  try {
-    lines = fs
-      .readFileSync(path.join(STATE_DIR, 'scope.txt'), 'utf8')
-      .split(/\r?\n/)
-      .map((l) => l.trim());
-  } catch (_) {
-    return { mode: 'soft', entries: [] };
-  }
-
-  let mode = null;
-  const entries = [];
-  for (const line of lines) {
-    if (!line) continue;
-    const named = /^#?\s*mode\s*:\s*(strict|soft|off)\s*$/i.exec(line);
-    if (named) {
-      mode = named[1].toLowerCase();
-      continue;
-    }
-    if (line.startsWith('#')) continue;
-    // Старый формат: режим одиноким словом, до появления зоны файл состоял из него одного.
-    const bare = line.toLowerCase();
-    if (mode === null && !entries.length && (bare === 'strict' || bare === 'off' || bare === 'soft')) {
-      mode = bare;
-      continue;
-    }
-    entries.push(line.replace(/\\/g, '/'));
-  }
-  return { mode: mode || 'soft', entries };
-}
-
-/** Только режим: strict | off | soft. */
-function scopeMode() {
-  return scopeConfig().mode;
 }
 
 // ------------------------------------------------------------------ транскрипт
@@ -631,13 +552,9 @@ module.exports = {
   allChanged,
   isTracked,
   addedLines,
-  unlockList,
-  isUnlocked,
   readState,
   writeState,
   bumpEdits,
-  scopeConfig,
-  scopeMode,
   statePath,
   lastAssistantText,
   userTurnCount,

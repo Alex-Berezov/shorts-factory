@@ -13,6 +13,4 @@ coverage/
 .claude/settings.local.json
 .claude/.qa-state
 .claude/.task-current
-.claude/scope.txt
-.claude/unlock.txt
 .claude-snapshots/

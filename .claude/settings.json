@@ -1,5 +1,5 @@
 {
-  "$comment": "Обвязка агентов AI Shorts Factory. Хуки регистрируются здесь (файл коммитится), персональные разрешения - в settings.local.json (в .gitignore, пишет install.ps1). Пути через $CLAUDE_PROJECT_DIR, чтобы обвязка переезжала вместе с репозиторием.",
+  "$comment": "Обвязка агентов AI Shorts Factory. Хуки регистрируются здесь (файл коммитится), персональные разрешения - в settings.local.json (в .gitignore, пишет install.ps1). Пути через $CLAUDE_PROJECT_DIR, чтобы обвязка переезжала вместе с репозиторием. Замков на запись файлов нет (решение владельца 06.09.2026): агент правит любые файлы, качество держат ревьюеры, техлид и замок коммита.",
   "permissions": {
     "deny": [
       "Read(./.env)",
@@ -15,23 +15,6 @@
   },
   "hooks": {
     "PreToolUse": [
-      {
-        "matcher": "Write|Edit|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/protect-files.js\"",
-            "timeout": 20,
-            "statusMessage": "Проверяю, не защищён ли файл"
-          },
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/scope.js\"",
-            "timeout": 20,
-            "statusMessage": "Проверяю рамки задачи"
-          }
-        ]
-      },
       {
         "matcher": "Bash",
         "hooks": [
@@ -60,18 +43,6 @@
     "Stop": [
       {
         "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/diff-boundaries.js\"",
-            "timeout": 20,
-            "statusMessage": "Проверяю границы диффа"
-          },
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/qa-lock.js\"",
-            "timeout": 20,
-            "statusMessage": "Проверяю, был ли прогон /qa"
-          },
           {
             "type": "command",
             "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/answer-length.js\"",

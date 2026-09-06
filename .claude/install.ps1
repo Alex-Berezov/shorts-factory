@@ -34,15 +34,11 @@ try {
 
 # --- 2. Папки состояния ---
 New-Item -ItemType Directory -Force -Path (Join-Path $Root "tasks") | Out-Null
-foreach ($f in @("unlock.txt", "scope.txt")) {
-    $p = Join-Path $ClaudeDir $f
-    if (-not (Test-Path $p)) { [System.IO.File]::WriteAllText($p, "", (New-Object System.Text.UTF8Encoding($false))) }
-}
 
 # --- 3. Модели: у каждой команды и каждого агента своя ---
 $ExpectedCmd = @{
     "auto"="sonnet"; "task"="opus"; "go"="sonnet"; "qa"="sonnet"; "fix"="sonnet";
-    "gates"="sonnet"; "done"="sonnet"; "scope"="sonnet"; "ask"="sonnet"; "status"="sonnet"
+    "gates"="sonnet"; "done"="sonnet"; "ask"="sonnet"; "status"="sonnet"
 }
 $ExpectedAgent = @{
     "pm"="fable"; "techlead"="fable"; "review-architecture"="fable"; "review-product"="fable";
@@ -69,7 +65,8 @@ $localPath = Join-Path $ClaudeDir "settings.local.json"
 $local = if (Test-Path $localPath) { Get-Content $localPath -Raw -Encoding UTF8 | ConvertFrom-Json } else { [PSCustomObject]@{} }
 $permissions = [PSCustomObject]@{
     defaultMode = "bypassPermissions"
-    allow = @("Read", "Grep", "Glob", "Write", "Edit", "MultiEdit", "Bash", "Task", "Skill(code-review)", "Skill(qa)")
+    allow = @("Read", "Grep", "Glob", "Write", "Edit", "MultiEdit", "Bash", "Task", "Skill(code-review)", "Skill(qa)",
+              "Write(./.claude/**)", "Edit(./.claude/**)", "MultiEdit(./.claude/**)", "Write(./**)", "Edit(./**)", "MultiEdit(./**)")
     ask = @()
 }
 if ($null -ne $local.PSObject.Properties["permissions"]) { $local.permissions = $permissions }
