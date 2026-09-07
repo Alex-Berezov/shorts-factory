@@ -68,8 +68,10 @@
       "E0-04"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
-    "started_at": "2026-09-07"
+    "status": "done",
+    "started_at": "2026-09-07",
+    "done_at": "2026-09-07",
+    "note": "core: domain enums, usage contract, budget and job id helpers"
   },
   {
     "id": "E0-06",
