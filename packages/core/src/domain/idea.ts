@@ -15,6 +15,12 @@ export const IdeaStatusSchema = z.enum([
 ]);
 export type IdeaStatus = z.infer<typeof IdeaStatusSchema>;
 
+/**
+ * The numeric part of an inbox card - exactly what `idea.scores` (JSONB) holds
+ * and what the card of blueprint §5.3 ranks by. The rest of the card (why now,
+ * proposed hooks, sources) is a separate payload described by E3-01; nothing
+ * here grows before then.
+ */
 export const IdeaScoresSchema = z.object({
   velocity: z.number(),
   acceleration: z.number(),

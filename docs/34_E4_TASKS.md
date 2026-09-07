@@ -79,7 +79,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E4), `10_SYSTEM_
 ### E4-05. Job `research.run`: оркестрация plan → verify → brief
 
 **Сделать:**
-- Payload `{ ideaId, trigger, requestedAt? }`, `jobId = research.run:<ideaId>:<version>`; переход идеи `approved → in_research` в начале, `→ researched` в конце (через `ideaRepo.transition`, actor `system`).
+- Payload `{ ideaId, trigger, requestedAt? }`, `jobId = research.run/<ideaId>/<version>`; переход идеи `approved → in_research` в начале, `→ researched` в конце (через `ideaRepo.transition`, actor `system`).
 - Шаги по решению 2 с сохранением промежуточных результатов в `trace` после каждого шага (при падении на verify — plan не теряется); группировка claims в ≤ `max_grounded_calls` запросов; контроль `max_cost_usd` (решение 7).
 - После verify — `resolveClaimStatus` по каждому claim; brief; `allowedClaimIds = defaultAllowedClaims`.
 - Ошибки: провайдер недоступен → ретрай; бюджет → `budget_truncated`; невалидный вывод после repair → job в DLQ, идея остаётся `in_research` с видимой ошибкой в UI.

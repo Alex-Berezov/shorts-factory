@@ -85,7 +85,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E7), `10_SYSTEM_
 ### E7-04. Job `analytics.ingest`
 
 **Сделать:**
-- Cron ежедневно в `analytics.ingest_time` (по умолчанию 09:00 TZ оператора — данные за вчера уже частично есть); `jobId = analytics.ingest:<date>`; ручной запуск.
+- Cron ежедневно в `analytics.ingest_time` (по умолчанию 09:00 TZ оператора — данные за вчера уже частично есть); `jobId = analytics.ingest/<date>`; ручной запуск.
 - Окно `[today − maturity_days, today − 1]`, для первого запуска — от самого раннего `published_at`, чанками по 30 дней.
 - Upsert `analytics_daily` (video,day) и (video,day,country); `ingested_at`.
 - Итог в лог: видео / дней / строк / запросов; ошибки по отдельным батчам не отменяют остальные.

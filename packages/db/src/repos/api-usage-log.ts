@@ -1,3 +1,4 @@
+import type { Provider } from "@sf/core";
 import { and, eq, gte, lte, sql } from "drizzle-orm";
 import type { Db } from "../client.js";
 import { apiUsageLog } from "../schema/system.js";
@@ -74,7 +75,7 @@ async function sumWindow(
   db: Db,
   column: typeof apiUsageLog.units | typeof apiUsageLog.costUsd,
   name: string,
-  provider: string,
+  provider: Provider,
   window: ReturnType<typeof periodWindow>,
 ): Promise<number> {
   const rows = await db
@@ -102,6 +103,11 @@ async function sumWindow(
  * Thin access to `api_usage_log`: one insert and the three totals the budget
  * guard (E0-09) compares against `limits`. No business rules here - the guard
  * decides what an exceeded budget means.
+ *
+ * The provider is a `Provider` (`@sf/core`) rather than a free string, even
+ * though the column is `text`: a misspelt name is indistinguishable from "no
+ * spend at all" here, and every aggregate would answer 0 while the money or
+ * the quota went out.
  */
 export const apiUsageLogRepo = {
   /**
@@ -115,7 +121,9 @@ export const apiUsageLogRepo = {
    */
   async insert(
     db: Db,
-    entry: Omit<typeof apiUsageLog.$inferInsert, "createdAt">,
+    entry: Omit<typeof apiUsageLog.$inferInsert, "createdAt" | "provider"> & {
+      provider: Provider;
+    },
   ): Promise<void> {
     await db.insert(apiUsageLog).values(entry);
   },
@@ -123,7 +131,7 @@ export const apiUsageLogRepo = {
   /** YouTube quota units spent by `provider` between the start of its day and `now`. */
   async sumUnitsToday(
     db: Db,
-    provider: string,
+    provider: Provider,
     opts: UsagePeriodOptions = {},
   ): Promise<number> {
     return sumWindow(
@@ -138,7 +146,7 @@ export const apiUsageLogRepo = {
   /** Dollars spent by `provider` between the start of its day and `now`. */
   async sumCostUsdToday(
     db: Db,
-    provider: string,
+    provider: Provider,
     opts: UsagePeriodOptions = {},
   ): Promise<number> {
     return sumWindow(
@@ -153,7 +161,7 @@ export const apiUsageLogRepo = {
   /** Dollars spent by `provider` between the start of its month and `now`. */
   async sumCostUsdThisMonth(
     db: Db,
-    provider: string,
+    provider: Provider,
     opts: UsagePeriodOptions = {},
   ): Promise<number> {
     return sumWindow(

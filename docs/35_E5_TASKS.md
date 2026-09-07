@@ -72,7 +72,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E5), `10_SYSTEM_
 ### E5-04. Job `script.generate` (+ regenerate / revise)
 
 **Сделать:**
-- Payload `{ ideaId, mode: generate | regenerate_with_hook | revise, hookId?, instruction?, baseScriptId? }`; `jobId` по `ideaId:mode:version`.
+- Payload `{ ideaId, mode: generate | regenerate_with_hook | revise, hookId?, instruction?, baseScriptId? }`; `jobId = script.generate/<ideaId>/<mode>/<version>` (склейка через `/`: `:` в custom id BullMQ не пропускает).
 - `generate`: последний бриф (предупреждение в `checks`, если не `operator_reviewed`) → `script.hooks` → `script.master` → `assignSegmentTimings` → `checkClaims` → `shingleOverlap` против транскриптов исходников → `deriveExperimentTags` → insert `draft`.
 - `regenerate_with_hook`: только `script.master` с указанным хуком, хуки наследуются.
 - `revise`: `script.revise` + все проверки.

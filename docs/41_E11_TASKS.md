@@ -69,7 +69,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E11), `10_SYSTEM
 
 **Сделать:**
 - Слоты: генерация `publish_slot` на 14 дней вперёд по `publishing.slots`; `POST /publishing/items/:id/schedule { slotId | publishAt }` → проверка резерва units на день загрузки → `status: scheduled` (загрузка выполняется сразу, публикация — по `publishAt`) или сообщение «резерв исчерпан, ближайший слот …».
-- Job `publish.upload`: `jobId = publish:<itemId>`; `BudgetGuard("youtube_data", bucket: publishing)`; insert (или продолжение сессии) → `yt_video_id` → создать/связать `own_video (source: app, publish_item_id, idea_id, script_id)` → обложка → пометка `scheduled`; ошибки → `failed` с текстом, повтор только вручную (кроме сетевых внутри resumable).
+- Job `publish.upload`: `jobId = publish/<itemId>`; `BudgetGuard("youtube_data", bucket: publishing)`; insert (или продолжение сессии) → `yt_video_id` → создать/связать `own_video (source: app, publish_item_id, idea_id, script_id)` → обложка → пометка `scheduled`; ошибки → `failed` с текстом, повтор только вручную (кроме сетевых внутри resumable).
 - Job `publish.sync-status` (каждые 15 мин): `scheduled` → `published` по статусу; при `published` — идея `→ published` (если ещё нет), запуск `experiment.features` (E8-04).
 - Опция «опубликовать сейчас» (`privacyStatus: public` без `publishAt`).
 - Интеграционный тест с фейковым клиентом: schedule → upload → sync → published; резерв квоты блокирует лишний слот.

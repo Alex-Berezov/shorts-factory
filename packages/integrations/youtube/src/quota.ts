@@ -10,10 +10,3 @@ export const QUOTA_COST = {
   videosInsert: 1600,
   captionsInsert: 400,
 } as const;
-
-export type UsageLogger = (entry: {
-  provider: "youtube_data" | "youtube_analytics";
-  operation: string;
-  units: number;
-  jobId?: string;
-}) => Promise<void>;

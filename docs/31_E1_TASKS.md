@@ -92,7 +92,7 @@ Zod-схемы для JSONB (`baseline_stats`, `momentum`, `radar.weights`) — 
 **Цель:** новые Shorts каналов-доноров появляются в `tracked_video` не позже одного интервала синка.
 
 **Сделать:**
-- Repeatable-job `radar.sync-channels` (интервал из `radar.sync_interval_min`) ставит дочерние job'ы `radar.sync-channel` по каждому активному каналу; `jobId = radar.sync:<channelId>:<floor(now / interval)>` (решение 5 из E0).
+- Repeatable-job `radar.sync-channels` (интервал из `radar.sync_interval_min`) ставит дочерние job'ы `radar.sync-channel` по каждому активному каналу; `jobId = radar.sync/<channelId>/<floor(now / interval)>` (решение 5 из E0).
 - Процессор канала: `BudgetGuard.assert("youtube_data")` → постранично `listPlaylistItems` до первого известного `yt_video_id` (решение 4; максимум `radar.backfill_count` для нового канала, максимум 3 страницы для регулярного синка — защита от квоты) → `getVideos` по новым id → фильтр Shorts (решение 3) → insert `tracked_video` (`is_backfill` для первого синка) → `last_synced_at`.
 - Для каждого нового не-backfill видео: немедленный `adhoc`-снапшот из уже полученной `statistics` (без лишнего вызова) и постановка `radar.score`.
 - Не-Shorts видео **не сохраняем** (только счётчик в логе), чтобы не раздувать таблицу.
@@ -139,7 +139,7 @@ Zod-схемы для JSONB (`baseline_stats`, `momentum`, `radar.weights`) — 
 
 **Сделать:**
 - Расширить `@sf/core/scoring`: `computeSignal({ snapshots, publishedAt, baseline, point, weights })` → `{ viewsPerHour, acceleration, baselineRatio | null, score }`; `viewsPerHour` берётся между двумя последними снапшотами (или от `publishedAt`, если снапшот один), `acceleration` — при трёх и более; при отсутствии базлайна вес `baselineRatio` перераспределяется на остальные; юнит-тесты на 1/2/3+ снапшота, нулевые интервалы, отрицательный рост.
-- Процессор `radar.score` (payload `videoId`, `point`; `jobId = radar.score:<videoId>:<point>`): читает снапшоты и базлайн, считает, вставляет `trend_signal` (append-only, решение 6).
+- Процессор `radar.score` (payload `videoId`, `point`; `jobId = radar.score/<videoId>/<point>`): читает снапшоты и базлайн, считает, вставляет `trend_signal` (append-only, решение 6).
 - Веса из `app_setting.radar.weights`, кэш 60 с.
 - Порог «заметного» сигнала `radar.signal.min_score` — используется E1-07 и UI-фильтром «только значимые».
 - Миграция полей `trend_signal` (см. таблицу изменений схемы).

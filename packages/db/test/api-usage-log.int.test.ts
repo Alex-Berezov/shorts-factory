@@ -155,7 +155,9 @@ describe("apiUsageLogRepo aggregates", () => {
    * aggregates without options - lets a call past an exhausted cap.
    */
   it("ends a window without `now` on the database clock, not the process one", async () => {
-    const provider = "clock_skew_probe";
+    // A provider no fixture writes to, so the window below holds exactly the
+    // row this case inserts.
+    const provider = "cartesia";
     await apiUsageLogRepo.insert(db, {
       provider,
       operation: "videos.list",
@@ -189,7 +191,8 @@ describe("apiUsageLogRepo aggregates", () => {
    * at runtime, and the row lands in a window that "today" no longer covers.
    */
   it("takes no createdAt from the caller", async () => {
-    const provider = "own_clock_probe";
+    // Likewise unused by the fixtures - the counts here are this row alone.
+    const provider = "openai_tts";
 
     await apiUsageLogRepo.insert(db, {
       provider,

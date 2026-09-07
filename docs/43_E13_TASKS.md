@@ -52,7 +52,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E13), `10_SYSTEM
 
 **Сделать:**
 - `GET /system/queues` (по очереди: waiting/active/delayed/failed/paused, скорость за час), `POST /system/queues/:name/pause|resume`, `GET /system/schedulers` (repeatable-jobs с cron, TZ, next run, last run/статус), `POST /system/schedulers/:key/run-now`.
-- `GET /system/dlq` (пагинация, фильтр по очереди, payload, ошибка, попытки), `POST /system/dlq/:id/retry` (повторная постановка в исходную очередь с новым jobId-суффиксом), `POST /system/dlq/:id/discard`, `POST /system/dlq/discard-all?queue=`.
+- `GET /system/dlq` (пагинация, фильтр по очереди, payload, ошибка, попытки), `POST /system/dlq/:id/retry` (повторная постановка в исходную очередь с новым id `<исходный jobId>/<requestedAtMs>` — момент повтора в epoch ms; суффикс дописывает к готовому id хелпер этой задачи `jobIds.dlqRetry(originalId, requestedAtMs)`: исходный id уже прошёл `segment()` при первой постановке, поэтому через `jobId(prefix, ...parts)` с исходным id как частью такой id не строится), `POST /system/dlq/:id/discard`, `POST /system/dlq/discard-all?queue=`.
 - `audit_log` на все действия; UI `/system/queues`, `/system/dlq` с подтверждениями и просмотром payload/stack.
 - Детектор застрявших job'ов (`active` дольше `stuck_minutes`) → алерт.
 - Тесты API на фейковых очередях.

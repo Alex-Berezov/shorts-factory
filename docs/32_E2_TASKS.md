@@ -28,7 +28,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E2), `10_SYSTEM_
 4. **Hook pass — тот же URL, обрезка 0–5 с и повышенная частота кадров.** Через `videoMetadata { startOffset, endOffset, fps }` (без скачивания видео). Своя схема `HookAnalysisSchema` (покадровый разбор первых 5 секунд: кадр → объект → текст → звук → что удерживает), свой промпт `dna.hook_pass`.
 5. **Локальный файл — через Files API.** Для своих видео (`kind = own_video`): загрузка файла в Gemini Files API, ожидание `ACTIVE`, анализ с `mediaResolution: high` и повышенным `fps`, удаление файла после анализа. Файлы хранятся в `MEDIA_DIR` через интерфейс Storage (полноценный `@sf/storage` появляется в E9, здесь — минимальная реализация на локальной FS в `@sf/gemini`).
 6. **Стоимость считается из `usageMetadata`, а не оценивается.** `cost_usd = tokens_in × price_in + tokens_out × price_out` по таблице цен модели; предварительная оценка (по длительности видео) используется только для гейта бюджета **до** вызова. Видео длиннее `intel.max_duration_sec` (по умолчанию 240) не анализируем — Shorts всегда короче.
-7. **Версионирование: ручной запуск всегда создаёт новую версию, автозапуск дедуплицируется.** `jobId` авто = `intel.analyze:<videoId>:<promptVersion>:<model>` (одна DNA на связку), ручной = `…:<requestedAt>`. Ничего не обновляется — только insert.
+7. **Версионирование: ручной запуск всегда создаёт новую версию, автозапуск дедуплицируется.** `jobId` авто = `intel.analyze/<videoId>/<promptVersion>/<model>` (одна DNA на связку), где `<promptVersion>` в id пишется как `<name>@<version>` — например `intel.analyze/<videoId>/dna.full@1.0.0/<model>`: путь файла промпта `<name>/<version>` (решение 3) содержит `/`, который `jobId()` отвергает, а в БД это всё равно две колонки. Ручной = `…/<requestedAtMs>` — момент запроса в epoch ms, а не ISO-8601: ISO содержит `:`, который `jobId()` тоже отвергает. Ничего не обновляется — только insert.
 8. **Автозапуск — по порогу сигнала с дневным лимитом.** `radar.score` после записи сигнала ставит `intel.analyze-video`, если `score >= intel.auto.min_score`, у видео нет DNA для текущего `promptVersion`, и не превышен `intel.auto.daily_max` (по умолчанию 20). Hook pass — авто только для `score >= intel.hook_pass.min_score` или вручную.
 
 ## Изменения схемы БД (миграция `0002_intel`)
@@ -115,7 +115,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E2), `10_SYSTEM_
 **Цель:** анализ запускается вручную и автоматически, идемпотентно и в рамках бюджета.
 
 **Сделать:**
-- `intel.analyze-video`: payload `{ videoId | ownVideoId, source, trigger, promptVersion?, model?, requestedAt? }`; `jobId` по решению 7; `BudgetGuard.assert("gemini")` + предоценка стоимости по длительности; вызов клиента; insert строки (в т.ч. `invalid`/`failed`); обновление `trend_signal`/`tracked_video` не требуется — UI читает `video_analysis`.
+- `intel.analyze-video`: payload `{ videoId | ownVideoId, source, trigger, promptVersion?, model?, requestedAtMs? }`; `jobId` по решению 7; `BudgetGuard.assert("gemini")` + предоценка стоимости по длительности; вызов клиента; insert строки (в т.ч. `invalid`/`failed`); обновление `trend_signal`/`tracked_video` не требуется — UI читает `video_analysis`.
 - `intel.hook-pass`: аналогично, `kind = hook_pass`; авто-постановка после успешного полного прохода при `score >= intel.hook_pass.min_score`.
 - Автозапуск из `radar.score` (решение 8) — вынести в функцию `maybeEnqueueAnalysis(signal)` с проверкой `countAutoToday < daily_max`.
 - Ретраи: только на rate-limit/сетевые (3 попытки); `invalid` после repair — не ретрай, а фиксация.
@@ -131,7 +131,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E2), `10_SYSTEM_
 
 **Сделать:**
 - `POST /intel/analyses { videoId | ownVideoId, kind, promptVersion?, model? }` → `{ jobId, analysisId? }` (заменяет `POST /radar/videos/:id/analyze` из E1-09 или проксирует его).
-- `GET /intel/analyses?videoId=&kind=` (все версии с метаданными без тяжёлого `result`), `GET /intel/analyses/:id` (полный результат), `GET /intel/jobs/:jobId` (состояние).
+- `GET /intel/analyses?videoId=&kind=` (все версии с метаданными без тяжёлого `result`), `GET /intel/analyses/:id` (полный результат), `GET /intel/jobs?id=<jobId>` (состояние).
 - `GET /intel/summary` — сегодня: количество, $ потрачено, доля invalid, средняя стоимость (для `/system`).
 - `GET /intel/prompts` — версии промптов и активные.
 - Контракты в `@sf/contracts/intel/*`, клиент, тесты роутов.
@@ -147,7 +147,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E2), `10_SYSTEM_
 - Блок DNA на странице видео (`/radar/videos/[id]`, заглушка из E1-10) и отдельная страница `/intel/analyses/[id]`.
 - Вкладки: **Обзор** (topic/subtopic, storySummary, hookType, structure, emotionalDriver, reveal @ sec/%, ending/CTA); **Транскрипт** (semantic transcript); **Таймлайн** (таблица `startSec–endSec | visual | narration | overlay`, клик — открыть YouTube на этой секунде); **Hook 0–5s** (first1s…first5s + `HookAnalysis` покадрово, если есть); **Паттерны** (whyItMayWork, transferablePatterns — зелёные, riskyToCopyElements — красные с явной подписью «не копировать»).
 - Шапка: бейджи `model`, `prompt_version`, `cost`, `duration`, статус; переключатель версий; кнопки «Переанализировать», «Hook pass».
-- Состояние ожидания: polling `GET /intel/jobs/:jobId` каждые 5 с, прогресс-индикатор, отображение `invalid`/`failed` с ссылкой на сырой ответ.
+- Состояние ожидания: polling `GET /intel/jobs?id=<jobId>` каждые 5 с, прогресс-индикатор, отображение `invalid`/`failed` с ссылкой на сырой ответ.
 - Список `/intel` — последние анализы с фильтрами (kind, status, канал) и суммой $ за день.
 
 **DoD:** сценарий «сигнал → Анализировать → через 1–3 минуты карточка → переключение версий → hook pass» проходит вручную; risky-элементы визуально отделены.

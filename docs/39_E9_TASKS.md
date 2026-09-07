@@ -91,7 +91,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E9), `10_SYSTEM_
 ### E9-05. Job `localize.script`
 
 **Сделать:**
-- Payload `{ scriptId, language, mode: generate | regenerate }`; `jobId = localize:<scriptId>:<lang>:<version>`; предусловие — `language_config.strategy = custom` или явный ручной запуск.
+- Payload `{ scriptId, language, mode: generate | regenerate }`; `jobId = localize/<scriptId>/<lang>/<version>`; предусловие — `language_config.strategy = custom` или явный ручной запуск.
 - Цепочка: `localize.script` → `retimeSegments` → `timingReport` → до `max_tighten_iterations` × `localize.tighten` → `localize.metadata` → `renderSrt/Vtt` → `structuralQa` + `localize.qa` → insert версии со статусом `draft` и `qa_status`.
 - `BudgetGuard.assert("gemini")`; стоимость всех вызовов в `api_usage_log` (`operation: localize_*`).
 - Массовый запуск: `POST /localization/scripts/:scriptId/localize-all` → по всем `custom`-языкам матрицы (отдельные job'ы).

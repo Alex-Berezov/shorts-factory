@@ -7,7 +7,7 @@
  * - stats snapshots via videos.list with batched ids (<=50 per call);
  * - every call reports units to the UsageLogger and respects the daily soft cap.
  */
-import type { UsageLogger } from "./quota.js";
+import type { UsageLogger } from "@sf/core";
 
 export interface ChannelInfo {
   ytChannelId: string;
