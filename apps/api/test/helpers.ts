@@ -1,10 +1,15 @@
-import { z } from "zod";
+import {
+  type BuildInfo,
+  type ErrorBody,
+  ErrorBodySchema,
+  type HealthReport,
+} from "@sf/contracts";
 import {
   type AppInstance,
   type BuildAppOptions,
   buildApp,
 } from "../src/app.js";
-import type { AppDeps, BuildInfo, HealthReport } from "../src/deps.js";
+import type { AppDeps, HealthProbes } from "../src/deps.js";
 
 /** Password every test app is built with; the user name is never checked. */
 export const TEST_PASSWORD = "test-admin-password";
@@ -17,9 +22,30 @@ export function basicAuthHeader(password: string, username = "admin"): string {
   return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
 }
 
-export interface TestAppOverrides {
-  /** Health report the stubbed probes return; both dependencies up by default. */
-  report?: Partial<HealthReport>;
+/**
+ * The two ways to say what the probes do, and only one of them per app: the
+ * probes replaced wholesale ignore whatever report was asked for, so a case
+ * that set both would be green for a reason its author did not write. Stating
+ * it in the type makes the pair a compile failure instead of a silent one.
+ */
+type ProbeOverride =
+  | {
+      /** Health report the stubbed probes return; both up by default. */
+      report?: Partial<HealthReport>;
+      health?: never;
+    }
+  | {
+      /**
+       * The probes themselves, for the tests where the interesting part is
+       * not what they report but that they threw: a failure on `/health`
+       * leaves through the error handler with a status the route also
+       * answers with.
+       */
+      health?: HealthProbes;
+      report?: never;
+    };
+
+interface AppOverrides {
   buildInfo?: BuildInfo;
   adminPassword?: string;
   /**
@@ -35,6 +61,8 @@ export interface TestAppOverrides {
   logger?: BuildAppOptions["logger"];
 }
 
+export type TestAppOverrides = AppOverrides & ProbeOverride;
+
 /**
  * `buildApp` with stubbed dependencies and no logging: the probes are the only
  * thing between these tests and a real database, and pino output would drown
@@ -43,7 +71,7 @@ export interface TestAppOverrides {
 export function buildTestApp(overrides: TestAppOverrides = {}): AppInstance {
   const report: HealthReport = { db: "up", redis: "up", ...overrides.report };
   const deps: AppDeps = {
-    health: { check: async () => report },
+    health: overrides.health ?? { check: async () => report },
     buildInfo: overrides.buildInfo ?? {
       version: "0.0.1-test",
       commit: "abc1234",
@@ -60,20 +88,11 @@ export function buildTestApp(overrides: TestAppOverrides = {}): AppInstance {
 }
 
 /**
- * The error envelope as a client sees it. Parsing instead of casting keeps the
- * assertions honest: a response that drifted from the shape fails here.
+ * The error envelope as a client sees it - the schema the client package
+ * parses with, not a copy of it: parsing instead of casting keeps the
+ * assertions honest, and taking the schema from `@sf/contracts` means a
+ * response that drifted from the shape fails here rather than in web.
  */
-const ErrorBodySchema = z.object({
-  error: z.object({
-    code: z.string(),
-    message: z.string(),
-    requestId: z.string().min(1),
-    details: z.unknown().optional(),
-  }),
-});
-
-export type ErrorBody = z.infer<typeof ErrorBodySchema>;
-
 export function parseErrorBody(payload: string): ErrorBody {
   return ErrorBodySchema.parse(JSON.parse(payload));
 }

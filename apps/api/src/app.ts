@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { REQUEST_ID_HEADER } from "@sf/contracts";
 import Fastify, {
   type FastifyBaseLogger,
   type FastifyInstance,
@@ -8,7 +9,6 @@ import Fastify, {
 } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import type { AppDeps } from "./deps.js";
-import { REQUEST_ID_HEADER } from "./lib/error-response.js";
 import { registerAuth } from "./plugins/auth.js";
 import {
   frameworkErrorHandler,
@@ -16,8 +16,6 @@ import {
 } from "./plugins/error-handler.js";
 import { registerOpenapi } from "./plugins/openapi.js";
 import { registerRoutes } from "./routes/index.js";
-
-export { REQUEST_ID_HEADER };
 
 /**
  * What an incoming correlation id may look like. The header is caller input on

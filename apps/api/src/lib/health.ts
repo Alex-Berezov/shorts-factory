@@ -1,6 +1,7 @@
+import type { HealthReport, ProbeStatus } from "@sf/contracts";
 import type { Db } from "@sf/db";
 import { pingDb } from "@sf/db";
-import type { HealthProbes, HealthReport, ProbeStatus } from "../deps.js";
+import type { HealthProbes } from "../deps.js";
 
 /** How long one dependency is given to answer before it counts as down. */
 const PROBE_TIMEOUT_MS = 2_000;

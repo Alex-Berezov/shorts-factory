@@ -1,11 +1,26 @@
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
+import { ErrorBodySchema } from "@sf/contracts";
 import type { FastifyInstance } from "fastify";
 import {
+  createJsonSchemaTransformObject,
   jsonSchemaTransform,
   serializerCompiler,
   validatorCompiler,
 } from "fastify-type-provider-zod";
+import type { z } from "zod";
+
+/**
+ * The named schemas of the document: every shape a route inlines and that is
+ * worth one name for a generated client. It lives with the document it
+ * describes, not with the first schema that went into it, so the next named
+ * component (`Channel`, `Idea` in E1) is added here rather than to a module
+ * about errors. Read-only: this is the registry of the whole document, and a
+ * caller has no business adding to it at runtime.
+ */
+const DOCUMENT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
+  ErrorBody: ErrorBodySchema,
+};
 
 /** Where the browsable documentation is mounted. */
 export const DOCS_ROUTE = "/docs";
@@ -23,6 +38,13 @@ const UNKNOWN_VERSION = "unknown";
  * or response shape at all, which reads as a working `/docs` and documents
  * nothing. Both this and the compilers must be in place before any route is
  * registered - `@fastify/swagger` collects routes as they are added.
+ *
+ * `transformObject` is what fills `components.schemas`: the per-route
+ * transform inlines every shape it is given, so a schema shared by all routes
+ * - the error envelope - would be repeated in each of them and named nowhere.
+ * The object transform converts the named schemas once and replaces every
+ * inlined copy of them with a `$ref`, which is what a generated client needs
+ * to have one error type instead of one per status.
  */
 export interface OpenapiOptions {
   /**
@@ -51,6 +73,9 @@ export function registerOpenapi(
       servers: [{ url: "/", description: "This instance" }],
     },
     transform: jsonSchemaTransform,
+    transformObject: createJsonSchemaTransformObject({
+      schemas: { ...DOCUMENT_SCHEMAS },
+    }),
   });
 
   app.register(swaggerUi, { routePrefix: DOCS_ROUTE });

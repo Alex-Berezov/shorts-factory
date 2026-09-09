@@ -1,10 +1,8 @@
+import { HealthResponseSchema } from "@sf/contracts";
 import { closeDb, createDb } from "@sf/db";
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
 import { createHealthProbes } from "../src/lib/health.js";
 import { AUTH_HEADER, buildTestApp } from "./helpers.js";
-
-const HealthBodySchema = z.object({ status: z.enum(["ok", "degraded"]) });
 
 /** A port nothing listens on, so the probe fails instead of hanging on DNS. */
 const CLOSED_DB_URL = "postgres://sf:sf@127.0.0.1:1/nowhere";
@@ -19,7 +17,7 @@ async function healthOf(report: {
     const res = await app.inject({ method: "GET", url: "/health" });
     return {
       statusCode: res.statusCode,
-      status: HealthBodySchema.parse(JSON.parse(res.payload)).status,
+      status: HealthResponseSchema.parse(JSON.parse(res.payload)).status,
     };
   } finally {
     await app.close();

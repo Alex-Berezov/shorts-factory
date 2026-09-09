@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@sf/config": "workspace:*",
+    "@sf/contracts": "workspace:*",
     "@sf/core": "workspace:*",
     "@sf/db": "workspace:*",
     "@sf/youtube": "workspace:*",

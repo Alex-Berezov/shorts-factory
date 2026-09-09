@@ -1,8 +1,8 @@
 import { env } from "@sf/config";
+import { HealthResponseSchema } from "@sf/contracts";
 import { closeDb, createDb } from "@sf/db";
 import type { Redis } from "ioredis";
 import { afterEach, describe, expect, it } from "vitest";
-import { z } from "zod";
 import { type AppInstance, buildApp } from "../src/app.js";
 import { createHealthProbes } from "../src/lib/health.js";
 import { createRedis } from "../src/lib/redis.js";
@@ -14,7 +14,6 @@ import { TEST_PASSWORD } from "./helpers.js";
  * database, it only proves that the probes speak to live services and that a
  * dead one is reported quickly instead of hanging.
  */
-const HealthBodySchema = z.object({ status: z.enum(["ok", "degraded"]) });
 
 /** Nothing listens here - a refused connection, not a slow one. */
 const CLOSED_REDIS_URL = "redis://127.0.0.1:6399";
@@ -93,7 +92,7 @@ describe("GET /health against live services", () => {
     const res = await app.inject({ method: "GET", url: "/health" });
 
     expect(res.statusCode).toBe(200);
-    expect(HealthBodySchema.parse(JSON.parse(res.payload))).toEqual({
+    expect(HealthResponseSchema.parse(JSON.parse(res.payload))).toEqual({
       status: "ok",
     });
   });
@@ -110,7 +109,7 @@ describe("GET /health against live services", () => {
     const elapsed = Date.now() - startedAt;
 
     expect(res.statusCode).toBe(503);
-    expect(HealthBodySchema.parse(JSON.parse(res.payload))).toEqual({
+    expect(HealthResponseSchema.parse(JSON.parse(res.payload))).toEqual({
       status: "degraded",
     });
     expect(elapsed).toBeLessThan(FAST_FAILURE_MS);

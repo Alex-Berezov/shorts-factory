@@ -1,41 +1,13 @@
+import type { ErrorBody, ErrorDetailItem } from "@sf/contracts";
 import { type AppError, BudgetExceededError, ValidationError } from "@sf/core";
 import { z } from "zod";
 
 /**
- * Correlation header, both incoming and outgoing. It lives next to the error
- * body because the two carry the same value: the `requestId` a client reads
- * out of the payload is what the header of that response says, including on
- * the failures the router answers before any hook of ours runs.
+ * What a caller of `buildErrorBody` has in hand. The wire shape itself -
+ * `ErrorBody` - is declared in `@sf/contracts` and shared with the client;
+ * this is the input side of it, where `details` is always stated and often
+ * `undefined`.
  */
-export const REQUEST_ID_HEADER = "x-request-id";
-
-/** Code and message every unmapped failure is reported with. */
-export const INTERNAL_ERROR_CODE = "INTERNAL_ERROR";
-export const INTERNAL_ERROR_MESSAGE = "Internal Server Error";
-/** Code of a request that failed schema validation. */
-export const VALIDATION_ERROR_CODE = "VALIDATION_ERROR";
-
-/** One failed field, flattened so the client does not parse Zod internals. */
-export interface ErrorDetailItem {
-  path: string;
-  message: string;
-}
-
-/**
- * The single response shape of this API: every failure - validation, domain,
- * plugin, unexpected - leaves through it, so a client parses one form and the
- * `requestId` in the body always matches the `x-request-id` header of the
- * same response.
- */
-export interface ErrorBody {
-  error: {
-    code: string;
-    message: string;
-    requestId: string;
-    details?: unknown;
-  };
-}
-
 export interface ErrorBodyInput {
   code: string;
   message: string;

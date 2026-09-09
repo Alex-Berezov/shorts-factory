@@ -223,7 +223,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 - Tailwind + shadcn/ui (инициализация, компоненты `button`, `card`, `table`, `badge`); базовые токены темы.
 - `RootLayout` с боковой навигацией по разделам из E13 (Radar / Inbox / Ideas / Production / Analytics / Experiments / Localization / System); существующие заглушки страниц остаются.
 - `middleware.ts`: HTTP Basic против `ADMIN_PASSWORD` (только серверный env), исключение для статических ассетов (решение 2).
-- Серверный `apiClient` (`@sf/api-client`) с `API_INTERNAL_URL` и паролем — вызывается только из server components / route handlers.
+- Серверный `apiClient` (`@sf/api-client`) с `API_INTERNAL_URL` и паролем — вызывается только из server components / route handlers, импортом подвхода `@sf/api-client/server`. Вместе с первым импортом `@sf/api-client` и `@sf/contracts` добавляются в `transpilePackages` (`apps/web/next.config.ts`) рядом с `@sf/config`: оба пакета source-only, без этого Next их исходники не транспилирует (ADR-0001, «Последствия»).
 - `/system`: карточки «API health», «Worker heartbeat», таблица очередей (waiting/active/failed/delayed), DLQ count, расход бюджета за день/месяц с процентами — из `/system/status`. Revalidate 15 с.
 - Проверка, что `next build` не включает `ADMIN_PASSWORD`/`API_INTERNAL_URL` в клиентские чанки (grep по `.next/static`).
 

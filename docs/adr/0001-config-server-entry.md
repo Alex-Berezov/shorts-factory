@@ -77,6 +77,20 @@
   запись в `docs/TECH_DEBT.md` на E0-01A/E0-10.
 - `@sf/config/server` читает файл через `node:fs`: в edge-runtime (middleware) он не работает,
   web импортирует подвход только в Node-runtime.
+- Запись распространяется на `@sf/api-client` (E0-07): пакет принимает `ADMIN_PASSWORD` и
+  кладёт его в заголовок `Authorization`, поэтому устроен так же - `exports` `"."` =
+  `{browser: ./src/server.ts, default: ./src/index.ts}` (порядок ключей значим: условия
+  матчатся сверху вниз, `default` матчит всё), подпуть `./server`, маркер `server-only`
+  только в `src/server.ts`, который реэкспортирует корневой вход. Проверено тем же способом:
+  `node --conditions=browser` приходит в `packages/api-client/src/server.ts`, без флага -
+  в `src/index.ts`; при перестановке ключей - в `src/index.ts` в обоих случаях, поэтому
+  порядок прибит `packages/api-client/test/exports.test.ts`. Прогона бандлера у пакета нет:
+  потребителя нет до E0-10.
+- Условие подключения в E0-10: `@sf/api-client` добавляется в `transpilePackages`
+  (`apps/web/next.config.ts`) рядом с `@sf/config` - оба пакета source-only, Next чужие
+  исходники не транспилирует, - и там же выполняется проверка grep-ом по `.next/static`,
+  что пароля в клиентских чанках нет. До этого «пароль не попадает в бандл» держится
+  резолвом условий и маркером, а не прогоном сборки.
 - Откат: удалить `src/server.ts`, строки `./server` и условный корневой вход `"."`
   (ветка `browser` -> `src/server.ts`) из `exports`, `server-only` из `dependencies`,
   а в `apps/web/next.config.ts` - обе опции, заведённые ради этой проводки:

@@ -1,3 +1,4 @@
+import { HEALTH_ANSWER_STATUSES } from "@sf/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { AppInstance } from "../src/app.js";
@@ -10,6 +11,7 @@ import { AUTH_HEADER, buildTestApp } from "./helpers.js";
 const DocumentSchema = z.object({
   openapi: z.string(),
   info: z.object({ version: z.string() }),
+  components: z.object({ schemas: z.record(z.unknown()) }).optional(),
   paths: z.record(
     z.object({
       get: z
@@ -68,6 +70,79 @@ describe("OpenAPI document", () => {
     expect(health?.responses["503"]).toBeDefined();
   });
 
+  it("names the error envelope in the components of the document", async () => {
+    // Without a named component the envelope is either absent - a generated
+    // client types failures by hand - or inlined once per status, which is
+    // the same shape under a dozen names.
+    const document = await fetchDocument();
+    const schemas = document.components?.schemas ?? {};
+
+    expect(Object.keys(schemas)).not.toHaveLength(0);
+    expect(schemas.ErrorBody).toMatchObject({
+      properties: {
+        error: {
+          properties: {
+            code: { type: "string" },
+            message: { type: "string" },
+            requestId: { type: "string" },
+          },
+          required: ["code", "message", "requestId"],
+        },
+      },
+    });
+  });
+
+  it.each(["/health", "/system/status"])(
+    "declares the failures of %s with that one envelope",
+    async (path) => {
+      const document = await fetchDocument();
+      const responses = document.paths[path]?.get?.responses ?? {};
+
+      // Wildcards rather than a list: the error handler answers with the
+      // statuses of the whole class - 401 here, 429 for a budget failure, 414
+      // for a url the router refused.
+      for (const statusClass of ["4XX", "5XX"]) {
+        expect(
+          responses[statusClass]?.content?.["application/json"].schema,
+        ).toEqual({ $ref: "#/components/schemas/ErrorBody" });
+      }
+    },
+  );
+
+  it("answers /health on the statuses the contract names, and on no others", async () => {
+    // The one place both ends of this route agree: `@sf/api-client` reads the
+    // same list to tell an answer of `/health` from a failure of it. A status
+    // the route learned to answer with and the contract does not name would
+    // reach the client as a contract failure - on the card an operator looks
+    // at during the incident that produced it.
+    const document = await fetchDocument();
+    const responses = document.paths["/health"]?.get?.responses ?? {};
+    const exact = Object.keys(responses)
+      .filter((status) => /^\d+$/.test(status))
+      .sort();
+
+    expect(exact).toEqual([...HEALTH_ANSWER_STATUSES].map(String).sort());
+  });
+
+  it("keeps both shapes on the 503 of /health", async () => {
+    // The wildcard covers the class, but this status carries `{status}` as
+    // well: an exact key that lost to the wildcard would document - and
+    // serialize - the wrong body on the one route a healthcheck reads, and an
+    // exact key that pushed the wildcard out would answer a failure on that
+    // status with the health shape, which fails to serialize at all.
+    const document = await fetchDocument();
+    const health = document.paths["/health"]?.get;
+
+    expect(
+      health?.responses["503"]?.content?.["application/json"].schema,
+    ).toMatchObject({
+      anyOf: [
+        { properties: { status: { enum: ["ok", "degraded"] } } },
+        { $ref: "#/components/schemas/ErrorBody" },
+      ],
+    });
+  });
+
   it("documents /system/status", async () => {
     const document = await fetchDocument();
 
@@ -76,8 +151,8 @@ describe("OpenAPI document", () => {
 
   it("declares the version of the build it was served by", async () => {
     // The same instance reports `APP_VERSION` through /system/status; a
-    // hardcoded number here makes the generated client of E0-07 believe a
-    // version this build never was.
+    // hardcoded number here would make a client generated from this document
+    // believe a version this build never was.
     const document = await fetchDocument();
 
     expect(document.info.version).toBe("0.0.1-test");

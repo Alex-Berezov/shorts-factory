@@ -1,3 +1,11 @@
+import {
+  CLIENT_ERROR_CODE,
+  CLIENT_ERROR_CODES,
+  INTERNAL_ERROR_CODE,
+  INTERNAL_ERROR_MESSAGE,
+  REQUEST_ID_HEADER,
+  VALIDATION_ERROR_CODE,
+} from "@sf/contracts";
 import { AppError } from "@sf/core";
 import type {
   FastifyError,
@@ -10,10 +18,6 @@ import {
   isResponseSerializationError,
 } from "fastify-type-provider-zod";
 import {
-  INTERNAL_ERROR_CODE,
-  INTERNAL_ERROR_MESSAGE,
-  REQUEST_ID_HEADER,
-  VALIDATION_ERROR_CODE,
   buildErrorBody,
   publicDetails,
   toDetailItems,
@@ -27,29 +31,10 @@ const CLIENT_ERROR_STATUS = 400;
 const MAX_ERROR_STATUS = 599;
 /** Said instead of a message that turned out to be unusable. */
 const CLIENT_ERROR_MESSAGE = "Request failed";
-/** Code of a 4xx whose status is not in the table below. */
-const CLIENT_ERROR_CODE = "CLIENT_ERROR";
 /** How much of an error message may travel to the caller. */
 const MAX_MESSAGE_LENGTH = 200;
-
-/**
- * Our codes for the failures raised by Fastify itself and by its plugins:
- * they carry a status and a human message, but their `code`
- * (`FST_BASIC_AUTH_MISSING_OR_BAD_AUTHORIZATION_HEADER`) is an implementation
- * detail a client should not branch on.
- */
-const CLIENT_ERROR_CODES: Record<number, string> = {
-  400: "BAD_REQUEST",
-  401: "UNAUTHORIZED",
-  403: "FORBIDDEN",
-  404: "NOT_FOUND",
-  405: "METHOD_NOT_ALLOWED",
-  406: "NOT_ACCEPTABLE",
-  409: "CONFLICT",
-  413: "PAYLOAD_TOO_LARGE",
-  415: "UNSUPPORTED_MEDIA_TYPE",
-  429: "TOO_MANY_REQUESTS",
-};
+/** How long a code may be before it stops being an identifier. */
+const MAX_CODE_LENGTH = 64;
 
 /**
  * The text sent when the message of the error itself may not be repeated:
@@ -125,20 +110,39 @@ function isClientStatus(status: unknown): status is number {
   return isErrorStatus(status) && status < SERVER_ERROR_STATUS;
 }
 
-/** Printable, so an escape sequence cannot reach a terminal reading the body. */
+/**
+ * Everything that is not a character a body or a log line may carry: the
+ * `C` classes (control, format, surrogate, private use, unassigned - `U+0085`
+ * and the rest of the C1 set among them) and the `Z` classes, which hold every
+ * separator there is (`U+2028`, `U+2029`) and every space that is not the
+ * plain one (`U+00A0`).
+ */
+const UNPRINTABLE = /[\p{C}\p{Z}]/u;
+
+/** The one space that is a space: runs of it are collapsed, not replaced. */
+const PLAIN_SPACE = " ";
+
+/**
+ * Printable, so an escape sequence cannot reach a terminal reading the body
+ * and a line separator cannot split a log line in two.
+ *
+ * A range check (`>= 0x20 && !== 0x7f`) is not enough for either: `U+0085`,
+ * `U+2028` and `U+00A0` all sit above it, `JSON.stringify` escapes none of
+ * them, and a JavaScript reader of the resulting line breaks on the second.
+ * The character classes state the rule once instead of listing code points.
+ */
 function isPrintable(char: string): boolean {
-  const code = char.codePointAt(0) ?? 0;
-  return code >= 0x20 && code !== 0x7f;
+  return char === PLAIN_SPACE || !UNPRINTABLE.test(char);
 }
 
 /**
  * What of an error message may be shown to the caller.
  *
- * Only messages from a known source get here - a 4xx `AppError` written by our
- * own domain code, or a failure Fastify and its plugins built - and even those
- * are bounded and flattened rather than passed through: `AppError` is
- * constructed from whatever a `catch` block had at hand, and an unbounded
- * multi-line string would go into a JSON body and into a log line as it is.
+ * Only one source gets here - a 4xx `AppError` written by our own domain code
+ * - and even that is bounded and flattened rather than passed through:
+ * `AppError` is constructed from whatever a `catch` block had at hand, and an
+ * unbounded multi-line string would go into a JSON body and into a log line
+ * as it is.
  */
 function safeMessage(message: unknown, status: number): string {
   if (typeof message !== "string") {
@@ -156,31 +160,57 @@ function safeMessage(message: unknown, status: number): string {
     : collapsed;
 }
 
+/**
+ * The written form of a code, as the convention in `@sf/contracts` states it:
+ * `UPPER_SNAKE`, starting with a letter.
+ *
+ * Matching the shape is the whole test rather than one check among several,
+ * because the things a code must not be do not share a character class. A url
+ * a provider put in its error (`https://www.googleapis.com/youtube/v3?key=…`)
+ * is one token, printable and under the length limit, so a filter built from
+ * "not too long", "printable" and "no spaces" passes it on with the key in
+ * it - proved by `test/errors.test.ts`, "refuses to send a code that is a url
+ * with a key in it". An identifier is a narrow enough form to state directly.
+ */
+const CODE_SHAPE = /^[A-Z][A-Z0-9_]*$/;
+
+/**
+ * What of an error code may be shown to the caller.
+ *
+ * The `code` of an `AppError` travels in both directions of the status range,
+ * and it is built the same way its message is - `new AppError(String(err.code
+ * ?? err.message), …, 502)` around a provider client is the shape E2 and E7
+ * produce, so the field can arrive as a sentence, a url or a kilobyte of
+ * provider output. A code is an identifier a client branches on, not prose:
+ * it is either usable as it stands or it is not ours to send, so a value
+ * outside the shape is replaced rather than trimmed - a truncated code would
+ * name a different failure.
+ *
+ * What it is replaced with follows the status, not the direction of the
+ * failure: a 4xx says what every other unnamed failure with that status says
+ * (`CLIENT_ERROR_CODES`, `BAD_REQUEST` for a 400), so one status does not
+ * reach a client under two different codes depending on what was thrown
+ * inside. `INTERNAL_ERROR` on a 400 would tell the caller - and the retry
+ * logic of a client - that the service broke, when the answer is that the
+ * request did.
+ */
+function safeCode(code: unknown, status: number): string {
+  const fallback = isClientStatus(status)
+    ? (CLIENT_ERROR_CODES[status] ?? CLIENT_ERROR_CODE)
+    : INTERNAL_ERROR_CODE;
+  if (
+    typeof code !== "string" ||
+    code.length > MAX_CODE_LENGTH ||
+    !CODE_SHAPE.test(code)
+  ) {
+    return fallback;
+  }
+  return code;
+}
+
 /** Status of a Fastify or plugin error, read off a value of unknown shape. */
 function readStatusCode(err: object): unknown {
   return "statusCode" in err ? err.statusCode : undefined;
-}
-
-/** Message of a value of unknown shape; `Error.message` is not enumerable. */
-function readMessage(err: object): unknown {
-  return "message" in err ? err.message : undefined;
-}
-
-/** The shape of a `code` on an error Fastify or one of its plugins built. */
-const FASTIFY_ERROR_CODE = /^FST_[A-Z0-9_]+$/;
-
-/**
- * Whether the text of this error was written by Fastify or one of its plugins.
- *
- * `statusCode` alone says nothing about where an object came from: an http
- * client rejects a response with the very same field, and its message is the
- * request line - `GET https://…/videos?key=… failed`. Only the errors built by
- * `@fastify/error` carry an `FST_`-prefixed code, and only those describe the
- * request instead of the call we made on behalf of it.
- */
-function isFastifyError(err: object): boolean {
-  const code = "code" in err ? err.code : undefined;
-  return typeof code === "string" && FASTIFY_ERROR_CODE.test(code);
 }
 
 /**
@@ -233,14 +263,14 @@ function mapError(err: unknown): MappedError {
     if (!isClientStatus(err.httpStatus)) {
       return {
         status: err.httpStatus,
-        code: err.code,
+        code: safeCode(err.code, err.httpStatus),
         message: statusMessage(err.httpStatus),
         details: undefined,
       };
     }
     return {
       status: err.httpStatus,
-      code: err.code,
+      code: safeCode(err.code, err.httpStatus),
       message: safeMessage(err.message, err.httpStatus),
       details: publicDetails(err),
     };
@@ -251,12 +281,15 @@ function mapError(err: unknown): MappedError {
     return {
       status,
       code: CLIENT_ERROR_CODES[status] ?? CLIENT_ERROR_CODE,
-      // Anything that merely looks like an http error - an http client's
-      // rejected response, a hand-assembled object - states its status and
-      // nothing else.
-      message: isFastifyError(err)
-        ? safeMessage(readMessage(err), status)
-        : statusMessage(status),
+      // Nothing written outside our domain code is repeated back, whoever
+      // wrote it: an http client rejects a response with the very same
+      // `statusCode` field and the request line as its message, and the
+      // messages `@fastify/error` builds are templates with the caller input
+      // filled in (`'%s' is not a valid url component`) - echoing the input
+      // is what the not-found handler and the router handler in this file
+      // already refuse to do. The full error stays in the log with the
+      // `requestId`.
+      message: statusMessage(status),
       details: undefined,
     };
   }

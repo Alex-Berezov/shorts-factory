@@ -32,6 +32,9 @@ importers:
       '@sf/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@sf/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@sf/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -159,6 +162,28 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.20.1)
 
+  packages/api-client:
+    dependencies:
+      '@sf/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      server-only:
+        specifier: ^0.0.1
+        version: 0.0.1
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.20.1)
+
   packages/config:
     dependencies:
       server-only:
@@ -171,6 +196,22 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.20.1)
+
+  packages/contracts:
+    dependencies:
+      '@sf/core':
+        specifier: workspace:*
+        version: link:../core
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
       typescript:
         specifier: ^5.6.0
         version: 5.9.3

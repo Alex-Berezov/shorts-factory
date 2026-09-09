@@ -30,17 +30,28 @@ export class AppError extends Error {
   }
 }
 
+/**
+ * The `code` of each domain error, named rather than typed in at the call
+ * site: the API error handler puts the value on the wire and a client
+ * branches on it, so the string is the contract - `@sf/contracts` re-exports
+ * these constants and adds the transport ones, and nothing spells a code out
+ * a second time.
+ */
+export const VALIDATION_ERROR_CODE = "VALIDATION_ERROR";
+export const NOT_FOUND_ERROR_CODE = "NOT_FOUND";
+export const BUDGET_EXCEEDED_ERROR_CODE = "BUDGET_EXCEEDED";
+
 /** Input that never had a chance of being valid - the caller is at fault. */
 export class ValidationError extends AppError {
   constructor(message: string, details?: unknown) {
-    super("VALIDATION_ERROR", message, 400, details);
+    super(VALIDATION_ERROR_CODE, message, 400, details);
   }
 }
 
 /** A row, file or external resource that is not there. */
 export class NotFoundError extends AppError {
   constructor(message: string, details?: unknown) {
-    super("NOT_FOUND", message, 404, details);
+    super(NOT_FOUND_ERROR_CODE, message, 404, details);
   }
 }
 
@@ -63,6 +74,6 @@ export class BudgetExceededError extends AppError {
     message: string,
     details: { provider: Provider; spent: number; cap: number },
   ) {
-    super("BUDGET_EXCEEDED", message, 429, details);
+    super(BUDGET_EXCEEDED_ERROR_CODE, message, 429, details);
   }
 }

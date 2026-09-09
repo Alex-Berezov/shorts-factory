@@ -182,7 +182,16 @@ shorts-factory/
 └── docs/           # проектная документация (этот файл, ТЗ и исходные 01–06)
 ```
 
-Правило зависимостей: `apps/* → packages/*`; `integrations → core, config`; `db → core`; `core` ни от чего не зависит. Скоринг (velocity/acceleration/ranking) — чистые функции в `core`, покрытые юнит-тестами.
+Правило зависимостей: `apps/* → packages/*`; `integrations → core, config`; `db → core`;
+`contracts → core` (только доменные коды ошибок и `zod`); `api-client → contracts` (и больше
+ни на что: ни `core`, ни `config`, ни `db` — клиент знает форму провода и адрес, а не домен);
+`core` ни от чего не зависит. Скоринг (velocity/acceleration/ranking) — чистые функции в `core`,
+покрытые юнит-тестами.
+
+`@sf/api-client` собирает `Authorization` из `ADMIN_PASSWORD` и потому серверный: два входа
+(`.` с условием `browser` и `./server`), оба ведут в модуль с маркером `server-only`, как
+у `@sf/config` (ADR-0001). Импорт клиента из клиентского компонента web — ошибка сборки,
+а не пароль в браузерном чанке.
 
 Единственное исключение: `packages/db/src/cli/**`, `packages/db/test/**` и `packages/db/vitest*.config.ts` импортируют `@sf/config`, чтобы взять `DATABASE_URL` (команды `db:migrate`, `db:seed`, тесты пакета и их конфиги, включая `setupFiles` в `vitest.int.config.ts`). Библиотечная часть `@sf/db` (`client`, `migrate`, `seed`, `repos`, `schema`) конфигурации не знает и принимает подключение параметром — см. `docs/adr/0002-db-connection-and-cli-config.md`.
 
