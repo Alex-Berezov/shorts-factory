@@ -99,8 +99,10 @@
       "E0-06"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
-    "started_at": "2026-09-09"
+    "status": "done",
+    "started_at": "2026-09-09",
+    "done_at": "2026-09-09",
+    "note": "пакеты @sf/contracts и @sf/api-client: общие Zod-схемы health и system/status, конверт ошибки в OpenAPI, типизированный клиент с двумя входами"
   },
   {
     "id": "E0-08",

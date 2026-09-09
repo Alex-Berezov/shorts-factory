@@ -22,3 +22,4 @@ _Добавляется автоматически командами `node scri
 - 2026-09-07 ✅ **E0-05** `@sf/core`: базовые доменные типы, схема Content DNA, чистые хелперы — core: domain enums, usage contract, budget and job id helpers
 - 2026-09-08 ⛔ **E0-06** blocked — стоп 3: после решения техлида о четвёртом текстовом круге остались два блокера, внесённые самим кругом - неверная оговорка README про ответчика на отказы уровня сокета и уехавшие адреса двух строк TECH_DEBT; код по DoD готов, гейты зелёные, коммита нет
 - 2026-09-09 ✅ **E0-06** `apps/api`: Fastify-скелет с auth, ошибками, логами и OpenAPI — Fastify-скелет apps/api: buildApp(deps), basic auth, единый конверт ошибок, pino, OpenAPI, /health и /system/status, graceful shutdown
+- 2026-09-09 ✅ **E0-07** `@sf/contracts` и типизированный API-клиент — пакеты @sf/contracts и @sf/api-client: общие Zod-схемы health и system/status, конверт ошибки в OpenAPI, типизированный клиент с двумя входами
