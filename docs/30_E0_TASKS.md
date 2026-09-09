@@ -161,9 +161,9 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 - pino: уровень из `LOG_LEVEL`, `pino-pretty` в dev, `requestId` в каждом логе и в ответах об ошибках.
 - `fastify-type-provider-zod` + `@fastify/swagger` + `@fastify/swagger-ui`: OpenAPI по Zod-схемам на `/docs` и `/openapi.json`.
 - `@fastify/basic-auth` глобально, исключение — `/health` (решение 2).
-- Единый error handler: `ZodError` → 400 с деталями, `AppError` → его `httpStatus`, прочее → 500 без утечки stack в ответ, всё логируется с `requestId`.
+- Единый error handler: ошибка валидации запроса (`ZodError`, обёрнутый `fastify-type-provider-zod`) → 400 с деталями; `AppError` → его `httpStatus` и `code` при любом статусе 4xx/5xx, текст сообщения наружу только у 4xx (у 5xx - типовой по статусу: `new AppError("GEMINI_FAILED", err.message, 502)` унёс бы клиенту url провайдера с ключом); голый `ZodError` из хендлера - это разбор чужого ответа, а не входа клиента, и уходит в 500 наравне с прочим - без утечки stack и текста в ответ, всё логируется с `requestId`. Отдельный класс - отказ самого роутера до того, как запрос дошёл до маршрута (`FST_ERR_BAD_URL` и соседние): тот же конверт, но без basic auth перед ним и с кодом, не входящим в доменный набор.
 - Структура `src/routes/<module>/index.ts` с `registerRoutes(app)`; в E0 модули `health` и `system`.
-- `/health`: ping Postgres и Redis, версия/коммит, uptime. `/system/status` заполняется в E0-09.
+- `/health` (без пароля): ping Postgres и Redis, ответ `{status: ok|degraded}`, 200 или 503 - и ничего об отпечатке сборки (SEC4). Версия, коммит, uptime и разбивка по зависимостям - в `/system/status` под паролем; очереди, DLQ и расход бюджета добавляет туда E0-09.
 - Тесты через `app.inject`: 401 без пароля, 200 `/health`, форма ошибки валидации, форма 500.
 
 **DoD:** `pnpm --filter @sf/api dev` поднимает API; `/docs` показывает схему; тесты зелёные.

@@ -68,6 +68,42 @@ design). The `--name` is not optional in practice: without it drizzle-kit invent
 name, and renaming the file afterwards breaks the runner, which looks migrations up by the
 name recorded in `migrations/meta/_journal.json`. An applied migration file is never edited.
 
+## API
+
+`pnpm --filter @sf/api dev` starts Fastify on `API_PORT` (3001 by default). Nothing but
+`/health` is public: the rest of the API is behind basic auth with `ADMIN_PASSWORD`, the user
+name is not checked (send `admin`), and that includes `/docs` and `/openapi.json`.
+
+| Route | Auth | What it answers |
+| --- | --- | --- |
+| `GET /health` | no | `{"status":"ok"}` with 200, `{"status":"degraded"}` with 503 when Postgres or Redis does not answer. Nothing about the build - it is the one route an outsider could reach |
+| `GET /system/status` | yes | build fingerprint (`APP_VERSION`, `GIT_COMMIT`, `null` when unset), uptime and the per-dependency checks |
+| `GET /docs` | yes | Swagger UI over the same Zod schemas |
+| `GET /openapi.json` | yes | the OpenAPI document itself |
+
+Every failure comes back in one shape - `{"error":{"code","message","requestId","details"?}}` -
+and `requestId` matches the `x-request-id` header of the response (send your own header to
+correlate a call end to end). A domain error keeps its status and its `code` in both ranges,
+so "the provider is down, try later" stays apart from "we have a bug"; the text of one travels
+only in the 4xx range, and a 5xx says the status class and nothing else. Nothing of an
+unexpected error reaches the body: it is logged and answered with `INTERNAL_ERROR`. That shape
+is guaranteed for everything that reached the router; a request Node's own HTTP parser rejects
+before Fastify sees it (400, 408, 431) is answered by the runtime itself, with no `requestId`.
+
+Running it without a repository `.env` - the variables of the process win over the file:
+
+```bash
+DATABASE_URL=postgres://sf:sf@localhost:5442/shorts_factory REDIS_URL=redis://localhost:6389 ADMIN_PASSWORD=<at least 8 characters> NODE_ENV=development pnpm --filter @sf/api exec tsx src/server.ts
+
+curl -i localhost:3001/health
+curl -i -u admin:<password> localhost:3001/system/status
+```
+
+`NODE_ENV=development` is what turns on the readable `pino-pretty` log; every other
+environment logs JSON, because `pino-pretty` is a devDependency and is not in the image.
+SIGINT and SIGTERM close Fastify, then the database and Redis, and the process exits on its
+own; a second signal does not start a second pass.
+
 ## Environment
 
 `.env` is read once, from the repository root, by `@sf/config`, and only fills variables
@@ -105,10 +141,12 @@ An unquoted value ends at the first `#`, with or without a space before it
 | `MEDIA_DIR` | media root; relative values resolve against the repository root | `./data/media` | no |
 | `ADMIN_PASSWORD` | basic auth password; empty in the template, at least 16 characters unless `NODE_ENV` is `development` or `test` | — | yes |
 | `TOKEN_ENCRYPTION_KEY` | 32-byte hex key for the stored Google refresh token | — | before Google OAuth |
+| `APP_VERSION` | build version reported by `/system/status`; unset reads as `null` there | — | no |
+| `GIT_COMMIT` | build commit, same place, same rule; any build label up to 64 characters of `A-Z a-z 0-9 . + : _ -` (a short sha, `abc1234-dirty`, `unknown`). Anything else - a space, a quote, a slash, 65 characters - reads as unset rather than stopping the service: the field is only printed by `/system/status` | — | no |
 | `API_PORT` | Fastify listen port | `3001` | no |
 | `WEB_PORT` | Next.js listen port; not wired yet, the `dev` script still hardcodes 3000 (E0-10) | `3000` | no |
 | `API_INTERNAL_URL` | api base URL used by web server components | `http://localhost:3001` | no |
-| `LOG_LEVEL` | pino level: `fatal`…`trace`; not wired yet, no logger reads it (E0-06) | `info` | no |
+| `LOG_LEVEL` | pino level: `fatal`…`trace` | `info` | no |
 | `WORKER_CONCURRENCY` | BullMQ jobs per queue, not per process: the worker runs one `Worker` per queue, so the process holds up to this many jobs times the number of queues; not wired yet, no worker reads it (E0-08) | `5` | no |
 | `GOOGLE_CLIENT_ID` | Google OAuth client | — | before Google OAuth |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client | — | before Google OAuth |

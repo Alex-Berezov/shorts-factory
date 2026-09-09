@@ -3,6 +3,7 @@
  * side effects - no connection, no environment parsing (D3).
  */
 export { closeDb, createDb, type Db } from "./client.js";
+export { pingDb } from "./health.js";
 export {
   apiUsageLogRepo,
   type UsagePeriodOptions,

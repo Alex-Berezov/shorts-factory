@@ -201,6 +201,67 @@ describe("loadEnv - TOKEN_ENCRYPTION_KEY", () => {
   });
 });
 
+describe("loadEnv - build fingerprint", () => {
+  // The two keys are cosmetic - `/system/status` reports them - but `loadEnv()`
+  // parses on import, so a rule too narrow for what a build system really
+  // passes stops api, worker, web and `db:migrate` from starting at all.
+  const acceptedCommits = [
+    // `git rev-parse --short HEAD` on a small repository
+    "abc123",
+    // full object name, and the same one as some CI systems print it
+    "0123456789abcdef0123456789abcdef01234567",
+    "0123456789ABCDEF0123456789ABCDEF01234567",
+    // `git describe --always --dirty` on a modified tree
+    "abc1234-dirty",
+    // a build that has no vcs information to pass
+    "unknown",
+  ];
+
+  for (const commit of acceptedCommits) {
+    it(`accepts ${commit} as a commit label`, () => {
+      expect(loadEnv(baseSource({ GIT_COMMIT: commit })).GIT_COMMIT).toBe(
+        commit,
+      );
+    });
+  }
+
+  // A value that does not look like a label is not an error either: the field
+  // is cosmetic, `loadEnv()` parses on import, and aborting api, worker, web
+  // and `db:migrate` over what `/system/status` prints is the larger failure.
+  // Unusable reads as unset, which the response already knows how to say.
+  const droppedLabels = [
+    // the value is echoed into a JSON body and into log lines, so it stays
+    // one short line of printable text
+    ["whitespace in it", "abc1234 dirty"],
+    ["a line break in it", "1.4.0\nrogue"],
+    ["a quote in it", 'v1.4.0"'],
+    ["a slash in it, the way GITHUB_REF_NAME writes a branch", "feature/x"],
+    ["more characters than a label may have", "a".repeat(65)],
+  ];
+
+  for (const [name, value] of droppedLabels) {
+    it(`reads a commit label with ${name} as unset`, () => {
+      expect(
+        loadEnv(baseSource({ GIT_COMMIT: value })).GIT_COMMIT,
+      ).toBeUndefined();
+    });
+  }
+
+  it("starts rather than aborts on a version a release job made up", () => {
+    // `APP_VERSION="1.4.0 (2026-09-08)"` is what a build system passes when
+    // nobody told it not to.
+    expect(
+      loadEnv(baseSource({ APP_VERSION: "1.4.0 (2026-09-08)" })).APP_VERSION,
+    ).toBeUndefined();
+  });
+
+  it("accepts a version with pre-release and build metadata", () => {
+    expect(
+      loadEnv(baseSource({ APP_VERSION: "1.4.0-rc.1+build.5" })).APP_VERSION,
+    ).toBe("1.4.0-rc.1+build.5");
+  });
+});
+
 describe("loadEnv - undeclared environment", () => {
   const environmentKey = "NODE_ENV";
 

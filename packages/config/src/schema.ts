@@ -18,6 +18,39 @@ const MAX_WORKER_CONCURRENCY = 10;
 const HEX_32_BYTES = /^[0-9a-fA-F]{64}$/;
 
 /**
+ * What may be used as a build label. Deliberately a charset-and-length rule
+ * rather than the shape of a git object name: `git rev-parse HEAD` gives a
+ * lowercase sha, but `git describe --always --dirty` gives `abc1234-dirty`,
+ * a CI job passes a tag (`v1.4.0`), a short sha is six characters on a small
+ * repository and a build with no vcs information passes `unknown`. What the
+ * rule guards is the only thing that matters here: the value is echoed into a
+ * JSON response and into log lines, so it stays one short line of printable
+ * text, with no spaces, quotes or control characters.
+ */
+const BUILD_LABEL = /^[\w.+:-]{1,64}$/;
+
+/**
+ * An optional cosmetic label: the value when it looks like one, and nothing
+ * when it does not.
+ *
+ * Not `.regex()`, deliberately. `loadEnv()` parses on import, so a rejected
+ * value aborts api, worker, web and `db:migrate` alike - and the two fields
+ * this is used for are only ever printed by `/system/status`. A build system
+ * hands over what it has (`APP_VERSION="1.4.0 (2026-09-08)"` from a release
+ * job, `GIT_COMMIT=feature/x-abc1234` from `GITHUB_REF_NAME`), and the answer
+ * to that is the same as to an unset variable: `null` in the response, a
+ * service that starts.
+ */
+function buildLabel(): z.ZodType<string | undefined, z.ZodTypeDef, unknown> {
+  return z
+    .string()
+    .optional()
+    .transform((value) =>
+      value !== undefined && BUILD_LABEL.test(value) ? value : undefined,
+    );
+}
+
+/**
  * Media files live in one place for every package. A relative value is
  * resolved against the repository root, so `pnpm test` from a package
  * directory does not scatter `data/` folders across the workspace; an
@@ -49,6 +82,12 @@ export const EnvSchema = z.object({
   // Charset matters: 64 non-hex characters would pass a length check and then
   // `Buffer.from(key, "hex")` would silently yield a truncated AES key.
   TOKEN_ENCRYPTION_KEY: z.string().regex(HEX_32_BYTES).optional(),
+
+  // Build fingerprint, both optional: only a container build knows them
+  // (E0-11 passes them as build args). Absent means absent - `/system/status`
+  // reports `null` rather than a made-up version.
+  APP_VERSION: buildLabel(),
+  GIT_COMMIT: buildLabel(),
 
   API_PORT: z.coerce.number().int().positive().max(MAX_PORT).default(3001),
   WEB_PORT: z.coerce.number().int().positive().max(MAX_PORT).default(3000),
