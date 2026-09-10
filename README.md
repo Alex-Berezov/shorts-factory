@@ -104,6 +104,26 @@ environment logs JSON, because `pino-pretty` is a devDependency and is not in th
 SIGINT and SIGTERM close Fastify, then the database and Redis, and the process exits on its
 own; a second signal does not start a second pass.
 
+## Worker
+
+`pnpm --filter @sf/worker dev` runs the BullMQ worker - `node --import tsx src/index.ts`, one
+process, no file watcher. That is deliberate: a watcher restarts the process the moment a file
+is saved, and a job worker restarted mid-job loses the job it was holding (with E2 that is a
+paid call already made). It also owns the signal: `tsx watch` forwards Ctrl+C to the child with
+`child.kill()` and follows with SIGKILL five seconds later, while the worker's own drain is
+given twenty-five, so the very thing the graceful stop exists for would never finish. Restart
+it by hand after a change - Ctrl+C, then the same command; the stop waits for the jobs in
+flight and says so in the log (`shutdown started, draining active jobs` ... `shutdown
+complete`).
+
+`pnpm --filter @sf/worker smoke` puts one `system.smoke` job on the queue and waits for that
+worker to finish it: it is the end-to-end check of the pipeline (Redis, the worker, a row in
+`api_usage_log`). With the stack down it gives up on its own after a thirty-second deadline -
+plus up to a second to ask the queue why and up to five more to close its own connections, so
+the command itself can take closer to forty seconds - and says which of three things happened:
+no worker is serving the queue, the queue is switched off (the job is still waiting, see
+`app_setting "queues.enabled"`), or Redis could not even be asked because it is down.
+
 ## Environment
 
 `.env` is read once, from the repository root, by `@sf/config`, and only fills variables

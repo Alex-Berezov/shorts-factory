@@ -41,6 +41,67 @@ describe("jobId", () => {
       ValidationError,
     );
   });
+
+  it("refuses an id made of digits alone", () => {
+    // BullMQ answers such an id with "Custom Id cannot be integers" inside
+    // `queue.add`, so without this the failure lands in the runtime.
+    expect(() => jobId("42")).toThrow(ValidationError);
+    expect(() => jobId("1", 2)).not.toThrow();
+  });
+});
+
+describe("jobIds.systemSmoke", () => {
+  it("names the queue and the moment the run was asked for", () => {
+    expect(jobIds.systemSmoke(1_773_000_000_000)).toBe(
+      "system.smoke/1773000000000",
+    );
+  });
+
+  it("gives two runs two ids", () => {
+    expect(jobIds.systemSmoke(1)).not.toBe(jobIds.systemSmoke(2));
+  });
+});
+
+describe("jobIds.dlqEntry", () => {
+  it("carries the original id and the moment the instance was created", () => {
+    expect(
+      jobIds.dlqEntry(
+        "radar.score",
+        "radar.score/abc123/24h",
+        1_773_000_000_000,
+      ),
+    ).toBe("dlq/radar.score/radar.score/abc123/24h/1773000000000");
+  });
+
+  it("encodes the colons of a scheduler id", () => {
+    // BullMQ builds `repeat:<schedulerId>:<millis>` for a scheduled job, and a
+    // custom id with a colon survives `validateOptions` only by an exception
+    // for exactly three segments that BullMQ promises to drop.
+    expect(
+      jobIds.dlqEntry(
+        "system.heartbeat",
+        "repeat:system.heartbeat:1773000000000",
+        7,
+      ),
+    ).toBe("dlq/system.heartbeat/repeat@system.heartbeat@1773000000000/7");
+  });
+
+  it("keeps an id of digits alone out of the record", () => {
+    // The default id BullMQ hands out is a number; wrapped it is still a legal
+    // custom id, and the guard has to stay true for the assembled string.
+    expect(jobIds.dlqEntry("system.smoke", "128", 7)).toBe(
+      "dlq/system.smoke/128/7",
+    );
+  });
+
+  it("refuses an empty original id and a non-finite timestamp", () => {
+    expect(() => jobIds.dlqEntry("system.smoke", "", 7)).toThrow(
+      ValidationError,
+    );
+    expect(() => jobIds.dlqEntry("system.smoke", "abc", Number.NaN)).toThrow(
+      ValidationError,
+    );
+  });
 });
 
 describe("intervalSlot", () => {

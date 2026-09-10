@@ -1,4 +1,4 @@
-import { QUEUE_NAMES } from "@sf/core";
+import { QUEUE_NAMES, QUEUE_SWITCHES_KEY } from "@sf/core";
 import { sql } from "drizzle-orm";
 import type { Db } from "./client.js";
 import { appSetting } from "./schema/system.js";
@@ -25,7 +25,7 @@ const DEFAULT_APP_SETTINGS: (typeof appSetting.$inferInsert)[] = [
     // the weakest until a channel has enough history for it (E1-05).
     value: { velocity: 0.5, acceleration: 0.3, baselineRatio: 0.2 },
   },
-  { key: "queues.enabled", value: defaultQueueSwitches() },
+  { key: QUEUE_SWITCHES_KEY, value: defaultQueueSwitches() },
 ];
 
 /**
@@ -53,4 +53,45 @@ export async function seedAppSettings(db: Db): Promise<void> {
       set: { value: merged, updatedAt: sql`now()` },
       setWhere: sql`${merged} IS DISTINCT FROM ${appSetting.value}`,
     });
+
+  await pruneQueueSwitches(db);
+}
+
+/**
+ * Drops switches of queues that no longer exist.
+ *
+ * The merge above only ever adds keys, so a queue that was renamed or removed
+ * leaves its switch behind for good, and an operator sees a live-looking
+ * toggle for a queue that is not there - and turns off something else, or
+ * nothing at all. The worker cannot do this cleanup itself: it would be a
+ * write from a process that only reads the setting, racing every other worker.
+ * `pnpm db:seed` already runs on every deploy (E0-11), and the known set is
+ * exactly `QUEUE_NAMES`.
+ *
+ * Only this row. `radar.weights` grows the same way, but its known set is the
+ * shape of `TrendWeights`, which is E1-05's to define (docs/TECH_DEBT.md).
+ *
+ * One statement, and it touches nothing when there is nothing to drop: the
+ * `EXISTS` keeps `updated_at` - "when the operator last changed this" - from
+ * moving on every deploy.
+ */
+async function pruneQueueSwitches(db: Db): Promise<void> {
+  const known = sql.join(
+    QUEUE_NAMES.map((name) => sql`${name}`),
+    sql`, `,
+  );
+  await db.execute(sql`
+    update ${appSetting} set
+      value = (
+        select coalesce(jsonb_object_agg(entry.key, entry.value), '{}'::jsonb)
+        from jsonb_each(${appSetting.value}) as entry
+        where entry.key in (${known})
+      ),
+      ${sql.identifier(appSetting.updatedAt.name)} = now()
+    where ${appSetting.key} = ${QUEUE_SWITCHES_KEY}
+      and exists (
+        select 1 from jsonb_each(${appSetting.value}) as entry
+        where entry.key not in (${known})
+      )
+  `);
 }

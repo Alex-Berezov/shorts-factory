@@ -147,6 +147,55 @@ describe("seedAppSettings", () => {
   });
 
   /**
+   * The other direction of the same row: a queue that was renamed or dropped
+   * leaves its switch behind, because the merge only ever adds keys. An
+   * operator then sees a live-looking toggle for a queue that is not there
+   * (docs/TECH_DEBT.md, 06.09.2026, and the decision of 10.09.2026).
+   */
+  it("drops switches of queues that are gone, keeping the operator's choices", async () => {
+    const stillThere = QUEUE_NAMES[0];
+    if (stillThere === undefined) {
+      throw new Error("the queue registry needs at least one name");
+    }
+    const stored: Record<string, boolean> = Object.fromEntries(
+      QUEUE_NAMES.map((name) => [name, true]),
+    );
+    // A queue that used to exist, and a live one the operator turned off.
+    stored["radar.sync"] = true;
+    stored[stillThere] = false;
+    await appSettingRepo.set(db, "queues.enabled", stored);
+
+    await seedAppSettings(db);
+
+    expect(await appSettingRepo.get(db, "queues.enabled")).toEqual({
+      ...Object.fromEntries(QUEUE_NAMES.map((name) => [name, true])),
+      [stillThere]: false,
+    });
+  });
+
+  /**
+   * The cleanup belongs to one row. `radar.weights` grows the same way, but
+   * its known set is the shape of `TrendWeights` - E1-05's to define.
+   */
+  it("leaves the other settings alone", async () => {
+    await appSettingRepo.set(db, "radar.weights", {
+      velocity: 0.5,
+      acceleration: 0.3,
+      baselineRatio: 0.2,
+      retired: 0.1,
+    });
+
+    await seedAppSettings(db);
+
+    expect(await appSettingRepo.get(db, "radar.weights")).toEqual({
+      velocity: 0.5,
+      acceleration: 0.3,
+      baselineRatio: 0.2,
+      retired: 0.1,
+    });
+  });
+
+  /**
    * `updated_at` answers "when did the operator last touch this setting". A
    * seed that merges nothing new must not answer it with the time of the last
    * deploy: `pnpm db:seed` runs on every start of the migration service

@@ -6,5 +6,6 @@ export * from "./domain/idea.js";
 export * from "./domain/job-ids.js";
 export * from "./domain/provider.js";
 export * from "./domain/queues.js";
+export * from "./domain/redis-keys.js";
 export * from "./domain/scoring.js";
 export * from "./domain/usage.js";

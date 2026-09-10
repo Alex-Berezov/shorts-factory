@@ -29,3 +29,4 @@
 | --- | --- | --- |
 | `0001-config-server-entry.md` | два входа `@sf/config`: корневой для Node, `./server` с маркером `server-only` для Next; с E0-07 то же устройство у `@sf/api-client` (последний абзац «Последствий») | E0-03, E0-07 |
 | `0002-db-connection-and-cli-config.md` | библиотека `@sf/db` принимает подключение параметром; `DATABASE_URL` читают только `packages/db/src/cli/**`, `packages/db/test/**` и `packages/db/vitest*.config.ts` | E0-04 |
+| `0003-queue-switches.md` | `queues.enabled=false` = пауза очереди BullMQ; ставит её только воркер (старт + ресинк раз в минуту), api и E1-08 выражают намерение записью в `app_setting`: оператор - в `queues.enabled`, E1-08 - своим ключом `queues.autopaused` (`Record<очередь, причина>`), композиция двух ключей - в `queue-switches.ts` | E0-08 |

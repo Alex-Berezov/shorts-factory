@@ -1,29 +1,31 @@
 # Статус проекта — где мы сейчас
 
-_Сгенерировано `node scripts/tasks.mjs render` 2026-09-09. **Не редактировать руками** — источник: `docs/tasks/tasks.json`. Спецификация задач — в документах `docs/3x_Ex_TASKS.md`; журнал — `docs/90_WORKLOG.md`._
+_Сгенерировано `node scripts/tasks.mjs render` 2026-09-10. **Не редактировать руками** — источник: `docs/tasks/tasks.json`. Спецификация задач — в документах `docs/3x_Ex_TASKS.md`; журнал — `docs/90_WORKLOG.md`._
 
 ## Сводка
 
 - **Прогресс:** `██░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 7/123 задач, 6.5 / 139.2 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** ничего — возьмите задачу из «Следующие»
+- **В работе:** [E0-08](30_E0_TASKS.md#e0-08-appsworker-bullmq-каркас-dlq-cron-реестр-graceful-shutdown-smoke-job) `apps/worker`: BullMQ-каркас, DLQ, cron-реестр, graceful shutdown, smoke-job
 - **Заблокировано:** [E0-01A](30_E0_TASKS.md#e0-01a-включить-гейт-build-в-rulessfjson) (запись в .claude/hooks/rules.sf.json отклоняется инструментами Write/Edit (проверено 06.09 в заходе E0-02: 4 попытки у worker и 1 у оркестратора, текст отказа - denied because Claude Code is running in don't ask mode); источник отказа в этом заходе установить не удалось - deny-правила на .claude/** нет ни в глобальном, ни в проектном settings, allow есть; успешной записи в .claude/hooks/** в заходе не было ни разу; обход через Bash запрещён правилами, снимает только владелец); [E0-02A](30_E0_TASKS.md#e0-02a-включить-гейты-test-и-testint-в-rulessfjson) (запись в .claude/hooks/rules.sf.json отклоняется инструментами Write/Edit (проверено 06.09 в заходе E0-02: 4 попытки у worker и 1 у оркестратора, текст отказа - denied because Claude Code is running in don't ask mode); источник отказа установить не удалось - deny-правила на .claude/** нет ни в глобальном, ни в проектном settings, allow есть; обход через Bash запрещён, снимает только владелец; исполняется одним заходом с E0-01A)
 
 ## Сейчас в работе
 
-_Нет задач в работе._
+| Задача | Название | Оценка | Начата |
+|---|---|---|---|
+| [E0-08](30_E0_TASKS.md#e0-08-appsworker-bullmq-каркас-dlq-cron-реестр-graceful-shutdown-smoke-job) | `apps/worker`: BullMQ-каркас, DLQ, cron-реестр, graceful shutdown, smoke-job | 2 д | 2026-09-10 |
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
 | Задача | Название | Оценка | Эпик |
 |---|---|---|---|
-| [E0-08](30_E0_TASKS.md#e0-08-appsworker-bullmq-каркас-dlq-cron-реестр-graceful-shutdown-smoke-job) | `apps/worker`: BullMQ-каркас, DLQ, cron-реестр, graceful shutdown, smoke-job | 2 д | E0 |
 | [E12-01](42_E12_TASKS.md#e12-01-sfcore-схема-журнала-и-csv-парсер) | `@sf/core`: схема журнала и CSV-парсер | 0.5 д | E12 |
 | [E2-01](32_E2_TASKS.md#e2-01-спайк-gemini-video-understanding-по-youtube-url) | Спайк: Gemini video understanding по YouTube URL | 1.5 д | E2 |
 | [E2-02](32_E2_TASKS.md#e2-02-реестр-промптов-и-синк-promptversion) | Реестр промптов и синк `prompt_version` | 0.5 д | E2 |
 | [E3-01](33_E3_TASKS.md#e3-01-sfcore-схема-карточки-ранжирование-дедупликация-статусы) | `@sf/core`: схема карточки, ранжирование, дедупликация, статусы | 1 д | E3 |
+| [E4-01](34_E4_TASKS.md#e4-01-sfcore-схемы-брифа-и-правило-верификации) | `@sf/core`: схемы брифа и правило верификации | 1 д | E4 |
 
-Взять в работу: `node scripts/tasks.mjs start E0-08`
+Взять в работу: `node scripts/tasks.mjs start E12-01`
 
 ## Заблокировано
 
@@ -68,10 +70,10 @@ _Нет задач в работе._
 | ✅ | [E0-05](30_E0_TASKS.md#e0-05-sfcore-базовые-доменные-типы-схема-content-dna-чистые-хелперы) | `@sf/core`: базовые доменные типы, схема Content DNA, чистые хелперы | 1 д | ✅E0-02 ✅E0-04 | 2026-09-07 | 2026-09-07 |
 | ✅ | [E0-06](30_E0_TASKS.md#e0-06-appsapi-fastify-скелет-с-auth-ошибками-логами-и-openapi) | `apps/api`: Fastify-скелет с auth, ошибками, логами и OpenAPI | 1.5 д | ✅E0-04 ✅E0-05 | 2026-09-08 | 2026-09-09 |
 | ✅ | [E0-07](30_E0_TASKS.md#e0-07-sfcontracts-и-типизированный-api-клиент) | `@sf/contracts` и типизированный API-клиент | 0.5–1 д | ✅E0-06 | 2026-09-09 | 2026-09-09 |
-| ⬜ | [E0-08](30_E0_TASKS.md#e0-08-appsworker-bullmq-каркас-dlq-cron-реестр-graceful-shutdown-smoke-job) | `apps/worker`: BullMQ-каркас, DLQ, cron-реестр, graceful shutdown, smoke-job | 2 д | ✅E0-04 ✅E0-05 |  |  |
-| ⬜ | [E0-09](30_E0_TASKS.md#e0-09-учёт-стоимости-внешних-api-и-проверка-бюджета) | Учёт стоимости внешних API и проверка бюджета | 1 д | ✅E0-07 ⬜E0-08 |  |  |
+| 🔄 | [E0-08](30_E0_TASKS.md#e0-08-appsworker-bullmq-каркас-dlq-cron-реестр-graceful-shutdown-smoke-job) | `apps/worker`: BullMQ-каркас, DLQ, cron-реестр, graceful shutdown, smoke-job | 2 д | ✅E0-04 ✅E0-05 | 2026-09-10 |  |
+| ⬜ | [E0-09](30_E0_TASKS.md#e0-09-учёт-стоимости-внешних-api-и-проверка-бюджета) | Учёт стоимости внешних API и проверка бюджета | 1 д | ✅E0-07 🔄E0-08 |  |  |
 | ⬜ | [E0-10](30_E0_TASKS.md#e0-10-appsweb-nextjs-скелет-layout-с-навигацией-basic-auth-страница-system) | `apps/web`: Next.js-скелет, layout с навигацией, basic auth, страница `/system` | 1.5 д | ✅E0-07 ⬜E0-09 |  |  |
-| ⬜ | [E0-11](30_E0_TASKS.md#e0-11-docker-dockerfileы-apiworkerweb-полный-compose-миграции-бэкап) | Docker: Dockerfile'ы api/worker/web, полный Compose, миграции, бэкап | 1.5 д | ✅E0-06 ⬜E0-08 ⬜E0-10 |  |  |
+| ⬜ | [E0-11](30_E0_TASKS.md#e0-11-docker-dockerfileы-apiworkerweb-полный-compose-миграции-бэкап) | Docker: Dockerfile'ы api/worker/web, полный Compose, миграции, бэкап | 1.5 д | ✅E0-06 🔄E0-08 ⬜E0-10 |  |  |
 | ⬜ | [E0-12](30_E0_TASKS.md#e0-12-ci-сервисы-postgresredis-кэш-интеграционные-тесты-сборка-образов) | CI: сервисы Postgres/Redis, кэш, интеграционные тесты, сборка образов | 0.5 д | ⬜E0-11 |  |  |
 | ⬜ | [E0-13](30_E0_TASKS.md#e0-13-документация-разработчика-adr-закрытие-эпика) | Документация разработчика, ADR, закрытие эпика | 0.5 д | ⬜E0-12 |  |  |
 
@@ -91,7 +93,7 @@ _Нет задач в работе._
 |---|---|---|---|---|---|---|
 | ⬜ | [E1-01](31_E1_TASKS.md#e1-01-sfyoutube-клиент-data-api-для-публичных-чтений) | `@sf/youtube`: клиент Data API для публичных чтений | 1.5 д | ✅E0-05 ⬜E0-09 |  |  |
 | ⬜ | [E1-02](31_E1_TASKS.md#e1-02-каналы-парсинг-ввода-резолв-crud-api-и-контракты) | Каналы: парсинг ввода, резолв, CRUD, API и контракты | 1 д | ✅E0-06 ✅E0-07 ⬜E1-01 |  |  |
-| ⬜ | [E1-03](31_E1_TASKS.md#e1-03-job-radarsync-channels-новые-видео-фильтр-shorts-backfill) | Job `radar.sync-channels`: новые видео, фильтр Shorts, backfill | 1.5 д | ⬜E0-08 ⬜E1-02 |  |  |
+| ⬜ | [E1-03](31_E1_TASKS.md#e1-03-job-radarsync-channels-новые-видео-фильтр-shorts-backfill) | Job `radar.sync-channels`: новые видео, фильтр Shorts, backfill | 1.5 д | 🔄E0-08 ⬜E1-02 |  |  |
 | ⬜ | [E1-04](31_E1_TASKS.md#e1-04-job-radarsnapshot-тик-выбор-due-точек-батч-снапшоты-недоступные-видео) | Job `radar.snapshot`: тик, выбор due-точек, батч-снапшоты, недоступные видео | 1.5 д | ⬜E1-03 |  |  |
 | ⬜ | [E1-05](31_E1_TASKS.md#e1-05-базлайн-канала-расчёт-backfill-ежедневный-пересчёт) | Базлайн канала: расчёт, backfill, ежедневный пересчёт | 1 д | ⬜E1-04 |  |  |
 | ⬜ | [E1-06](31_E1_TASKS.md#e1-06-job-radarscore-и-trendsignal) | Job `radar.score` и `trend_signal` | 1 д | ⬜E1-05 |  |  |
@@ -110,7 +112,7 @@ _Нет задач в работе._
 | ⬜ | [E2-03](32_E2_TASKS.md#e2-03-videoanalysisclient-полный-проход-по-url) | `VideoAnalysisClient`: полный проход по URL | 1.5 д | ⬜E0-09 ⬜E2-01 ⬜E2-02 |  |  |
 | ⬜ | [E2-04](32_E2_TASKS.md#e2-04-hook-pass-и-режим-локального-файла) | Hook pass и режим локального файла | 1 д | ⬜E2-03 |  |  |
 | ⬜ | [E2-05](32_E2_TASKS.md#e2-05-бд-миграция-0002intel-репозиторий-анализов) | БД: миграция `0002_intel`, репозиторий анализов | 0.5 д | ⬜E2-04 |  |  |
-| ⬜ | [E2-06](32_E2_TASKS.md#e2-06-джобы-intelanalyze-video-и-intelhook-pass-автозапуск) | Джобы `intel.analyze-video` и `intel.hook-pass`, автозапуск | 1.5 д | ⬜E0-08 ⬜E1-06 ⬜E2-05 |  |  |
+| ⬜ | [E2-06](32_E2_TASKS.md#e2-06-джобы-intelanalyze-video-и-intelhook-pass-автозапуск) | Джобы `intel.analyze-video` и `intel.hook-pass`, автозапуск | 1.5 д | 🔄E0-08 ⬜E1-06 ⬜E2-05 |  |  |
 | ⬜ | [E2-07](32_E2_TASKS.md#e2-07-api-и-контракты-intelligence) | API и контракты Intelligence | 0.5–1 д | ⬜E2-06 |  |  |
 | ⬜ | [E2-08](32_E2_TASKS.md#e2-08-ui-карточка-content-dna) | UI: карточка Content DNA | 2 д | ⬜E1-10 ⬜E2-07 |  |  |
 | ⬜ | [E2-09](32_E2_TASKS.md#e2-09-бюджет-gemini-на-system) | Бюджет Gemini на `/system` | 0.5 д | ⬜E0-09 ⬜E2-06 |  |  |
@@ -241,7 +243,7 @@ _Нет задач в работе._
 | | Задача | Название | Оценка | Зависимости | Начата | Готова |
 |---|---|---|---|---|---|---|
 | ⬜ | [E13-01](43_E13_TASKS.md#e13-01-навигация-и-оболочка) | Навигация и оболочка | 1 д | ⬜E0-10 |  |  |
-| ⬜ | [E13-02](43_E13_TASKS.md#e13-02-очереди-планировщики-dlq-—-просмотр-и-управление) | Очереди, планировщики, DLQ — просмотр и управление | 1.5 д | ⬜E0-08 ⬜E0-09 |  |  |
+| ⬜ | [E13-02](43_E13_TASKS.md#e13-02-очереди-планировщики-dlq-—-просмотр-и-управление) | Очереди, планировщики, DLQ — просмотр и управление | 1.5 д | 🔄E0-08 ⬜E0-09 |  |  |
 | ⬜ | [E13-03](43_E13_TASKS.md#e13-03-история-расходов-и-прогнозы) | История расходов и прогнозы | 1 д | ⬜E0-09 |  |  |
 | ⬜ | [E13-04](43_E13_TASKS.md#e13-04-центр-алертов) | Центр алертов | 1 д | ⬜E13-03 |  |  |
 | ⬜ | [E13-05](43_E13_TASKS.md#e13-05-внешние-условия) | Внешние условия | 0.5 д | ✅E0-06 |  |  |

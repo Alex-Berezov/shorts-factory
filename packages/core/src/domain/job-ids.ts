@@ -56,9 +56,49 @@ function segment(value: JobIdPart, position: string): string {
  */
 export function jobId(prefix: string, ...parts: JobIdPart[]): string {
   const head = segment(prefix, "prefix");
-  return [head, ...parts.map((part, i) => segment(part, `part ${i + 1}`))].join(
-    "/",
+  return finalize(
+    [head, ...parts.map((part, i) => segment(part, `part ${i + 1}`))].join("/"),
   );
+}
+
+/** An id BullMQ reads as a number is refused: `Job.addJob -> validateOptions`. */
+const ALL_DIGITS = /^\d+$/;
+
+/**
+ * The last gate every builder here goes through. BullMQ rejects a custom id
+ * that parses back to itself as an integer ("Custom Id cannot be integers"),
+ * and an id of digits alone is exactly that: `jobId("42")` passes every rule
+ * above and then fails inside `queue.add` - in the runtime, not in a test.
+ */
+function finalize(id: string): string {
+  if (ALL_DIGITS.test(id)) {
+    throw new ValidationError(
+      `jobId "${id}" consists of digits only; BullMQ refuses such an id ("Custom Id cannot be integers") - give it a prefix`,
+      { id },
+    );
+  }
+  return id;
+}
+
+/**
+ * A finished id carried inside another id (a DLQ copy of a failed job, the
+ * retry of that copy in E13-02).
+ *
+ * It cannot go through `segment()`: an id already holds `/`, and the ids BullMQ
+ * builds for its schedulers hold `:` as well (`repeat:<schedulerId>:<millis>`).
+ * The separators are the reason both are forbidden inside a part, so the only
+ * thing this does is make the value legal as a custom id again: `:` becomes
+ * `@`, because a custom id with a colon survives `validateOptions` today only
+ * by an exception for exactly three segments that BullMQ promises to drop.
+ *
+ * The result is not reversible, and nothing tries to reverse it: a DLQ record
+ * carries the queue, the id and the name as fields (decision of 10.09.2026).
+ */
+function embedJobId(value: string, position: string): string {
+  if (value === "") {
+    throw new ValidationError(`jobId ${position} is empty`, { value });
+  }
+  return value.replaceAll(":", "@");
 }
 
 /**
@@ -96,5 +136,46 @@ export const jobIds = {
   /** One scoring per video per snapshot point (E1-06), by `yt_video_id`. */
   radarScore(videoId: string, point: SnapshotPoint): string {
     return jobId("radar.score", videoId, point);
+  },
+
+  /**
+   * One smoke job per moment it was asked for (E0-08). The millisecond is the
+   * whole id: two operators running `pnpm --filter @sf/worker smoke` at once
+   * want two runs, and a stable id would silently give them one.
+   */
+  systemSmoke(requestedAtMs: number): string {
+    return jobId("system.smoke", requestedAtMs);
+  },
+
+  /**
+   * The heartbeat tick of `apps/worker` (E0-08), one per interval slot. The
+   * scheduler that normally fires it builds its own ids; this builder is for a
+   * tick asked for by hand, and the slot is what keeps two such asks inside
+   * one minute from writing the stamp twice.
+   */
+  systemHeartbeat(slot: number): string {
+    return jobId("system.heartbeat", slot);
+  },
+
+  /**
+   * The copy of a finally failed job in `system.dlq` (E0-08, decision of
+   * 10.09.2026). Deterministic so that a second `failed` event for the same
+   * job - a worker restarted while the job was dying - does not leave two
+   * records for E13-02 to deduplicate.
+   *
+   * The tail is `job.timestamp`, not `attemptsMade`: at a final failure the
+   * attempts made always equal the attempts allowed and tell two records
+   * apart in no way, while the timestamp differs exactly when there really is
+   * a second record to keep - the same id enqueued again after
+   * `removeOnFail` dropped the first instance.
+   */
+  dlqEntry(queue: string, originalId: string, createdAtMs: number): string {
+    return finalize(
+      [
+        jobId("dlq", queue),
+        embedJobId(originalId, "original id"),
+        segment(createdAtMs, "created at"),
+      ].join("/"),
+    );
   },
 } as const;

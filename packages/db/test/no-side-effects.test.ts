@@ -45,7 +45,10 @@ describe("@sf/db entry point", () => {
     createDb(TEST_URL);
 
     expect(postgresFactory).toHaveBeenCalledTimes(1);
-    expect(postgresFactory).toHaveBeenCalledWith(TEST_URL, { max: 10 });
+    expect(postgresFactory).toHaveBeenCalledWith(TEST_URL, {
+      max: 10,
+      connect_timeout: 10,
+    });
   });
 
   it("imports without DATABASE_URL in the environment", async () => {

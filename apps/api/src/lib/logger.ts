@@ -1,15 +1,24 @@
 import type { Env } from "@sf/config";
 
 /**
- * Header paths pino replaces with `[Redacted]`. Basic auth ships the admin
- * password base64-encoded in `authorization`, so any handler or plugin that
- * dumps `req.headers` (a 400 from the body parser already logs the request)
- * would write the single secret of this service into the log file.
+ * Paths pino replaces with `[Redacted]`. Basic auth ships the admin password
+ * base64-encoded in `authorization`, so any handler or plugin that dumps
+ * `req.headers` (a 400 from the body parser already logs the request) would
+ * write the single secret of this service into the log file.
+ *
+ * The last three cover the other secret this service holds: ioredis attaches
+ * the command it was running to the error it emits (`err.command = { name,
+ * args }`), pino's error serializer copies every own property of an error, and
+ * `server.ts` logs the whole Redis error - so a failed `auth` against a Redis
+ * with a password would print that password.
  */
 export const REDACTED_LOG_PATHS = [
   "req.headers.authorization",
   "req.headers.cookie",
   "res.headers['set-cookie']",
+  "err.command.args",
+  "err.command",
+  "*.command.args",
 ] as const;
 
 /** Pretty printer options, only ever used in local development. */

@@ -10,8 +10,27 @@ import * as schema from "./schema/index.js";
  * stays on `db -> core` and only `src/cli/**` reads configuration
  * (docs/adr/0002-db-connection-and-cli-config.md).
  */
-export function createDb(url: string, opts?: { max?: number }) {
-  const client = postgres(url, { max: opts?.max ?? 10 });
+/**
+ * How long a connection attempt is given, in seconds.
+ *
+ * postgres-js leaves this to the driver default otherwise, which means "as
+ * long as the operating system takes to give up on the socket" - minutes on a
+ * host that drops packets rather than refusing them. Every caller then
+ * inherits a wait it did not choose: `pingDb` behind the health probe deadline
+ * is the only one that has a bound of its own, while a migration or a worker
+ * job would simply hang. Ten seconds is far above a healthy local or
+ * in-network connect and far below "nobody will notice".
+ */
+const CONNECT_TIMEOUT_SEC = 10;
+
+export function createDb(
+  url: string,
+  opts?: { max?: number; connectTimeoutSec?: number },
+) {
+  const client = postgres(url, {
+    max: opts?.max ?? 10,
+    connect_timeout: opts?.connectTimeoutSec ?? CONNECT_TIMEOUT_SEC,
+  });
   return drizzle(client, { schema });
 }
 

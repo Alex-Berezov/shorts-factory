@@ -76,7 +76,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E7), `10_SYSTEM_
 **Сделать:**
 - `reports.query` обёртка: `queryVideoDaily({ videoIds, startDate, endDate })`, `queryVideoDailyByCountry(...)`; Zod-схемы ответа (columnHeaders → типизированные строки); батчинг по id; `UsageLogger` (решение 7).
 - Спайк внутри задачи: фактический лимит id в фильтре `video==`, доступность метрик по `country`, наличие разреза по аудиодорожкам/`audioTrack` — результаты в раздел «Результаты проверки API» ниже.
-- Ошибки: 401 → refresh и повтор один раз; 403 quota → пауза `analytics.*`; 400 на неподдерживаемую комбинацию метрик → понятная ошибка, не ретрай.
+- Ошибки: 401 → refresh и повтор один раз; 403 quota → автопауза `analytics.*` записью `{<очередь>: "youtube_analytics_quota"}` в `app_setting.queues.autopaused` (своя причина, не `youtube_quota` — та принадлежит Data API и её отдельно снимает `queue-switches.ts`; прямой `queue.pause()` запрещён — ADR-0003: паузу ставит воркер по композиции с `queues.enabled`, операторский ключ не трогается; причину `youtube_analytics_quota` снимает тот же `system.quota-reset` в 00:05 PT, когда обновляются обе квоты Google — Data и Analytics API одного проекта); 400 на неподдерживаемую комбинацию метрик → понятная ошибка, не ретрай.
 - Тесты на фикстурах реальных ответов.
 
 **DoD:** запрос по 2–3 реальным видео возвращает строки с метриками из blueprint §5.10.

@@ -102,7 +102,10 @@ _Дата: 2026-09-05. Статус: базовая версия для стар
 | `publish.upload` / `publish.sync-status` / `publish.localizations` / `publish.captions` | Phase 5 | загрузка, статусы, локализованные метаданные, captions по квоте (E11) |
 | `system.usage-rollup` | cron (ежедневно + инкремент) | витрина `api_usage_daily` (E13) |
 | `system.quota-guard` | каждый job косвенно | учёт units/токенов/стоимости, стоп при превышении дневных лимитов |
-| `system.quota-reset` | cron 00:05 America/Los_Angeles | снятие паузы очередей radar.* после сброса дневной квоты YouTube |
+| `system.quota-reset` | cron 00:05 America/Los_Angeles | после сброса дневной квоты YouTube удаляет записи с причинами `youtube_quota` (Data API) и `youtube_analytics_quota` (Analytics API) из `app_setting.queues.autopaused` (операторский `queues.enabled` не трогает); саму паузу снимает ресинк воркера (ADR-0003) |
+| `system.dlq` | окончательно упавший job любой очереди | хранит копию job'а (очередь, id, payload, ошибка, попытки) до разбора оператором в E13-02; обработчика нет, записи не удаляются автоматически |
+| `system.heartbeat` | cron (каждую минуту) | пишет `worker:heartbeat` в Redis (ISO-метка, TTL 180 с) - признак живого воркера для `/system` (E0-09) и healthcheck контейнера (E0-11) |
+| `system.smoke` | вручную (`pnpm --filter @sf/worker smoke`), int-тесты | сквозная проверка конвейера: job проходит Redis, выполняется воркером и пишет строку в `api_usage_log` (`provider: system`, `units: 0`) |
 
 Требования ко всем джобам: идемпотентность (уникальные jobId), экспоненциальные ретраи, DLQ, лог стоимости в `api_usage_log`.
 
@@ -202,7 +205,7 @@ shorts-factory/
 ### 7.1 YouTube Data API
 - Синк новых видео **только** через uploads-playlist (`playlistItems.list`, 1 unit), не через `search.list` (100 units).
 - Снапшоты — `videos.list` батчами id (до 50 за вызов).
-- Учёт units на каждый вызов → `api_usage_log`; мягкий лимит в конфиге (например 8 000/день), при достижении — пауза очередей Radar.
+- Учёт units на каждый вызов → `api_usage_log`; мягкий лимит в конфиге (например 8 000/день), при достижении — очереди Radar автопаузятся записью `{<очередь>: "youtube_quota"}` в `app_setting.queues.autopaused` (операторский ключ `queues.enabled` при этом не меняется); на паузу их ставит воркер (ADR-0003, в течение минуты).
 
 ### 7.2 YouTube Analytics API (свой канал)
 - OAuth2 offline-flow, refresh-token в БД (шифрованно) — единственный пользователь.
@@ -231,7 +234,7 @@ shorts-factory/
 - **Надёжность:** падение worker'а не теряет задачи (BullMQ persistence); все джобы идемпотентны; ежедневный `pg_dump` в бэкап.
 - **Наблюдаемость:** pino-логи со сквозным `jobId`/`requestId`; страница `/system` в дашборде: статусы очередей, расход квот, расход бюджета ($) за день/месяц, ошибки DLQ.
 - **Безопасность:** секреты только в env; refresh-token Google шифруется (AES-256-GCM ключом из env); web-доступ за basic auth/одним admin-паролем; никакие ключи не попадают в web-бандл.
-- **Стоимость:** hard-caps в конфиге: Gemini $/день, TTS $/мес, YT units/день; при превышении — пауза соответствующих очередей + алерт в дашборде.
+- **Стоимость:** hard-caps в конфиге: Gemini $/день, TTS $/мес, YT units/день (Data и Analytics API считаются раздельно); при превышении — соответствующие очереди автопаузятся записью с причиной (`youtube_quota`, `youtube_analytics_quota`, `gemini_budget`, `tts_budget`) в `app_setting.queues.autopaused`, отдельно от операторского `queues.enabled` (паузу ставит воркер по композиции двух ключей, ADR-0003) + алерт в дашборде.
 - **Производительность:** масштаб MVP крошечный (≤50 каналов, ≤5000 видео, ≤200 своих Shorts) — Postgres справляется без оптимизаций; индексы по FK и `(video_id, captured_at)`.
 
 ---

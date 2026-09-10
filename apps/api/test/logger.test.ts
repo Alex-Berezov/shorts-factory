@@ -1,4 +1,5 @@
 import { type Env, loadEnv } from "@sf/config";
+import { pino } from "pino";
 import { describe, expect, it } from "vitest";
 import { buildLoggerOptions } from "../src/lib/logger.js";
 
@@ -29,6 +30,27 @@ describe("buildLoggerOptions", () => {
     expect(buildLoggerOptions(envWith({})).redact).toContain(
       "req.headers.cookie",
     );
+  });
+
+  it("keeps the redis password out of the log", () => {
+    // `server.ts` logs the whole ioredis error, and ioredis hangs the command
+    // it failed on off that error - `auth` carries the password in `args`.
+    const lines: string[] = [];
+    const { transport: _unused, ...options } = buildLoggerOptions(envWith({}));
+    const log = pino(options, {
+      write: (line: string) => {
+        lines.push(line);
+      },
+    });
+    const err = Object.assign(new Error("connection refused"), {
+      command: { name: "auth", args: ["sup3r-s3cret"] },
+    });
+
+    log.error({ err }, "redis client error");
+
+    expect(lines).toHaveLength(1);
+    expect(lines.join(" | ")).not.toContain("sup3r-s3cret");
+    expect(lines.join(" | ")).toContain("connection refused");
   });
 
   it("pretty-prints only in development", () => {
