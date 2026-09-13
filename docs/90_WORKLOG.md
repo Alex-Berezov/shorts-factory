@@ -24,3 +24,4 @@ _Добавляется автоматически командами `node scri
 - 2026-09-09 ✅ **E0-06** `apps/api`: Fastify-скелет с auth, ошибками, логами и OpenAPI — Fastify-скелет apps/api: buildApp(deps), basic auth, единый конверт ошибок, pino, OpenAPI, /health и /system/status, graceful shutdown
 - 2026-09-09 ✅ **E0-07** `@sf/contracts` и типизированный API-клиент — пакеты @sf/contracts и @sf/api-client: общие Zod-схемы health и system/status, конверт ошибки в OpenAPI, типизированный клиент с двумя входами
 - 2026-09-10 ✅ **E0-08** `apps/worker`: BullMQ-каркас, DLQ, cron-реестр, graceful shutdown, smoke-job — каркас BullMQ в apps/worker: реестр очередей, defineJob, DLQ, cron-реестр, переключатели очередей, graceful shutdown, smoke-job
+- 2026-09-13 ✅ **E0-09** Учёт стоимости внешних API и проверка бюджета — Учёт стоимости внешних API, BudgetGuard с капами по зонам и секции расхода, очередей и heartbeat в /system/status

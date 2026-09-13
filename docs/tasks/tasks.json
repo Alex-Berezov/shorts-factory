@@ -131,8 +131,10 @@
       "E0-08"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
-    "started_at": "2026-09-13"
+    "status": "done",
+    "started_at": "2026-09-13",
+    "done_at": "2026-09-13",
+    "note": "Учёт стоимости внешних API, BudgetGuard с капами по зонам и секции расхода, очередей и heartbeat в /system/status"
   },
   {
     "id": "E0-10",
