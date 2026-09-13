@@ -1,10 +1,11 @@
-import type { Env } from "@sf/config";
+import { type Env, buildLimits } from "@sf/config";
 import { QUEUE_NAMES, type QueueName } from "@sf/core";
-import type { Db } from "@sf/db";
+import { type BudgetGuard, type Db, createUsageLogger } from "@sf/db";
 import { Worker } from "bullmq";
 import type { Redis } from "ioredis";
 import type { Logger } from "pino";
 import { JOB_PROCESSORS } from "./jobs/index.js";
+import { createWorkerBudgetGuard } from "./lib/budget.js";
 import type { QueueProcessor } from "./lib/define-job.js";
 import { type DlqWriter, createDlqWriter } from "./lib/dlq.js";
 import { queueConcurrency } from "./lib/job-policy.js";
@@ -39,6 +40,11 @@ export interface WorkerRuntimeDeps {
   /** How often the queue switches are re-read. */
   switchIntervalMs?: number;
   /**
+   * Overridable so a test can run against caps of its own; production builds
+   * one guard per process from `env` and the Redis above.
+   */
+  budget?: BudgetGuard;
+  /**
    * Overridable so a test can watch what the runtime does with the queues -
    * how long a dlq write takes, in particular. Production opens its own and
    * closes them in `closeQueues`.
@@ -62,6 +68,16 @@ export async function startWorkerRuntime(
   deps: WorkerRuntimeDeps,
 ): Promise<WorkerRuntime> {
   const processors = deps.processors ?? JOB_PROCESSORS;
+  // One guard for the process: it caches the totals, and a guard per job would
+  // multiply exactly the round trips that cache exists to avoid.
+  const budget =
+    deps.budget ??
+    createWorkerBudgetGuard({
+      db: deps.db,
+      redis: deps.redis,
+      limits: buildLimits(deps.env),
+      log: deps.log,
+    });
   const queues = deps.queues ?? createQueueFactory(deps.redis);
   const getQueue = (name: QueueName) => queues.get(name);
 
@@ -164,6 +180,11 @@ export async function startWorkerRuntime(
             log: deps.log,
             db: deps.db,
             redis: deps.redis,
+            budget,
+            // Per run, so that every spend row carries the job that made the
+            // call - a row with no job cannot be traced to what it paid for.
+            createUsage: (jobId?: string) =>
+              createUsageLogger(deps.db, jobId === undefined ? {} : { jobId }),
           });
         },
         { connection: deps.redis, concurrency },

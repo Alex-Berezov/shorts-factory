@@ -40,7 +40,14 @@ const entryFields = {
   units: z.number().int().nonnegative().optional(),
   tokensIn: z.number().int().nonnegative().optional(),
   tokensOut: z.number().int().nonnegative().optional(),
-  costUsd: z.number().nonnegative().optional(),
+  /**
+   * `.finite()` as well as non-negative: `Infinity` is what a price computed
+   * from a division by a zero token count is, and it survives `JSON.stringify`
+   * as `"Infinity"` - a string `numeric` accepts. One such row makes the sum of
+   * its scope infinite for good, and the cap that reads that sum stops
+   * answering at all.
+   */
+  costUsd: z.number().nonnegative().finite().optional(),
   /** Job that made the call; absent for calls made outside a job. */
   jobId: z.string().min(1).optional(),
 };
@@ -68,7 +75,7 @@ const paidEntry = z
       "google_tts",
       "cartesia",
     ]),
-    costUsd: z.number().nonnegative(),
+    costUsd: z.number().nonnegative().finite(),
   })
   .strict();
 

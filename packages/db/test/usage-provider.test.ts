@@ -13,16 +13,10 @@ import type { apiUsageLogRepo } from "../src/repos/api-usage-log.js";
  * in `pnpm test` (`test` is part of the tsconfig `include` of this package).
  */
 describe("apiUsageLogRepo provider", () => {
-  it("is a Provider in every aggregate", () => {
+  it("is a Provider in the aggregate", () => {
     expectTypeOf<
-      Parameters<typeof apiUsageLogRepo.sumUnitsToday>[1]
-    >().toEqualTypeOf<Provider>();
-    expectTypeOf<
-      Parameters<typeof apiUsageLogRepo.sumCostUsdToday>[1]
-    >().toEqualTypeOf<Provider>();
-    expectTypeOf<
-      Parameters<typeof apiUsageLogRepo.sumCostUsdThisMonth>[1]
-    >().toEqualTypeOf<Provider>();
+      Parameters<typeof apiUsageLogRepo.sumUsage>[1]["providers"]
+    >().toEqualTypeOf<readonly Provider[]>();
   });
 
   it("is a Provider in the inserted entry", () => {

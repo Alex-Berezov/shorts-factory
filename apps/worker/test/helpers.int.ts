@@ -10,11 +10,13 @@ import { assertLocalTestStack } from "./local-stack-guard.js";
 /**
  * Shared setup for the worker integration tests.
  *
- * The test Redis is `db 1` of the local Compose (`.env.test`), which the api
- * integration tests use as well, and BullMQ keys survive a run that crashed.
- * So every file wipes the queues it uses both before and after itself: a
- * leftover job from a previous run would make the next one green for the wrong
- * reason - or red for one.
+ * The test Redis is `db 1` of the local Compose (`.env.test`), which this
+ * suite has to itself - the integration tests of the api were moved to `db 2`
+ * exactly so that a pause of theirs could not reach a queue this one is taking
+ * jobs from (`apps/api/test/local-stack-guard.ts`). BullMQ keys still survive
+ * a run that crashed, so every file wipes the queues it uses both before and
+ * after itself: a leftover job from a previous run would make the next one
+ * green for the wrong reason - or red for one.
  *
  * Everything below is destructive - `obliterate`, deletes from
  * `api_usage_log`, an overwrite of the switch row - so the stack is checked

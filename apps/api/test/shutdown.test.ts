@@ -21,7 +21,12 @@ function targets(closed: string[], failing?: string) {
       }
     },
   });
-  return { app: target("app"), db: target("db"), redis: target("redis") };
+  return {
+    app: target("app"),
+    db: target("db"),
+    queues: target("queues"),
+    redis: target("redis"),
+  };
 }
 
 describe("createShutdownHandler", () => {
@@ -36,7 +41,7 @@ describe("createShutdownHandler", () => {
 
     await shutdown("SIGTERM");
 
-    expect(closed).toEqual(["app", "db", "redis"]);
+    expect(closed).toEqual(["app", "db", "queues", "redis"]);
     expect(codes).toEqual([0]);
   });
 
@@ -54,7 +59,7 @@ describe("createShutdownHandler", () => {
 
     // A second pass would call quit() on a client that is already gone and
     // turn a clean stop into an error.
-    expect(closed).toEqual(["app", "db", "redis"]);
+    expect(closed).toEqual(["app", "db", "queues", "redis"]);
     expect(codes).toEqual([0]);
   });
 
@@ -69,7 +74,7 @@ describe("createShutdownHandler", () => {
 
     await shutdown("SIGTERM");
 
-    expect(closed).toEqual(["app", "db", "redis"]);
+    expect(closed).toEqual(["app", "db", "queues", "redis"]);
     expect(codes).toEqual([1]);
   });
 
@@ -85,6 +90,7 @@ describe("createShutdownHandler", () => {
         close: () => new Promise<void>((resolve) => setTimeout(resolve, 40)),
       },
       db: { close: async () => {} },
+      queues: { close: async () => {} },
       redis: { close: async () => {} },
       log,
       timeoutMs: 20,
@@ -103,6 +109,7 @@ describe("createShutdownHandler", () => {
     const shutdown = createShutdownHandler({
       app: { close: () => new Promise<void>(() => {}) },
       db: { close: async () => {} },
+      queues: { close: async () => {} },
       redis: { close: async () => {} },
       log,
       timeoutMs: 20,

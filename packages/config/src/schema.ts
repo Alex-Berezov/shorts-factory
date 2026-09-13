@@ -14,6 +14,15 @@ const MAX_PORT = 65535;
  */
 const MAX_WORKER_CONCURRENCY = 10;
 
+/**
+ * The daily quota of the YouTube Data API itself, and therefore the ceiling of
+ * a cap on it: a soft cap cannot be larger than the quota it is supposed to
+ * stay under. Without the bound a typo (`80000` for `8000`) silently removes
+ * the fuse - the quota is burnt long before the cap is ever reached, and the
+ * project is locked out of YouTube until midnight Pacific.
+ */
+const YOUTUBE_DAILY_QUOTA_UNITS = 10_000;
+
 /** 32 bytes of AES-256-GCM key material, hex encoded. */
 const HEX_32_BYTES = /^[0-9a-fA-F]{64}$/;
 
@@ -106,7 +115,12 @@ export const EnvSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_OAUTH_REDIRECT_URL: z.string().url().optional(),
   YOUTUBE_API_KEY: z.string().optional(),
-  YT_UNITS_DAILY_SOFT_CAP: z.coerce.number().int().positive().default(8000),
+  YT_UNITS_DAILY_SOFT_CAP: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(YOUTUBE_DAILY_QUOTA_UNITS)
+    .default(8000),
 
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_DAILY_BUDGET_USD: z.coerce.number().positive().default(5),

@@ -2,6 +2,7 @@ import type { HealthReport, ProbeStatus } from "@sf/contracts";
 import type { Db } from "@sf/db";
 import { pingDb } from "@sf/db";
 import type { HealthProbes } from "../deps.js";
+import { withDeadline } from "./deadline.js";
 
 /** How long one dependency is given to answer before it counts as down. */
 const PROBE_TIMEOUT_MS = 2_000;
@@ -19,33 +20,22 @@ export interface HealthProbesOptions {
 }
 
 /**
- * Runs one probe under a deadline.
+ * Runs one probe under the shared deadline and answers up or down.
  *
- * The deadline is the point of this function: a TCP connection to a machine
- * that stopped answering neither resolves nor rejects, so a probe without it
- * would hold `/health` open until the client gives up - the one moment the
- * endpoint has to answer. The reason a probe failed is not returned: it is a
- * message from an external system, and `/health` is public.
+ * The reason a probe failed is not returned: it is a message from an external
+ * system and `/health` is public. `/system/status`, which is not, reports a
+ * classified reason instead (`dependencyFailureCode` in `lib/system-status.ts`;
+ * `lib/deadline.ts` holds only the timer both share).
  */
 async function probe(
   run: () => Promise<unknown>,
   timeoutMs: number,
 ): Promise<ProbeStatus> {
-  let timer: NodeJS.Timeout | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`probe timed out after ${timeoutMs}ms`)),
-      timeoutMs,
-    );
-  });
-
   try {
-    await Promise.race([run(), deadline]);
+    await withDeadline(run, timeoutMs);
     return "up";
   } catch {
     return "down";
-  } finally {
-    clearTimeout(timer);
   }
 }
 

@@ -96,6 +96,16 @@ describe("ApiUsageEntrySchema", () => {
     }
   });
 
+  it("has no branch for a provider that does not exist", () => {
+    // The other direction of the same drift, at runtime rather than by a type
+    // assertion alone: a branch listing a name that left `PROVIDERS` would
+    // keep parsing entries nobody sums, and the compiler check above passes as
+    // long as the union is merely a subset.
+    expect([...ApiUsageEntrySchema.optionsMap.keys()].sort()).toEqual(
+      [...PROVIDERS].sort(),
+    );
+  });
+
   it("accepts a measure of zero - a free call still reports it", () => {
     expect(
       ApiUsageEntrySchema.safeParse({
@@ -171,6 +181,37 @@ describe("ApiUsageEntrySchema", () => {
     // fix out of the DLQ, not a blanket line about a measure that was reported.
     expect(parsed.error?.issues[0]?.path).toEqual(["costUsd"]);
     expect(parsed.error?.issues[0]?.message).not.toContain("must report");
+  });
+
+  /**
+   * A price of `Infinity` is what a cost computed from a division by a token
+   * count of zero comes out as. It is not a rounding problem: `JSON.stringify`
+   * turns it into `"Infinity"`, `numeric` stores it, and from then on the sum
+   * of that scope is infinite - `toTotal` refuses it, the cap stops answering,
+   * and the refusal is a defect of ours rather than a dependency being down:
+   * `/system/status` answers 500 with the request id in the log, so the page
+   * an operator would read the spend from is not there at all.
+   */
+  it("rejects a cost that is not a finite number", () => {
+    const parsed = ApiUsageEntrySchema.safeParse({
+      provider: "gemini",
+      operation: "generateContent",
+      costUsd: Number.POSITIVE_INFINITY,
+    });
+
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues[0]?.path).toEqual(["costUsd"]);
+
+    // The same on an entry where the price is optional: a quota call may carry
+    // a cost, and an infinite one poisons the same column.
+    expect(
+      ApiUsageEntrySchema.safeParse({
+        provider: "youtube_data",
+        operation: "videos.list",
+        units: 1,
+        costUsd: Number.POSITIVE_INFINITY,
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects an unknown provider", () => {

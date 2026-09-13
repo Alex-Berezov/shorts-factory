@@ -1,5 +1,9 @@
-import type { QueueName } from "@sf/core";
-import type { Db } from "@sf/db";
+import {
+  BudgetExceededError,
+  type QueueName,
+  type UsageLogger,
+} from "@sf/core";
+import type { BudgetGuard, Db } from "@sf/db";
 import { type JobsOptions, UnrecoverableError } from "bullmq";
 import type { Redis } from "ioredis";
 import type { Logger } from "pino";
@@ -7,17 +11,22 @@ import { ZodError, type ZodType } from "zod";
 import { DEFAULT_JOB_OPTIONS } from "./job-policy.js";
 
 /**
- * The connections and the logger a processor is run with. Passed in by the
- * runtime rather than imported: a job that opened its own connection would
- * outlive the shutdown that is supposed to close everything.
+ * The connections, the logger and the two things a priced job needs, passed in
+ * by the runtime rather than imported: a job that opened its own connection
+ * would outlive the shutdown that is supposed to close everything.
  *
- * There is no `usage` here yet - `ctx.usage` and the budget guard arrive with
- * E0-09 and get their own field, not a corner of this one.
+ * `budget` is one guard for the whole process - it caches, and a guard per job
+ * would multiply the round trips the cache exists to avoid. `createUsage`, by
+ * contrast, is a factory: the row a job writes has to carry that job's id, so
+ * the logger is built per run, in `process`, from the id the job came with.
  */
 export interface JobRuntimeDeps {
   log: Logger;
   db: Db;
   redis: Redis;
+  budget: BudgetGuard;
+  /** The usage logger for one run; the id is stamped onto every row it writes. */
+  createUsage(jobId?: string): UsageLogger;
 }
 
 /**
@@ -35,9 +44,17 @@ export interface ProcessableJob {
   timestamp: number;
 }
 
-/** What a handler is given besides its payload. */
-export interface JobContext extends JobRuntimeDeps {
+/**
+ * What a handler is given besides its payload.
+ *
+ * `createUsage` is gone from it on purpose: the handler gets the logger of its
+ * own run (`usage`), already stamped with the job id, so there is no way to
+ * write a spend row that belongs to nothing.
+ */
+export interface JobContext extends Omit<JobRuntimeDeps, "createUsage"> {
   job: ProcessableJob;
+  /** Where a priced call reports what it cost, before the call returns. */
+  usage: UsageLogger;
 }
 
 /** One priced job: the payload it takes and what it does with it. */
@@ -146,7 +163,42 @@ export function defineJob<TPayload>(
         throw err;
       }
 
-      await spec.handler(payload, { ...deps, job, log });
+      const { createUsage, ...rest } = deps;
+      const ctx: JobContext = {
+        ...rest,
+        job,
+        log,
+        usage: createUsage(job.id),
+      };
+
+      try {
+        await spec.handler(payload, ctx);
+      } catch (err) {
+        if (err instanceof BudgetExceededError) {
+          // A cap is not a transient failure: every retry would ask the same
+          // guard the same question and be refused again, five times over
+          // twenty minutes, while the queue behind it waits. BullMQ stops
+          // retrying only for `UnrecoverableError`, so the refusal is
+          // translated into one - with the code and the provider in the
+          // message, which is what the DLQ record (`failedReason`) and the
+          // operator reading it get to see. The original is kept as `cause`.
+          const provider = err.details.provider;
+          log.error(
+            { err, provider, spent: err.details.spent, cap: err.details.cap },
+            "job refused by the budget guard",
+          );
+          const refusal = new UnrecoverableError(
+            `${err.code}: ${provider} ${err.message}`,
+          );
+          // The bullmq error takes a message and nothing else, so the original
+          // is attached afterwards: `cause` is what keeps the details of the
+          // refusal - provider, spent, cap - reachable for anything that
+          // handles the failure in this process.
+          refusal.cause = err;
+          throw refusal;
+        }
+        throw err;
+      }
     },
   };
 }

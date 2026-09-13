@@ -172,7 +172,7 @@ shorts-factory/
 │   └── worker/     # BullMQ workers: все очереди из §4
 ├── packages/
 │   ├── core/       # доменные типы, Zod-схемы (ContentDNA, Idea, Script...), чистая бизнес-логика скоринга
-│   ├── db/         # Drizzle-схема, миграции, репозитории
+│   ├── db/         # Drizzle-схема, миграции, репозитории, учёт расхода: `createUsageLogger`, `createBudgetGuard` (E0-09)
 │   ├── config/     # типизированный .env (Zod), константы квот/бюджета
 │   ├── contracts/  # Zod-схемы запросов/ответов API, общие для api и web (E0-07)
 │   ├── api-client/ # типизированный fetch-клиент по контрактам (E0-07)
@@ -186,7 +186,7 @@ shorts-factory/
 ```
 
 Правило зависимостей: `apps/* → packages/*`; `integrations → core, config`; `db → core`;
-`contracts → core` (только доменные коды ошибок и `zod`); `api-client → contracts` (и больше
+`contracts → core` (только доменные константы - коды ошибок, реестр очередей `QUEUE_NAMES`, разметка капов `BUDGET_SCOPE_KEYS` / `BUDGET_MEASURES` / `BUDGET_PERIODS` - и `zod`); `api-client → contracts` (и больше
 ни на что: ни `core`, ни `config`, ни `db` — клиент знает форму провода и адрес, а не домен);
 `core` ни от чего не зависит. Скоринг (velocity/acceleration/ranking) — чистые функции в `core`,
 покрытые юнит-тестами.

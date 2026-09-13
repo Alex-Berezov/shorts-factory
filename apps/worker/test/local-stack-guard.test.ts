@@ -47,7 +47,11 @@ describe("worker integration stack guard", () => {
     ).toThrow(/shorts_factory_test/);
   });
 
-  it("refuses the Redis database the api and the worker really use", () => {
+  it("refuses the Redis database a running worker really uses", () => {
+    // Database 0 - the default when the URL names none - is where a worker
+    // started by hand keeps its queues. The api suite is elsewhere again:
+    // `.env.test` names database 1 and it derives database 2 from it
+    // (`apps/api/test/local-stack-guard.ts`).
     expect(() =>
       assertLocalTestStack(LOCAL_DB, "redis://localhost:6389"),
     ).toThrow(/redis database/);

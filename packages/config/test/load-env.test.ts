@@ -172,6 +172,26 @@ describe("loadEnv - worker concurrency range", () => {
   });
 });
 
+describe("loadEnv - YouTube quota soft cap range", () => {
+  it("rejects a cap above the daily quota it is supposed to stay under", () => {
+    // A cap larger than the quota is not a cap: the project burns the whole
+    // day of Data API units and is locked out until midnight Pacific before
+    // the guard ever fires.
+    expect(
+      issuePaths(() =>
+        loadEnv(baseSource({ YT_UNITS_DAILY_SOFT_CAP: "10001" })),
+      ),
+    ).toContain("YT_UNITS_DAILY_SOFT_CAP");
+  });
+
+  it("accepts a cap equal to the whole daily quota", () => {
+    expect(
+      loadEnv(baseSource({ YT_UNITS_DAILY_SOFT_CAP: "10000" }))
+        .YT_UNITS_DAILY_SOFT_CAP,
+    ).toBe(10_000);
+  });
+});
+
 describe("loadEnv - TOKEN_ENCRYPTION_KEY", () => {
   it("rejects 64 characters that are not hex", () => {
     // `Buffer.from(key, "hex")` stops at the first non-hex pair, so a

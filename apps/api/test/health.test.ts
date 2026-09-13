@@ -74,51 +74,6 @@ describe("GET /health", () => {
   });
 });
 
-describe("GET /system/status", () => {
-  it("reports the build, the uptime and both checks", async () => {
-    const app = buildTestApp({
-      buildInfo: { version: "1.2.3", commit: "abc1234" },
-      report: { db: "up", redis: "down" },
-    });
-    await app.ready();
-
-    try {
-      const res = await app.inject({
-        method: "GET",
-        url: "/system/status",
-        headers: { authorization: AUTH_HEADER },
-      });
-
-      expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.payload)).toMatchObject({
-        build: { version: "1.2.3", commit: "abc1234" },
-        checks: { db: "up", redis: "down" },
-      });
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("reports an unknown build as null rather than inventing a version", async () => {
-    const app = buildTestApp({ buildInfo: { version: null, commit: null } });
-    await app.ready();
-
-    try {
-      const res = await app.inject({
-        method: "GET",
-        url: "/system/status",
-        headers: { authorization: AUTH_HEADER },
-      });
-
-      expect(JSON.parse(res.payload)).toMatchObject({
-        build: { version: null, commit: null },
-      });
-    } finally {
-      await app.close();
-    }
-  });
-});
-
 describe("createHealthProbes", () => {
   it("reports a dependency that never answers as down", async () => {
     const db = createDb(CLOSED_DB_URL);

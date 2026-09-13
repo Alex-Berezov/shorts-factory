@@ -5,6 +5,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { systemHeartbeatJob } from "../src/jobs/system-heartbeat.js";
 import { closeRedis } from "../src/lib/redis.js";
 import { openTestRedis, testLogger } from "./helpers.int.js";
+import { recordingUsage, unusedBudget } from "./job-deps.js";
 
 /**
  * The liveness stamp against a real Redis: what a fake cannot have is the
@@ -30,6 +31,17 @@ afterAll(async () => {
   await closeRedis(redis);
 });
 
+/** The heartbeat spends nothing: both spend-related deps refuse to be used. */
+function jobDeps() {
+  return {
+    log: testLogger(),
+    db,
+    redis,
+    budget: unusedBudget(),
+    createUsage: recordingUsage().createUsage,
+  };
+}
+
 describe("system.heartbeat against redis", () => {
   it("leaves a stamp that expires on its own", async () => {
     const before = Date.now();
@@ -42,7 +54,7 @@ describe("system.heartbeat against redis", () => {
         attemptsMade: 0,
         timestamp: before,
       },
-      { log: testLogger(), db, redis },
+      jobDeps(),
     );
 
     const stamp = await redis.get(WORKER_HEARTBEAT_KEY);
@@ -64,10 +76,10 @@ describe("system.heartbeat against redis", () => {
       timestamp: Date.now(),
     };
 
-    await systemHeartbeatJob.process(job, { log: testLogger(), db, redis });
+    await systemHeartbeatJob.process(job, jobDeps());
     const first = await redis.get(WORKER_HEARTBEAT_KEY);
     await new Promise((resolve) => setTimeout(resolve, 5));
-    await systemHeartbeatJob.process(job, { log: testLogger(), db, redis });
+    await systemHeartbeatJob.process(job, jobDeps());
 
     const second = await redis.get(WORKER_HEARTBEAT_KEY);
     expect(second).not.toBe(first);

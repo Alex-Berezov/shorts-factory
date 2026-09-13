@@ -1,15 +1,25 @@
 import {
+  type BudgetStatus,
   type BuildInfo,
   type ErrorBody,
   ErrorBodySchema,
   type HealthReport,
+  type WorkerStatus,
 } from "@sf/contracts";
+import { QUEUE_NAMES } from "@sf/core";
 import {
   type AppInstance,
   type BuildAppOptions,
   buildApp,
 } from "../src/app.js";
-import type { AppDeps, HealthProbes } from "../src/deps.js";
+import type {
+  AppDeps,
+  BudgetProbe,
+  HealthProbes,
+  QueueStatsProbe,
+  QueuesSnapshot,
+  WorkerProbe,
+} from "../src/deps.js";
 
 /** Password every test app is built with; the user name is never checked. */
 export const TEST_PASSWORD = "test-admin-password";
@@ -45,8 +55,49 @@ type ProbeOverride =
       report?: never;
     };
 
+/**
+ * The collectors of `/system/status`, stubbed with the smallest believable
+ * answer. A test that is about one of them passes its own; a test that is
+ * about something else must still get a page that parses, or its failure would
+ * be about the fixture rather than about the route.
+ */
+export const EMPTY_QUEUES: QueuesSnapshot = {
+  queues: QUEUE_NAMES.map((name) => ({
+    name,
+    waiting: 0,
+    active: 0,
+    failed: 0,
+    delayed: 0,
+    paused: false,
+  })),
+  dlq: { size: 0 },
+};
+
+export const LIVE_WORKER: WorkerStatus = {
+  heartbeatAt: "2026-09-13T10:00:00.000Z",
+  stale: false,
+};
+
+export const IDLE_BUDGET: BudgetStatus[] = [
+  {
+    key: "youtube_data_units_day",
+    measure: "units",
+    period: "day",
+    timeZone: "America/Los_Angeles",
+    spent: 0,
+    cap: 8_000,
+    ratio: 0,
+    warn: false,
+    exceeded: false,
+  },
+];
+
 interface AppOverrides {
   buildInfo?: BuildInfo;
+  /** The collectors behind `/system/status`; stubs unless a test says more. */
+  queues?: QueueStatsProbe;
+  worker?: WorkerProbe;
+  budget?: BudgetProbe;
   adminPassword?: string;
   /**
    * Routes that exist only for a test - the error paths need a handler that
@@ -76,6 +127,9 @@ export function buildTestApp(overrides: TestAppOverrides = {}): AppInstance {
       version: "0.0.1-test",
       commit: "abc1234",
     },
+    queues: overrides.queues ?? { collect: async () => EMPTY_QUEUES },
+    worker: overrides.worker ?? { read: async () => LIVE_WORKER },
+    budget: overrides.budget ?? { collect: async () => IDLE_BUDGET },
   };
 
   const app = buildApp(deps, {

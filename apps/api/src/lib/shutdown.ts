@@ -14,6 +14,12 @@ export interface ShutdownOptions {
   app: ShutdownTarget;
   /** Closed once no handler can be using it any more. */
   db: ShutdownTarget;
+  /**
+   * The `Queue` objects of `/system/status`, closed before the connection they
+   * were opened on: BullMQ ends its own reads through that client, and a
+   * socket torn down first leaves them waiting for a reply that cannot come.
+   */
+  queues: ShutdownTarget;
   redis: ShutdownTarget;
   log: ShutdownLogger;
   /** Deadline for the whole sequence. */
@@ -31,7 +37,8 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
  * Three properties, each of them a way this goes wrong without care:
  *
  * - **order**: Fastify first, so a request in flight still has its database
- *   connection; the driver and Redis after it;
+ *   connection; the driver, the queue objects and the Redis client they use
+ *   after it, in that order;
  * - **idempotence**: an operator presses Ctrl+C twice, and a container gets
  *   SIGTERM followed by SIGINT. A second pass would call `quit()` on a client
  *   that is already closing and turn a clean stop into an error;
@@ -55,6 +62,7 @@ export function createShutdownHandler(
   const targets: ReadonlyArray<[string, ShutdownTarget]> = [
     ["app", options.app],
     ["db", options.db],
+    ["queues", options.queues],
     ["redis", options.redis],
   ];
   let started = false;

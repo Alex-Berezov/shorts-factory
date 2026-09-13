@@ -212,7 +212,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 - `/system/status` (api, контракт из E0-07): состояние очередей (waiting/active/failed/delayed) по каждому имени, размер `system.dlq`, `worker:heartbeat`, расход за сегодня (YT units, Gemini $) и месяц (TTS $) с процентом от лимита.
 - Тесты: юнит на агрегацию/пороги; интеграционный на `assert` при заранее записанном расходе выше лимита.
 
-**DoD:** запись в `api_usage_log` из job видна в `/system/status`; превышение лимита останавливает job до внешнего вызова.
+**DoD:** запись расхода провайдера с капом (YouTube / Gemini / TTS), сделанная из job, видна в секции `budget` ответа `/system/status`; `provider: system` капа не имеет и в `budget` не выводится (решение PM от 13.09.2026), поэтому DoD проверяется сквозной посадкой по одной функции: `apps/worker/test/budget.int.test.ts` (джоба записала расход -> `createBudgetGuard(...).check("gemini")` его видит) и `apps/api/test/system-status.int.test.ts` (та же функция под роутом -> расход в ответе). Превышение лимита останавливает job до внешнего вызова.
 **Оценка:** 1 д. **Зависимости:** E0-08 (и E0-07 для контракта).
 
 ### E0-10. `apps/web`: Next.js-скелет, layout с навигацией, basic auth, страница `/system`
@@ -301,5 +301,5 @@ E0-01 ─► E0-02 ─► E0-03 ─┬─► E0-04 ─┬─► E0-06 ─► E0-
 |---|---|---|
 | `docker compose up` поднимает всё | E0-11 DoD на чистой машине | ⬜ |
 | `pnpm dev` работает | api, worker, web стартуют из одного `pnpm dev`, `/system` зелёный | ⬜ |
-| Тестовый job проходит очередь и пишет в Postgres | `pnpm --filter @sf/worker smoke` + строка в `api_usage_log` + видно в `/system` | ⬜ |
+| Тестовый job проходит очередь и пишет в Postgres | `pnpm --filter @sf/worker smoke` + строка в `api_usage_log` + видно в `/system` | 🟨 E0-09: джоба пишет строку через `ctx.usage` (`apps/worker/test/smoke.int.test.ts`), а «видно в расходе» закрыто сквозной посадкой на провайдере с капом (`apps/worker/test/budget.int.test.ts` + `apps/api/test/system-status.int.test.ts`). Глазами: `smoke` пишет `provider: system`, у которого капа нет, поэтому в секции `budget` строки smoke не будет никогда - расход появится на экране с первой платной джобой E1/E2; сама страница `/system` - E0-10 |
 | CI зелёный | workflow на `main` после E0-12 | ⬜ |

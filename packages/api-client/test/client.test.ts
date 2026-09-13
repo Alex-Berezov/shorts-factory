@@ -13,7 +13,29 @@ const DEGRADED = { status: "degraded" };
 const SYSTEM_STATUS = {
   build: { version: "1.2.3", commit: "abc1234" },
   uptimeSec: 42,
-  checks: { db: "up", redis: "down" },
+  // A degraded answer on purpose: `/system/status` is 200 even when a
+  // dependency is gone, and the sections it could not read are `null` - the
+  // client has to parse that shape, not only the healthy one.
+  checks: {
+    db: { status: "up", reason: null },
+    redis: { status: "down", reason: "unreachable" },
+  },
+  queues: null,
+  dlq: null,
+  worker: null,
+  budget: [
+    {
+      key: "gemini_usd_day",
+      measure: "usd",
+      period: "day",
+      timeZone: "UTC",
+      spent: 1.25,
+      cap: 5,
+      ratio: 0.25,
+      warn: false,
+      exceeded: false,
+    },
+  ],
 };
 
 /**

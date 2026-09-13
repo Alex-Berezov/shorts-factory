@@ -1,5 +1,4 @@
 import { ApiUsageEntrySchema, jobIds } from "@sf/core";
-import { apiUsageLogRepo } from "@sf/db";
 import { z } from "zod";
 import { defineJob } from "../lib/define-job.js";
 
@@ -11,8 +10,8 @@ import { defineJob } from "../lib/define-job.js";
  *
  * It spends nothing, and the row says so: `provider: "system"` is our own
  * bookkeeping, `units: 0`. The row exists because the path a paid job takes -
- * handler, priced call, `api_usage_log` - has to be exercised before there is
- * a paid job to exercise it with (the logger itself arrives in E0-09).
+ * handler, priced call, `ctx.usage`, `api_usage_log` - has to be exercised
+ * before there is a paid job to exercise it with.
  */
 const SmokePayloadSchema = z
   .object({
@@ -31,21 +30,20 @@ export const systemSmokeJob = defineJob({
     // Parsed rather than assembled by hand: `ApiUsageEntrySchema` is the
     // contract every priced call answers to, and going through it here means
     // the smoke job breaks first if that contract changes.
+    //
+    // No `jobId` here: the logger of this run was built with the id of the job
+    // (`lib/define-job.ts`) and stamps every row it writes with it. A handler
+    // that set it too would be a second place to fix when the stamp changes.
     const entry = ApiUsageEntrySchema.parse({
       provider: "system",
       operation: "smoke",
       units: 0,
-      ...(ctx.job.id === undefined ? {} : { jobId: ctx.job.id }),
     });
 
-    // `created_at` is left to the database (its own clock stamps the row and
-    // ends the aggregation windows), so only the measured fields are written.
-    await apiUsageLogRepo.insert(ctx.db, {
-      provider: entry.provider,
-      operation: entry.operation,
-      units: entry.units ?? null,
-      jobId: entry.jobId ?? null,
-    });
+    // Through the logger of this run, the same way a paid call reports what it
+    // cost: the mapping to the columns, the stamp of the job and the refusal
+    // of an entry without a measure all live there, not in the handlers.
+    await ctx.usage(entry);
 
     ctx.log.info(
       { requestedAtMs: payload.requestedAtMs },

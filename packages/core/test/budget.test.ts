@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { BUDGET_WARN_RATIO, budgetState } from "../src/domain/budget.js";
+import {
+  BUDGET_SCOPE_BY_PROVIDER,
+  BUDGET_SCOPE_KEYS,
+  BUDGET_WARN_RATIO,
+  type BudgetScope,
+  budgetScopeFor,
+  budgetState,
+} from "../src/domain/budget.js";
 import { ValidationError } from "../src/domain/errors.js";
+import { PROVIDERS, type Provider } from "../src/domain/provider.js";
 
 /**
  * The guard of E0-09 asks this function before it lets an external call
@@ -126,5 +134,104 @@ describe("budgetState", () => {
       expect(error).toBeInstanceOf(ValidationError);
       expect((error as ValidationError).details).toEqual({ spent: 5, cap: 0 });
     }
+  });
+});
+
+/**
+ * The map is the fuse panel: a provider missing from it is a provider whose
+ * spend nothing compares against a cap, and a scope listing the wrong rows
+ * compares a fraction of the spend against the whole budget.
+ */
+describe("BUDGET_SCOPE_BY_PROVIDER", () => {
+  it("has an entry for every provider, and for no one else", () => {
+    expect(Object.keys(BUDGET_SCOPE_BY_PROVIDER).sort()).toEqual(
+      [...PROVIDERS].sort(),
+    );
+  });
+
+  it("names a cap for every provider that spends quota or money", () => {
+    const capped: Record<Provider, string | null> = {
+      youtube_data: "youtube_data_units_day",
+      // No cap of its own until the OAuth quota of E7-01.
+      youtube_analytics: null,
+      gemini: "gemini_usd_day",
+      elevenlabs: "tts_usd_month",
+      openai_tts: "tts_usd_month",
+      google_tts: "tts_usd_month",
+      cartesia: "tts_usd_month",
+      // Our own bookkeeping: `system` rows spend nothing external.
+      system: null,
+    };
+
+    for (const provider of PROVIDERS) {
+      expect(budgetScopeFor(provider)?.key ?? null).toBe(capped[provider]);
+    }
+  });
+
+  it("sums all four paid speech vendors under the one monthly TTS cap", () => {
+    // A cap of $50 a month against one vendor out of four never fires: the
+    // spend is spread over `elevenlabs`, `openai_tts`, `google_tts` and
+    // `cartesia`, and `gemini-tts` bills as `gemini` on the daily cap.
+    const scope = budgetScopeFor("elevenlabs");
+
+    expect(scope).not.toBeNull();
+    expect([...(scope as BudgetScope).providers].sort()).toEqual([
+      "cartesia",
+      "elevenlabs",
+      "google_tts",
+      "openai_tts",
+    ]);
+    expect(scope).toMatchObject({ measure: "usd", period: "month" });
+  });
+
+  it("counts YouTube in units per day and Gemini in dollars per day", () => {
+    expect(budgetScopeFor("youtube_data")).toMatchObject({
+      measure: "units",
+      period: "day",
+      providers: ["youtube_data"],
+    });
+    expect(budgetScopeFor("gemini")).toMatchObject({
+      measure: "usd",
+      period: "day",
+      providers: ["gemini"],
+    });
+  });
+
+  /**
+   * When a cap rolls over decides how much of it is left, and the YouTube
+   * quota rolls over at midnight Pacific: counted in UTC, the units counter
+   * restarts at 17:00 PT while Google's does not, and the fuse hands out a
+   * second day's worth of units against a quota that is already half gone.
+   */
+  it("cuts the YouTube day in Pacific time and the money periods in UTC", () => {
+    expect(budgetScopeFor("youtube_data")).toMatchObject({
+      timeZone: "America/Los_Angeles",
+    });
+    expect(budgetScopeFor("gemini")).toMatchObject({ timeZone: "UTC" });
+    expect(budgetScopeFor("elevenlabs")).toMatchObject({ timeZone: "UTC" });
+  });
+
+  it("names zones Postgres and Intl both know", () => {
+    // The name travels into `date_trunc(... AT TIME ZONE ...)`, where an
+    // unknown zone is an error at the moment a paid call asks about its cap.
+    const known = new Set(Intl.supportedValuesOf("timeZone"));
+
+    for (const provider of PROVIDERS) {
+      const scope = budgetScopeFor(provider);
+      if (scope === null) {
+        continue;
+      }
+      expect(known.has(scope.timeZone) || scope.timeZone === "UTC").toBe(true);
+    }
+  });
+
+  it("declares exactly the scopes the map uses", () => {
+    const used = new Set(
+      PROVIDERS.map((provider) => budgetScopeFor(provider)?.key).filter(
+        (key) => key !== undefined,
+      ),
+    );
+
+    expect([...used].sort()).toEqual([...BUDGET_SCOPE_KEYS].sort());
   });
 });

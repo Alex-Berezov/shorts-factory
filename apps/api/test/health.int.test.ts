@@ -6,13 +6,25 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type AppInstance, buildApp } from "../src/app.js";
 import { createHealthProbes } from "../src/lib/health.js";
 import { createRedis } from "../src/lib/redis.js";
-import { TEST_PASSWORD } from "./helpers.js";
+import { openTestRedis } from "./helpers.int.js";
+import {
+  EMPTY_QUEUES,
+  IDLE_BUDGET,
+  LIVE_WORKER,
+  TEST_PASSWORD,
+} from "./helpers.js";
 
 /**
  * `/health` against the real Postgres and Redis of `infra/docker-compose.yml`.
  * Read-only on purpose: this file must never touch the data of the test
  * database, it only proves that the probes speak to live services and that a
  * dead one is reported quickly instead of hanging.
+ *
+ * The live client comes from `helpers.int.ts` rather than from `createRedis`
+ * here, which is what puts this file behind `assertApiTestStack` too: a
+ * `.env.test` naming a development stack is refused before this file opens
+ * anything, and the next integration file of the api - written by copying this
+ * one - inherits the guard instead of a way around it.
  */
 
 /** Nothing listens here - a refused connection, not a slow one. */
@@ -44,13 +56,12 @@ async function whenReady(redis: Redis): Promise<void> {
   });
 }
 
-function startApp(redisUrl: string): {
+function startApp(redis: Redis): {
   app: AppInstance;
   redis: Redis;
   errors: Error[];
 } {
   const db = createDb(env.DATABASE_URL);
-  const redis = createRedis(redisUrl);
   const errors: Error[] = [];
   redis.on("error", (err: Error) => errors.push(err));
 
@@ -58,6 +69,12 @@ function startApp(redisUrl: string): {
     {
       health: createHealthProbes({ db, redis }),
       buildInfo: { version: null, commit: null },
+      // `/health` is what this file is about; the sections of `/system/status`
+      // answer from fixtures so that a Redis this test kills on purpose does
+      // not fail a route nobody here calls.
+      queues: { collect: async () => EMPTY_QUEUES },
+      worker: { read: async () => LIVE_WORKER },
+      budget: { collect: async () => IDLE_BUDGET },
     },
     { adminPassword: TEST_PASSWORD, logger: false },
   );
@@ -85,7 +102,7 @@ afterEach(async () => {
 
 describe("GET /health against live services", () => {
   it("answers 200 while Postgres and Redis are up", async () => {
-    const { app, redis } = startApp(env.REDIS_URL);
+    const { app, redis } = startApp(openTestRedis());
     await app.ready();
     await whenReady(redis);
 
@@ -101,7 +118,7 @@ describe("GET /health against live services", () => {
     // The client defaults would queue the ping offline and reconnect forever,
     // so this case is the proof that `enableOfflineQueue` and the timeouts of
     // `createRedis` hold on a real socket.
-    const { app } = startApp(CLOSED_REDIS_URL);
+    const { app } = startApp(createRedis(CLOSED_REDIS_URL));
     await app.ready();
 
     const startedAt = Date.now();

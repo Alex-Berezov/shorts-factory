@@ -9,6 +9,7 @@ import {
   systemHeartbeatJob,
 } from "../src/jobs/system-heartbeat.js";
 import type { JobRuntimeDeps, ProcessableJob } from "../src/lib/define-job.js";
+import { recordingUsage, unusedBudget } from "./job-deps.js";
 
 /**
  * The stamp `/system/status` (E0-09) and the container healthcheck (E0-11)
@@ -37,7 +38,17 @@ function depsWithRecordedSet(): {
 } {
   const redis = new Redis({ lazyConnect: true });
   const set = vi.spyOn(redis, "set").mockResolvedValue("OK");
-  return { deps: { log: pino({ level: "silent" }), db, redis }, redis, set };
+  return {
+    deps: {
+      log: pino({ level: "silent" }),
+      db,
+      redis,
+      budget: unusedBudget(),
+      createUsage: recordingUsage().createUsage,
+    },
+    redis,
+    set,
+  };
 }
 
 /** A queue that keeps the ids it was asked to add. */
