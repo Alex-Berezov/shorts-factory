@@ -4,11 +4,21 @@
  * answer-length.js - Stop. Третий уровень контроля формата: объём ответа.
  *
  * Берёт последнее сообщение ассистента, меряет в нём прозу (код, команды и таблицы
- * не считаются) и, если вышло больше answerFormat.maxProse из общих правил, возвращает
- * агенту замечание с требованием переписать ответ короче и по формату.
+ * не считаются) и строки. Перебор порога answerFormat.maxProse / maxLines не возвращает
+ * ответ на переписывание - иначе владелец видит тот же ответ дважды. Замечание кладётся
+ * в состояние под номером сессии (lengthNotes, операции - раздел «состояние» lib.js),
+ * и remind-format.js отдаёт его агенту в начале следующего хода той же сессии. Если
+ * следующего хода нет (отчёт /auto, затем /clear), замечание не доходит: длину отчёта
+ * там держит форма auto.md / output-styles/short.md.
+ *
+ * Меряется всегда последний ответ, в том числе заход после отказа другого Stop-хука
+ * (stop_hook_active): сам хук не блокирует, петли нет, а замечание должно описывать
+ * ответ, который владелец увидит. Ответ в пределах порога или без текста снимает
+ * замечание своей сессии. Без session_id на входе хук ничего не пишет: адресата нет.
+ * Состояние пишется, только если оно изменилось.
  *
  * Порог один на все репозитории: ответ у агента общий, а не отдельный на каждый проект.
- * Ничего не проверяет по коду и никогда не запрещает действий: только объём текста.
+ * Ничего не блокирует, выход всегда нулевой.
  */
 
 const L = require('./lib.js');
@@ -17,17 +27,10 @@ const DEFAULT_MAX = 2200;
 const DEFAULT_MAX_LINES = 40;
 
 function render(len, max) {
-  const over = len - max;
   return (
-    'Ответ слишком длинный: ' + len + ' знаков прозы при пороге ' + max +
-    ', перебор ' + over + '.\n' +
-    'Перепиши тот же ответ короче, ничего не теряя по смыслу, и держи формат:\n' +
-    '1) что сделано по сути - до трёх строк;\n' +
-    '2) Проверки: команда - результат, по строке на каждую команду;\n' +
-    '3) что осталось или что может сломаться - только если это правда есть,\n' +
-    '   иначе третий блок просто опусти.\n' +
-    'Код, команды и таблицы в объём не входят - режь рассуждения, пересказ хода\n' +
-    'работы и вводные обороты.\n'
+    'Прошлый ответ вышел длиннее порога: ' + len + ' знаков прозы при ' + max + '.\n' +
+    'Не переписывай его; этот ответ держи короче - режь рассуждения, пересказ хода\n' +
+    'работы и вводные обороты. Код, команды и таблицы в объём не входят.\n'
   );
 }
 
@@ -40,29 +43,14 @@ function lineCount(text) {
 
 function renderLines(lines, max) {
   return (
-    'Ответ слишком длинный: ' + lines + ' непустых строк при пороге ' + max + '.\n' +
-    'Подробности в чат не идут - им место в файле дела:\n' +
-    '  путь лежит в .claude/.task-current;\n' +
-    '  нет пути - заведи tasks/<ГГГГ-ММ-ДД>-<id-задачи>.md и запиши его туда.\n' +
-    'Перенеси в дело таблицы находок, план, список файлов, полный вывод команд и разбор\n' +
-    'того, как ты работал. В чате оставь только это:\n' +
-    '1) суть - до двух строк;\n' +
-    '2) что требует решения человека - или «вопросов нет»;\n' +
-    '3) что учесть - до трёх строк, только дорогое;\n' +
-    '4) итог проверок одной строкой;\n' +
-    '5) путь к файлу дела.\n'
+    'Прошлый ответ вышел длиннее порога: ' + lines + ' непустых строк при ' + max + '.\n' +
+    'Не переписывай его; подробности клади в файл дела (путь в .claude/.task-current;\n' +
+    'нет задачи - в чат только суть), в чате - отчёт по output-styles/short.md.\n'
   );
 }
 
-L.guard(async () => {
-  const input = await L.readStdin();
-
-  // повторный заход после нашего же замечания - молчим, иначе получится петля
-  if (input && input.stop_hook_active === true) return;
-
-  const text = L.lastAssistantText(input && input.transcript_path);
-  if (!text) return; // транскрипта нет или последний ответ пуст
-
+function noteFor(text) {
+  if (!text) return '';
   const fmt = L.commonRules().answerFormat || {};
   const raw = Number(fmt.maxProse);
   const max = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX;
@@ -71,8 +59,22 @@ L.guard(async () => {
   const maxLines = Number.isFinite(rawLines) && rawLines > 0 ? Math.floor(rawLines) : DEFAULT_MAX_LINES;
 
   const lines = lineCount(text);
-  if (lines > maxLines) L.complain(renderLines(lines, maxLines));
-
+  if (lines > maxLines) return renderLines(lines, maxLines);
   const len = L.proseLength(text);
-  if (len > max) L.complain(render(len, max));
+  if (len > max) return render(len, max);
+  return '';
+}
+
+L.guard(async () => {
+  const input = await L.readStdin();
+  const sessionId = L.sessionIdOf(input);
+  if (!sessionId) return; // некому адресовать замечание
+
+  const note = noteFor(L.lastAssistantText(input && input.transcript_path));
+
+  const s = L.readState();
+  const changed = note
+    ? L.putLengthNote(s, sessionId, note, Date.now())
+    : L.dropLengthNote(s, sessionId);
+  if (changed) L.writeState(s);
 });

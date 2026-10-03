@@ -57,6 +57,17 @@ function readStdin() {
   });
 }
 
+/**
+ * session_id входа хука, если он похож на номер сессии, иначе ''. Номер становится ключом
+ * в состоянии (lengthNotes), поэтому пропускаются только [A-Za-z0-9_-]{1,128} и не имена
+ * свойств Object.prototype (__proto__, constructor и т.п.).
+ */
+function sessionIdOf(input) {
+  const id = input && typeof input.session_id === 'string' ? input.session_id : '';
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return '';
+  return id in Object.prototype ? '' : id;
+}
+
 function deny(reason, eventName) {
   process.stdout.write(
     JSON.stringify({
@@ -433,25 +444,133 @@ function addedLines(repo, rules, relPath) {
 
 // ------------------------------------------------------------------ состояние
 
+/**
+ * Путь к .qa-state. SF_HOOK_STATE_DIR - служебная переменная самопроверки обвязки:
+ * harness-selftest.js ставит её во временную папку на весь прогон, чтобы пробы не трогали
+ * боевое состояние (решение техлида 03.10.2026). Читается только здесь.
+ */
 function statePath() {
-  return path.join(STATE_DIR, '.qa-state');
+  const override = process.env.SF_HOOK_STATE_DIR;
+  return path.join(override ? path.resolve(override) : STATE_DIR, '.qa-state');
 }
 
+function defaultState() {
+  return { edits: 0, strayFiles: [], lastQa: null };
+}
+
+/**
+ * Дефолт - только когда файла нет (ENOENT), он не разбирается (SyntaxError) или разобран
+ * не в объект (null, массив, строка). Любая другая ошибка чтения пробрасывается: дефолт
+ * на ней ушёл бы обратно в файл первым же писателем и стёр lastQa/lastGates. Испорченный
+ * файл здесь не чинится записью (решение техлида 03.10.2026).
+ */
 function readState() {
+  let raw;
   try {
-    return JSON.parse(fs.readFileSync(statePath(), 'utf8'));
-  } catch (_) {
-    return { edits: 0, strayFiles: [], lastQa: null };
+    raw = JSON.parse(fs.readFileSync(statePath(), 'utf8'));
+  } catch (e) {
+    if ((e && e.code === 'ENOENT') || e instanceof SyntaxError) return defaultState();
+    throw e;
   }
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : defaultState();
 }
 
+/** Коды, на которых rename на win32 падает эпизодически (файл держит антивирус или читатель). */
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const RENAME_ATTEMPTS = 3;
+const RENAME_PAUSE_MS = 25;
+
+/**
+ * Запись целиком через временный файл и rename: читатель видит либо старый файл, либо новый,
+ * но не недописанный. rename повторяется до RENAME_ATTEMPTS раз на RENAME_RETRY_CODES, после
+ * последней неудачи файл пишется напрямую - отметка важнее атомарности. Одновременные
+ * read-modify-write двух хуков это не спасает (последний пишущий побеждает) - см.
+ * docs/TECH_DEBT.md.
+ */
 function writeState(obj) {
+  const p = statePath();
+  const tmp = p + '.' + process.pid + '.tmp';
+  const body = JSON.stringify(obj, null, 2);
   try {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
-    fs.writeFileSync(statePath(), JSON.stringify(obj, null, 2));
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(tmp, body);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        fs.renameSync(tmp, p);
+        return;
+      } catch (e) {
+        if (!(e && RENAME_RETRY_CODES.has(e.code))) throw e;
+        if (attempt >= RENAME_ATTEMPTS) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RENAME_PAUSE_MS);
+      }
+    }
+    fs.writeFileSync(p, body);
   } catch (_) {
     /* состояние - не повод падать */
+  } finally {
+    /* недописанный или не переименованный временный файл не оставляем */
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch (_e) {
+      /* нечего убирать */
+    }
   }
+}
+
+/*
+ * Замечания answer-length о длине ответа: lengthNotes[sessionId] = { text, at } в объекте
+ * состояния (решение техлида 03.10.2026). У каждой сессии своё замечание, соседние друг другу
+ * его не стирают; карта держит не больше LENGTH_NOTES_CAP записей, лишние вытесняются
+ * по старейшему at. Без sessionId операции ничего не делают; номер сессии хуки берут
+ * через sessionIdOf. Функции меняют переданный объект и говорят, изменился ли он, -
+ * читать и писать состояние вызывающему.
+ */
+const LENGTH_NOTES_CAP = 8;
+
+function lengthNotesOf(s) {
+  const m = s.lengthNotes;
+  return m && typeof m === 'object' && !Array.isArray(m) ? m : null;
+}
+
+/** Записать замечание своей сессии. true - объект изменился. */
+function putLengthNote(s, sessionId, text, at) {
+  if (!sessionId) return false;
+  let changed = false;
+  let notes = lengthNotesOf(s);
+  if (!notes) {
+    notes = {};
+    s.lengthNotes = notes;
+    changed = true;
+  }
+  const held = notes[sessionId];
+  if (held && held.text === text) return changed;
+  notes[sessionId] = { text, at };
+  const keys = Object.keys(notes);
+  if (keys.length > LENGTH_NOTES_CAP) {
+    keys
+      .sort((a, b) => (Number(notes[a] && notes[a].at) || 0) - (Number(notes[b] && notes[b].at) || 0))
+      .slice(0, keys.length - LENGTH_NOTES_CAP)
+      .forEach((k) => { delete notes[k]; });
+  }
+  return true;
+}
+
+/** Снять замечание своей сессии; чужие не трогает. true - объект изменился. */
+function dropLengthNote(s, sessionId) {
+  if (!sessionId) return false;
+  const notes = lengthNotesOf(s);
+  if (!notes || !Object.prototype.hasOwnProperty.call(notes, sessionId)) return false;
+  delete notes[sessionId];
+  return true;
+}
+
+/** Взять замечание своей сессии и снять его. { text: '' если нет, changed }. */
+function takeLengthNote(s, sessionId) {
+  if (!sessionId) return { text: '', changed: false };
+  const notes = lengthNotesOf(s);
+  const held = notes && notes[sessionId];
+  const text = held && typeof held.text === 'string' ? held.text : '';
+  return { text, changed: dropLengthNote(s, sessionId) };
 }
 
 function bumpEdits(n) {
@@ -533,6 +652,7 @@ module.exports = {
   HOOKS_DIR,
   STATE_DIR,
   readStdin,
+  sessionIdOf,
   deny,
   complain,
   pass,
@@ -556,6 +676,10 @@ module.exports = {
   writeState,
   bumpEdits,
   statePath,
+  LENGTH_NOTES_CAP,
+  putLengthNote,
+  dropLengthNote,
+  takeLengthNote,
   lastAssistantText,
   userTurnCount,
   proseLength,
