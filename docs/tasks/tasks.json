@@ -194,7 +194,8 @@
       "E0-12"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "todo"
+    "status": "in_progress",
+    "started_at": "2026-10-10"
   },
   {
     "id": "E1-01",
@@ -1568,10 +1569,9 @@
       "E0-01"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "blocked",
+    "status": "todo",
     "added_at": "2026-09-06",
-    "started_at": "2026-09-06",
-    "blocked_reason": "запись в .claude/hooks/rules.sf.json отклоняется инструментами Write/Edit (проверено 06.09 в заходе E0-02: 4 попытки у worker и 1 у оркестратора, текст отказа - denied because Claude Code is running in don't ask mode); источник отказа в этом заходе установить не удалось - deny-правила на .claude/** нет ни в глобальном, ни в проектном settings, allow есть; успешной записи в .claude/hooks/** в заходе не было ни разу; обход через Bash запрещён правилами, снимает только владелец"
+    "started_at": "2026-09-06"
   },
   {
     "id": "E0-02A",
@@ -1583,9 +1583,8 @@
       "E0-02"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "blocked",
-    "added_at": "2026-09-06",
-    "blocked_reason": "запись в .claude/hooks/rules.sf.json отклоняется инструментами Write/Edit (проверено 06.09 в заходе E0-02: 4 попытки у worker и 1 у оркестратора, текст отказа - denied because Claude Code is running in don't ask mode); источник отказа установить не удалось - deny-правила на .claude/** нет ни в глобальном, ни в проектном settings, allow есть; обход через Bash запрещён, снимает только владелец; исполняется одним заходом с E0-01A"
+    "status": "todo",
+    "added_at": "2026-09-06"
   },
   {
     "id": "E0-11A",

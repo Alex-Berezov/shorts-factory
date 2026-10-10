@@ -61,6 +61,22 @@ export function isFinalFailure(job: FailedJob, err: unknown): boolean {
   return job.attemptsMade >= (job.opts.attempts ?? 1);
 }
 
+/**
+ * The creation time as the dlq id carries it. The job a worker sees is read
+ * back from Redis, where BullMQ restores `timestamp` with `parseInt` of what
+ * the caller passed as `opts.timestamp`. Real inputs: a negative integer, NaN,
+ * an integer that lost precision in Lua (14 significant digits: `2**53`
+ * arrives as `9`); `Infinity` and values beyond `MAX_SAFE_INTEGER` never reach
+ * `dlqTimestamp`. `jobIds.dlqEntry` takes only a safe integer of zero or more
+ * (ADR-0009) and throws on anything else, which would lose the copy into the
+ * `catch` below - so anything else becomes 0. Two dirty moments of one id then
+ * share a dlq id and the second copy is deduplicated; that trade is accepted
+ * in ADR-0008.
+ */
+function dlqTimestamp(ts: number): number {
+  return Number.isSafeInteger(ts) && ts >= 0 ? ts : 0;
+}
+
 /** The record as it is stored, without the queue-side ids. */
 export function toDlqRecord(
   queue: QueueName,
@@ -140,7 +156,11 @@ export function createFailedHandler(
       if (job.id !== undefined) {
         // Deterministic, so that a second `failed` for the same instance -
         // a worker restarted while the job was dying - leaves one record.
-        opts.jobId = jobIds.dlqEntry(options.queue, job.id, job.timestamp);
+        opts.jobId = jobIds.dlqEntry(
+          options.queue,
+          job.id,
+          dlqTimestamp(job.timestamp),
+        );
       }
       await options.dlq.add("system.dlq", record, opts);
       options.log.error(

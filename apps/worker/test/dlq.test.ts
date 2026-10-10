@@ -125,11 +125,16 @@ describe("createFailedHandler", () => {
     expect(dlq.add).toHaveBeenCalledTimes(1);
     expect(dlq.add).toHaveBeenCalledWith(
       "system.dlq",
-      expect.objectContaining({
+      {
         queue: "radar.score",
         jobId: "radar.score/abc/24h",
+        name: "radar.score",
+        data: { videoId: "abc" },
+        failedReason: "quota exhausted",
+        stacktrace: ["Error: quota exhausted"],
         attemptsMade: 5,
-      }),
+        failedAt: "2026-09-10T10:00:00.000Z",
+      },
       {
         attempts: 1,
         removeOnFail: false,
@@ -139,6 +144,49 @@ describe("createFailedHandler", () => {
       },
     );
   });
+
+  it.each([
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["2**53, past the safe range", 2 ** 53],
+    ["a negative", -1],
+    ["NaN", Number.NaN],
+  ])(
+    "copies a job whose timestamp is %s under the id with tail 0",
+    async (_label, timestamp) => {
+      // `job.timestamp` is `parseInt` of the caller's `opts.timestamp`: the
+      // builder refuses anything but a safe integer of zero or more, and a
+      // refusal here would lose the copy. (A fraction never arrives.)
+      const dlq = fakeDlq();
+      const onFailed = createFailedHandler({
+        queue: "radar.score",
+        dlq,
+        log: silent,
+        now: () => new Date("2026-09-10T10:00:00.000Z"),
+      });
+
+      await onFailed(failedJob({ timestamp }), new Error("boom"));
+
+      expect(dlq.add).toHaveBeenCalledTimes(1);
+      expect(dlq.add).toHaveBeenCalledWith(
+        "system.dlq",
+        {
+          queue: "radar.score",
+          jobId: "radar.score/abc/24h",
+          name: "radar.score",
+          data: { videoId: "abc" },
+          failedReason: "quota exhausted",
+          stacktrace: ["Error: quota exhausted"],
+          attemptsMade: 5,
+          failedAt: "2026-09-10T10:00:00.000Z",
+        },
+        {
+          attempts: 1,
+          removeOnFail: false,
+          jobId: "dlq/radar.score/radar.score/abc/24h/0",
+        },
+      );
+    },
+  );
 
   it("leaves a job that will be retried alone", async () => {
     const dlq = fakeDlq();

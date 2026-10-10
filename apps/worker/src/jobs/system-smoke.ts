@@ -15,8 +15,12 @@ import { defineJob } from "../lib/define-job.js";
  */
 const SmokePayloadSchema = z
   .object({
-    /** When the run was asked for; also the whole of the job id. */
-    requestedAtMs: z.number().int().positive(),
+    /**
+     * When the run was asked for; also the whole of the job id. The id rule
+     * is ADR-0009; `positive()` is this job's own: a moment of zero is never
+     * a real request.
+     */
+    requestedAtMs: z.number().int().safe().positive(),
   })
   .strict();
 

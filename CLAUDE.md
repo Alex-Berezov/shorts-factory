@@ -17,6 +17,8 @@ Experiment Engine -> Localization/TTS -> Publishing). Один репозито�
 3. `docs/10_SYSTEM_DESIGN.md` - стек, очереди, модель данных, направление зависимостей (§6).
 4. `docs/01_ARCHITECTURE.md` - продуктовый blueprint (только нужную секцию).
 5. `docs/DECISIONS.md` - что решили PM и техлид до тебя; `.claude/qa-index.md` - уроки ревью.
+6. Для задач с кодом: `docs/40_DEV_GUIDE.md` (рецепты: роут, job, таблица; тесты и гейты)
+   и `docs/adr/` (перечень записей - `docs/adr/README.md`).
 
 Документ больше 10 КБ читай секциями: `grep -n "^## " <файл>` -> `Read` с `offset`.
 

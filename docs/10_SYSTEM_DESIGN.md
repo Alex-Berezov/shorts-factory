@@ -188,7 +188,7 @@ shorts-factory/
 ```
 
 Правило зависимостей: `apps/* → packages/*`; `integrations → core, config`; `db → core`;
-`contracts → core` (только доменные константы - коды ошибок, реестр очередей `QUEUE_NAMES`, разметка капов `BUDGET_SCOPE_KEYS` / `BUDGET_MEASURES` / `BUDGET_PERIODS` - и `zod`); `api-client → contracts` (и больше
+`contracts → core` (из `@sf/core` в `@sf/contracts` - только реестры значений `as const` и коды ошибок; ни функций, ни Zod-схем домена, ни классов - ADR-0007; сегодня это коды ошибок, `QUEUE_NAMES`, `BUDGET_SCOPE_KEYS` / `BUDGET_MEASURES` / `BUDGET_PERIODS`; плюс `zod`); `api-client → contracts` (и больше
 ни на что: ни `core`, ни `config`, ни `db` — клиент знает форму провода и адрес, а не домен);
 `core` ни от чего не зависит. Скоринг (velocity/acceleration/ranking) — чистые функции в `core`,
 покрытые юнит-тестами.

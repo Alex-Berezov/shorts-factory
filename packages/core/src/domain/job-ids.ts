@@ -23,17 +23,25 @@ import { ValidationError } from "./errors.js";
  * processor is what review looks for - it is the way a format drifts.
  */
 
-/** A number is allowed because most ids we build carry database ids and slots. */
+/**
+ * A number is allowed because most ids we build carry database ids, slots and
+ * epoch milliseconds - all of them safe integers of zero or more. Nothing else
+ * is: `String(1e21)` is `1e+21` and `String(1.5)` is `1.5`, so a fraction, a
+ * negative or an integer beyond `Number.MAX_SAFE_INTEGER` would put the way a
+ * number happens to print into the id, and two calls meaning the same job
+ * could get two ids.
+ */
 export type JobIdPart = string | number;
 
 const FORBIDDEN_IN_PART = /[/:]/;
 
 function segment(value: JobIdPart, position: string): string {
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new ValidationError(`jobId ${position} is not a finite number`, {
-        value,
-      });
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new ValidationError(
+        `jobId ${position} is not a safe integer of zero or more`,
+        { value },
+      );
     }
     return String(value);
   }

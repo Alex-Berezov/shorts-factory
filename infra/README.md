@@ -38,6 +38,22 @@ Open `http://localhost:3000` - the browser asks for the admin password;
 `/system` shows api, database, Redis and the worker heartbeat (the first beat
 comes within a minute of the worker's start).
 
+**The Worker card on `/system` reads stale for up to a minute after `up`.**
+That is the normal start, not a fault to look for in the logs: the heartbeat
+is a cron job that fires once a minute (`*/1 * * * *`,
+`apps/worker/src/schedules.ts`), and until its first tick there is no stamp to
+show. The worker container reports `healthy` by the same stamp, so
+`docker compose up --wait` returns at the first probe after that beat has been written.
+The worker healthcheck (`infra/docker-compose.app.yml`) probes every 30 s (`interval`),
+treats `retries: 3` consecutive failures as `unhealthy` and has `start_period: 90s`. Docker
+does not count failed probes inside the start period (a successful one still marks the
+container `healthy` at once), so probes at about 30 s and 60 s that find no stamp yet are
+harmless. Counting starts after the 90 s: three failed probes in a row put the container to
+`unhealthy` no earlier than about 150-180 s after the start. The first beat comes within 60 s
+of the worker's start, so a normal start is `healthy` at the probe after it. `unhealthy` in
+the first two minutes is therefore not a fault; one that stays past three minutes is (the
+stamp is not being written: look at the worker log).
+
 - Only web is published (`WEB_PORT` from `.env`, 3000 by default, all
   interfaces). api is reachable inside the Compose network only
   (`http://api:3001`; `API_PORT` from `.env` is for `pnpm dev` - the
