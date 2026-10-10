@@ -30,3 +30,4 @@ _Добавляется автоматически командами `node scri
 - 2026-10-10 ➕ **E1-12** Деплой на VPS: Compose на сервере, секреты вне репозитория, TLS к базе, db-guard (добавлена в трекер)
 - 2026-10-10 ⛔ **E0-11** blocked — стоп 3: после 5 заходов правок и 6 кругов ревью новый блокер в зоне чтения .env (обратные кавычки обходят проверку пола 16 символов); по решению техлида Р7 - стоп без шестого захода; работа не закоммичена, лежит в рабочем дереве
 - 2026-10-10 ⛔ **E0-11** blocked — стоп 3: после захода Р12 новый блокер от правки (Q1: неверный комментарий APP_VERSION в .env.example против infra/README.md); дифф не закоммичен
+- 2026-10-10 ✅ **E0-11** Docker: Dockerfile'ы api/worker/web, полный Compose, миграции, бэкап — Full Docker stack from root: images, migrations on start, mounted .env read like pnpm dev, backup with rotation, compose gate rules 1-11

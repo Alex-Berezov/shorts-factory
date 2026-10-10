@@ -164,8 +164,10 @@
       "E0-10"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
-    "started_at": "2026-10-10"
+    "status": "done",
+    "started_at": "2026-10-10",
+    "done_at": "2026-10-10",
+    "note": "Full Docker stack from root: images, migrations on start, mounted .env read like pnpm dev, backup with rotation, compose gate rules 1-11"
   },
   {
     "id": "E0-12",
