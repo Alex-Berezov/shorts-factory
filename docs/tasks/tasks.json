@@ -194,8 +194,10 @@
       "E0-12"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
-    "started_at": "2026-10-10"
+    "status": "done",
+    "started_at": "2026-10-10",
+    "done_at": "2026-10-10",
+    "note": "README checked on clean Windows/Linux copies, ADR 0005-0010, developer guide, E0 acceptance closed; strict numeric jobId parts and DLQ timestamp normalisation"
   },
   {
     "id": "E1-01",

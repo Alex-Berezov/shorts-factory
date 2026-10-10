@@ -36,3 +36,4 @@ _Добавляется автоматически командами `node scri
 - 2026-10-10 ➕ **E0-12C** Гейт compose и CLI migrate: таблица правил, обязательные postgres/redis, юнит check-compose, шаги и классы ошибок migrate, единый app.Dockerfile, exec-форма CMD (добавлена в трекер)
 - 2026-10-10 ➕ **E0-12D** Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client (добавлена в трекер)
 - 2026-10-10 ✅ **E0-12** CI: сервисы Postgres/Redis, кэш, интеграционные тесты, сборка образов — CI с Postgres/Redis, int-тестами, гейтами и сборкой четырёх образов с пробой; зелёный на main и в PR
+- 2026-10-10 ✅ **E0-13** Документация разработчика, ADR, закрытие эпика — README checked on clean Windows/Linux copies, ADR 0005-0010, developer guide, E0 acceptance closed; strict numeric jobId parts and DLQ timestamp normalisation
