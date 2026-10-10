@@ -2,9 +2,12 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  RENDERING_PROBE,
+  RENDERING_PROBE_SOURCE,
   checkBuildIgnores,
   checkCompose,
   checkDockerignore,
+  checkRendering,
   defaultComposeFile,
   durationSec,
 } from "../../../scripts/compose-rules.mjs";
@@ -583,6 +586,9 @@ describe("checkCompose", () => {
     it.each([
       ["without bind options", undefined],
       ["creating the host path", { create_host_path: true }],
+      // Docker Compose v2.38 prints `create_host_path: false` this way too:
+      // the option is not in the output, and the mount is refused with it.
+      ["with empty bind options", {}],
     ])("refuses a mount %s", (_case, bind) => {
       // The short syntax `../.env:/repo/.env:ro` prints as the second one.
       const config = broken("web", (service) => {
@@ -593,6 +599,60 @@ describe("checkCompose", () => {
         "web: .env mount lacks create_host_path: false - a missing .env would become an empty directory",
       ]);
     });
+  });
+});
+
+/**
+ * The probe the gate renders before the stack (rule 10): the option it sets
+ * must come back from `docker compose config`, or rule 10 reads nothing.
+ */
+describe("checkRendering", () => {
+  /** What a Compose printed for the probe's mount, with `bind` as given. */
+  function rendered(bind: unknown): { services: Record<string, Service> } {
+    return {
+      services: {
+        probe: {
+          volumes: [
+            {
+              type: "bind",
+              source: `/tmp/${RENDERING_PROBE_SOURCE}`,
+              target: "/probe.env",
+              ...(bind === undefined ? {} : { bind }),
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  it("sets create_host_path: false on a bind mount of the probe's source", () => {
+    expect(RENDERING_PROBE).toContain(`source: ./${RENDERING_PROBE_SOURCE}`);
+    expect(RENDERING_PROBE).toMatch(
+      /\n {8}bind:\n {10}create_host_path: false\n/,
+    );
+  });
+
+  it("passes the rendering of Docker Compose v5, which keeps the option", () => {
+    expect(checkRendering(rendered({ create_host_path: false }))).toEqual([]);
+  });
+
+  it.each([
+    ["empty bind options (Docker Compose v2.38)", {}, "{}"],
+    ["no bind options", undefined, "null"],
+    [
+      "the option reversed",
+      { create_host_path: true },
+      '{"create_host_path":true}',
+    ],
+  ])("stops on a rendering with %s", (_case, bind, shown) => {
+    expect(checkRendering(rendered(bind))).toEqual([
+      `this docker compose prints the probe's create_host_path: false as ${shown} - rule 10 cannot tell the option from its absence; run the Compose CI pins (.github/workflows/ci.yml)`,
+    ]);
+  });
+
+  it("stops on a rendering without the probe", () => {
+    expect(checkRendering({ services: {} })).toHaveLength(1);
+    expect(checkRendering({})).toHaveLength(1);
   });
 });
 

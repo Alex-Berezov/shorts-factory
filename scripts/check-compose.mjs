@@ -22,6 +22,11 @@
  * `env_file` would be indistinguishable from one with an `environment`, and
  * rule 10 (no `env_file` on any service) could not see it.
  *
+ * Before the stack it renders `RENDERING_PROBE` (rule 10 of
+ * compose-rules.mjs): a Compose that drops `create_host_path: false` from
+ * its output would make the rule fail a correct file or pass a broken one, so
+ * the gate stops and names the version instead.
+ *
  * Usage: `node scripts/check-compose.mjs [compose file]`.
  * Exit 1 with every violation listed; exit 0 when clean.
  */
@@ -36,8 +41,11 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
+  RENDERING_PROBE,
+  RENDERING_PROBE_SOURCE,
   checkBuildIgnores,
   checkCompose,
+  checkRendering,
   defaultComposeFile,
 } from "./compose-rules.mjs";
 
@@ -50,25 +58,45 @@ const scratch = mkdtempSync(join(tmpdir(), "sf-check-compose-"));
 const emptyEnvFile = join(scratch, "empty.env");
 writeFileSync(emptyEnvFile, "");
 
-let config;
-try {
-  config = JSON.parse(
-    execFileSync(
-      "docker",
-      [
-        "compose",
-        "--env-file",
-        emptyEnvFile,
-        "-f",
-        file,
-        "config",
-        "--no-env-resolution",
-        "--format",
-        "json",
-      ],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    ),
+const probeFile = join(scratch, "probe.yaml");
+writeFileSync(probeFile, RENDERING_PROBE);
+writeFileSync(join(scratch, RENDERING_PROBE_SOURCE), "");
+
+/** `docker compose` with `args`, its standard output. */
+function compose(args) {
+  return execFileSync("docker", ["compose", ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+/** The resolved configuration of `composeFile`, as JSON. */
+function render(composeFile) {
+  return JSON.parse(
+    compose([
+      "--env-file",
+      emptyEnvFile,
+      "-f",
+      composeFile,
+      "config",
+      "--no-env-resolution",
+      "--format",
+      "json",
+    ]),
   );
+}
+
+let config;
+let rendering;
+try {
+  rendering = checkRendering(render(probeFile));
+  if (rendering.length > 0) {
+    rendering.push(
+      `docker compose version: ${compose(["version", "--short"]).trim()}`,
+    );
+  } else {
+    config = render(file);
+  }
 } catch (error) {
   if (error.code === "ENOENT") {
     // No Docker CLI is a missing prerequisite, not a broken Compose file.
@@ -82,6 +110,12 @@ try {
   process.exit(1);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
+}
+
+if (rendering.length > 0) {
+  console.error("check-compose: the rendering probe failed");
+  for (const problem of rendering) console.error(`  ${problem}`);
+  process.exit(1);
 }
 
 /** Contents of a file, null if there is no file at `path`. */

@@ -45,7 +45,13 @@
  *    stack and creates nothing (not verified on Linux yet, docs/TECH_DEBT.md,
  *    E1-12). Docker Desktop (Windows) does not pass the option on: it creates
  *    an empty `.env` directory and `migrate` exits with EISDIR
- *    (infra/README.md).
+ *    (infra/README.md). The rule reads the option from what
+ *    `docker compose config` prints, and not every Compose prints it:
+ *    v2.38 drops `create_host_path: false` and prints `bind: {}`, the same
+ *    as for `bind: {}` written by hand, while v5 prints `{}` for
+ *    `create_host_path: true`. So the gate first renders `RENDERING_PROBE`
+ *    and stops (`checkRendering`) on a Compose that loses the option; CI
+ *    pins the Compose it runs (.github/workflows/ci.yml).
  * 11. No `.env` enters an image (`checkBuildIgnores`): every image is built
  *    from the repository root with `COPY . .`, so the `.dockerignore` of its
  *    context is all that keeps the operator's `.env` - and any `.env.local`,
@@ -96,6 +102,40 @@ const ENV_READERS = ["migrate", "api", "worker", "web"];
 const ENV_TARGET = "/repo/.env";
 /** `.dockerignore` lines that keep every `.env` out of a build context. */
 const ENV_MASKS = [".env", ".env.*", "**/.env", "**/.env.*"];
+
+/**
+ * A Compose file with one bind mount that sets `create_host_path: false`:
+ * the Compose that renders the stack must keep the option in its output, or
+ * rule 10 cannot tell a mount with it from one without it. Its source is
+ * `RENDERING_PROBE_SOURCE` next to the file.
+ */
+export const RENDERING_PROBE_SOURCE = "probe.env";
+export const RENDERING_PROBE = `services:
+  probe:
+    image: probe
+    volumes:
+      - type: bind
+        source: ./${RENDERING_PROBE_SOURCE}
+        target: /probe.env
+        bind:
+          create_host_path: false
+`;
+
+/**
+ * Violations of the rendering `RENDERING_PROBE` must survive: the
+ * configuration Compose printed for it carries `create_host_path: false`.
+ * Empty when it does.
+ *
+ * @param {{ services?: Record<string, unknown> }} config
+ * @returns {string[]}
+ */
+export function checkRendering(config) {
+  const mount = config.services?.probe?.volumes?.[0];
+  if (mount?.bind?.create_host_path === false) return [];
+  return [
+    `this docker compose prints the probe's create_host_path: false as ${JSON.stringify(mount?.bind ?? null)} - rule 10 cannot tell the option from its absence; run the Compose CI pins (.github/workflows/ci.yml)`,
+  ];
+}
 
 /**
  * `compose.yaml` of the repository the script at `scriptUrl` lives in. Through

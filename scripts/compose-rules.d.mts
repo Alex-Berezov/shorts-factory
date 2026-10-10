@@ -20,3 +20,14 @@ export function checkBuildIgnores(
   config: { services?: Record<string, unknown> },
   read: (path: string) => string | null,
 ): string[];
+
+/** A Compose file whose rendering must keep `create_host_path: false`. */
+export const RENDERING_PROBE: string;
+
+/** The file the probe's bind mount points at, next to the probe. */
+export const RENDERING_PROBE_SOURCE: string;
+
+/** Violations of the probe's rendering; empty when the option survived. */
+export function checkRendering(config: {
+  services?: Record<string, unknown>;
+}): string[];

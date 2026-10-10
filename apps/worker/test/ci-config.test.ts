@@ -307,6 +307,24 @@ describe("ci.yml job ci", () => {
     }
   });
 
+  it("checks the Compose files with the pinned Compose, verified by its checksum", () => {
+    const install = steps.findIndex((step) =>
+      step.text.includes("docker-compose-linux-x86_64"),
+    );
+    const text = steps[install]?.text ?? "";
+    const version = /\/releases\/download\/v(\d+\.\d+\.\d+)\//.exec(text)?.[1];
+
+    expect(install).toBeGreaterThan(-1);
+    expect(install).toBeLessThan(
+      runs.indexOf("node scripts/check-compose.mjs"),
+    );
+    expect(version).toBe("5.5.1");
+    expect(text).toMatch(/\b[0-9a-f]{64} {2}\S+ \| sha256sum -c -/);
+    expect(text).toContain(
+      `test "$(docker compose version --short)" = "${version}"`,
+    );
+  });
+
   it("keeps no turbo cache in the workflow: every run computes the result", () => {
     expect(workflow).not.toMatch(/\.turbo/);
     expect(workflow).not.toMatch(/--force\b/);
