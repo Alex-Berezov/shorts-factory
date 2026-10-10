@@ -2,6 +2,7 @@ export * from "./schemas/content-dna.js";
 export * from "./domain/budget.js";
 export * from "./domain/enums.js";
 export * from "./domain/errors.js";
+export * from "./domain/heartbeat.js";
 export * from "./domain/idea.js";
 export * from "./domain/job-ids.js";
 export * from "./domain/provider.js";

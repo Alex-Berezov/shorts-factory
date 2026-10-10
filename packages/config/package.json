@@ -10,6 +10,10 @@
       "default": "./src/index.ts"
     },
     "./server": "./src/server.ts",
+    "./redis-url": {
+      "browser": "./src/server.ts",
+      "default": "./src/redis-url.ts"
+    },
     "./server-secrets": "./src/server-secrets.json",
     "./vitest/setup": "./vitest/setup.ts"
   },

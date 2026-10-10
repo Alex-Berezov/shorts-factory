@@ -59,6 +59,9 @@ importers:
       pino:
         specifier: ^9.4.0
         version: 9.14.0
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.13
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -69,9 +72,6 @@ importers:
       pino-pretty:
         specifier: ^11.2.0
         version: 11.3.0
-      tsx:
-        specifier: ^4.19.0
-        version: 4.23.13
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
@@ -172,6 +172,9 @@ importers:
       pino:
         specifier: ^9.4.0
         version: 9.14.0
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.13
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -182,9 +185,6 @@ importers:
       pino-pretty:
         specifier: ^11.2.0
         version: 11.3.0
-      tsx:
-        specifier: ^4.19.0
-        version: 4.23.13
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
@@ -276,6 +276,9 @@ importers:
       postgres:
         specifier: ^3.4.0
         version: 3.4.9
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.13
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -283,9 +286,6 @@ importers:
       drizzle-kit:
         specifier: ^0.28.0
         version: 0.28.1
-      tsx:
-        specifier: ^4.19.0
-        version: 4.23.13
       typescript:
         specifier: ^5.6.0
         version: 5.9.3

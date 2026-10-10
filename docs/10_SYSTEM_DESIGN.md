@@ -181,7 +181,9 @@ shorts-factory/
 │       ├── youtube/  # DataApiClient, AnalyticsApiClient, OAuth, учёт квоты
 │       ├── gemini/   # VideoAnalysisClient (public URL + local file), LlmClient
 │       └── tts/      # интерфейс TtsProvider + адаптеры провайдеров
-├── infra/          # docker-compose, Dockerfile'ы, деплой-заметки
+├── infra/          # docker-compose.yml (postgres+redis, dev), docker-compose.app.yml (migrate/api/worker/web), docker/*.Dockerfile, scripts/backup.sh
+├── scripts/        # гейты репозитория: check-no-search-list, check-compose (+ compose-rules), трекер задач
+├── compose.yaml    # полный стек: `docker compose up --build` из корня, include двух файлов infra/ (E0-11)
 └── docs/           # проектная документация (этот файл, ТЗ и исходные 01–06)
 ```
 

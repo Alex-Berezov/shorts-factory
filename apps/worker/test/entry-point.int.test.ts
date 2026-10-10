@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { systemSmokeJob } from "../src/jobs/system-smoke.js";
 import { closeRedis } from "../src/lib/redis.js";
+import { DEV_COMMAND } from "./dev-command.js";
 import {
   deleteSmokeUsage,
   obliterateQueues,
@@ -40,8 +41,6 @@ const ENTRY = fileURLToPath(
   new URL("./fixtures/entry-under-signal.ts", import.meta.url),
 );
 const MANIFEST = fileURLToPath(new URL("../package.json", import.meta.url));
-/** How the worker is started: by `pnpm dev`, by the image of E0-11 and here. */
-const DEV_COMMAND = "node --import tsx src/index.ts";
 const ManifestSchema = z.object({ scripts: z.object({ dev: z.string() }) });
 /** Enough jobs that the worker is busy when the signal arrives. */
 const JOB_COUNT = 30;

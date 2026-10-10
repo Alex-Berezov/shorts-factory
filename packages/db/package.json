@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./test/local-host-guard.js": "./test/local-host-guard.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "db:generate": "tsx ./node_modules/drizzle-kit/bin.cjs generate",
@@ -16,12 +20,12 @@
     "@sf/config": "workspace:*",
     "@sf/core": "workspace:*",
     "drizzle-orm": "^0.36.0",
-    "postgres": "^3.4.0"
+    "postgres": "^3.4.0",
+    "tsx": "^4.19.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "drizzle-kit": "^0.28.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   }

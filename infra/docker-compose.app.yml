@@ -1,0 +1,148 @@
+# Application services of the full stack; started through the root
+# compose.yaml, which includes this file next to docker-compose.yml (Postgres
+# and Redis). Paths here are relative to this directory.
+#
+# Configuration: the root `.env` is mounted read-only at /repo/.env in every
+# app service, where @sf/config looks for it (packages/config/src/paths.ts), and
+# read by the same `bootstrapEnv`/`util.parseEnv` as under `pnpm dev` - one
+# parser for both paths. `environment` sets what has to differ inside the
+# Compose network - addresses of Postgres, Redis and api, the media directory
+# and NODE_ENV - and wins over the file: the file only fills keys the process
+# leaves unset. Nothing of it is baked into the images.
+
+# Where api and worker keep media inside their containers; the `media` volume
+# is mounted there (scripts/compose-rules.mjs checks the two agree).
+x-media-dir: &media-dir /data/media
+
+# The mount of the root `.env`. Read-only: no container writes the operator's
+# file. `create_host_path: false`: on a Linux engine the stack does not start
+# without a `.env` and creates nothing (not verified on Linux yet). Docker
+# Desktop (Windows) does not pass the option on: it creates an empty `.env`
+# directory and `migrate` exits with EISDIR (infra/README.md).
+# scripts/compose-rules.mjs, rule 10, holds every app service to it.
+x-env-mount: &env-mount
+  type: bind
+  source: ../.env
+  target: /repo/.env
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-app-environment: &app-environment
+  NODE_ENV: production
+  DATABASE_URL: postgres://sf:sf@postgres:5432/shorts_factory
+  REDIS_URL: redis://redis:6379
+
+services:
+  # Migrations, then the seed; exits when done. api, worker and web start only
+  # after it exited with 0, and it runs again on every `up` (both steps are
+  # idempotent).
+  migrate:
+    build:
+      context: ..
+      dockerfile: infra/docker/migrate.Dockerfile
+      target: runtime
+    environment:
+      <<: *app-environment
+    volumes:
+      - *env-mount
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/docker/api.Dockerfile
+      target: runtime
+      args:
+        APP_VERSION: ${APP_VERSION:-}
+        GIT_COMMIT: ${GIT_COMMIT:-}
+    environment:
+      <<: *app-environment
+      MEDIA_DIR: *media-dir
+      # Pinned: inside the network api always listens on 3001, the port its
+      # healthcheck and web's API_INTERNAL_URL use. An API_PORT in .env is for
+      # `pnpm dev` on the host and must not move the container's server.
+      API_PORT: "3001"
+    # No `ports`: api is reached by web inside the network only. Its single
+    # password must not become the only thing between it and the internet.
+    volumes:
+      - *env-mount
+      - type: volume
+        source: media
+        target: *media-dir
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # busybox wget exits non-zero on the 503 `/health` answers when Postgres
+      # or Redis does not.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+      target: runtime
+    environment:
+      <<: *app-environment
+      MEDIA_DIR: *media-dir
+    volumes:
+      - *env-mount
+      - type: volume
+        source: media
+        target: *media-dir
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # The drain of src/lib/shutdown.ts has a 25 s deadline; Docker's default
+    # 10 s would SIGKILL the worker in the middle of it.
+    stop_grace_period: 30s
+    healthcheck:
+      # Fresh heartbeat stamp in Redis - the rule /system applies
+      # (apps/worker/src/cli/healthcheck.ts).
+      test: ["CMD", "node", "--import", "tsx", "src/cli/healthcheck.ts"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # The first heartbeat is written on the first minute tick after start.
+      start_period: 90s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/docker/web.Dockerfile
+      target: runtime
+    environment:
+      <<: *app-environment
+      API_INTERNAL_URL: http://api:3001
+    volumes:
+      - *env-mount
+    # The only published port of the stack: WEB_PORT on the host (as with
+    # `pnpm dev`), 3000 inside the container (PORT of web.Dockerfile).
+    ports: ["${WEB_PORT:-3000}:3000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  media:

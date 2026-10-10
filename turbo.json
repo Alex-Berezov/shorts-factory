@@ -12,7 +12,13 @@
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/.env.test",
-        "$TURBO_ROOT$/.env.example"
+        "$TURBO_ROOT$/.env.example",
+        "$TURBO_ROOT$/infra/docker/**",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/apps/api/package.json",
+        "$TURBO_ROOT$/packages/db/package.json",
+        "$TURBO_ROOT$/scripts/compose-rules.mjs",
+        "$TURBO_ROOT$/scripts/compose-rules.d.mts"
       ]
     },
     "test:int": { "dependsOn": ["^test:int"], "cache": false },

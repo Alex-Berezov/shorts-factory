@@ -1,4 +1,10 @@
 * text=auto eol=lf
+# Spelled out, not left to the line above: a shell script or a Dockerfile with
+# CRLF line endings breaks inside a Linux container (the shebang names "bash"
+# followed by a carriage return, which does not exist).
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf
 *.ps1 -text
 
 *.png binary

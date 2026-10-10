@@ -13,6 +13,7 @@ export {
 } from "./budget.js";
 export { closeDb, createDb, type Db } from "./client.js";
 export { pingDb } from "./health.js";
+export { runMigrations } from "./migrate.js";
 export {
   type ApiUsageInsert,
   apiUsageLogRepo,
@@ -26,4 +27,5 @@ export {
   toUsageRow,
 } from "./usage-logger.js";
 export { appSettingRepo } from "./repos/app-setting.js";
+export { seedAppSettings } from "./seed.js";
 export * as schema from "./schema/index.js";

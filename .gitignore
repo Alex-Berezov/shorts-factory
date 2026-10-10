@@ -3,6 +3,9 @@ dist/
 .next/
 .turbo/
 .env
+.env.*
+!.env.example
+!.env.test
 *.local
 /data/
 coverage/

@@ -151,6 +151,64 @@ check('у каждого гейта есть id, cmd и when', () => {
   }
   return { note: gates.map((g) => g.id).join(', ') };
 });
+/**
+ * selectGates из самого gates.js, а не её повтор (L-008): правка обработки when там
+ * обязана краснеть здесь. gates.js - скрипт: main() исполняется при загрузке и выходит
+ * через process.exit, функции он не экспортирует. Поэтому исходник исполняется в
+ * отдельном контексте vm: argv - `--help` (main() печатает справку в заглушённую консоль
+ * и возвращает ran:false - отметки о прогоне нет, гейты не запускаются), process.exit -
+ * заглушка. Объявления функций верхнего уровня скрипта становятся свойствами контекста.
+ */
+function loadSelectGates() {
+  const vm = require('vm');
+  const file = path.join(HOOKS, 'gates.js');
+  // шебанг заменяется пустой строкой, номера строк в стеке не сдвигаются
+  const src = fs.readFileSync(file, 'utf8').replace(/^#!.*/, '');
+  const silent = { log() {}, error() {}, warn() {} };
+  const sandbox = {
+    require,
+    console: silent,
+    process: { argv: [process.execPath, file, '--help'], env: process.env, exit() {} },
+    __dirname: HOOKS,
+    __filename: file,
+  };
+  vm.runInNewContext(src, sandbox, { filename: file });
+  if (typeof sandbox.selectGates !== 'function') throw new Error('в gates.js нет функции selectGates');
+  return sandbox.selectGates;
+}
+
+check('гейт compose: gates.js выбирает его на файлах Compose, пропускает на посторонних, его скрипт на месте', () => {
+  // Гейт по glob, ошибка в шаблоне, в его разборе или в пути скрипта не краснеет,
+  // а молча выключает гейт (E0-11). Решение принимает настоящий selectGates.
+  const gate = ((repoRules && repoRules.gates) || []).find((g) => g.id === 'compose');
+  if (!gate) return 'гейта compose нет в правилах';
+  const selectGates = loadSelectGates();
+  const runs = (file) => {
+    const picked = selectGates([gate], [file], null);
+    return Boolean(picked && picked[0] && picked[0].run);
+  };
+  const mustRun = [
+    'compose.yaml',
+    'infra/docker-compose.yml',
+    'infra/docker-compose.app.yml',
+    'infra/docker/api.Dockerfile',
+    'scripts/check-compose.mjs',
+    'scripts/compose-rules.mjs',
+    '.dockerignore',
+    'infra/docker/worker.Dockerfile.dockerignore',
+  ];
+  // Манифесты приложений check-compose не читает: выбор на них обещал бы
+  // проверку, которой нет (E0-11, круг 7-2).
+  const mustSkip = ['apps/web/src/app/page.tsx', 'apps/api/package.json', 'apps/worker/package.json', 'apps/web/package.json', 'apps/api/src/package.json', 'x.dockerignore', 'docs/30_E0_TASKS.md', 'README.md', 'scripts/tasks.mjs', 'xinfra/a.yml'];
+  const missed = mustRun.filter((f) => !runs(f));
+  if (missed.length) return 'gates.js не выбирает его на ' + missed.join(', ');
+  const stray = mustSkip.filter((f) => runs(f));
+  if (stray.length) return 'gates.js выбирает его на постороннем ' + stray.join(', ');
+  const m = /^node\s+(\S+)/.exec(String(gate.cmd || ''));
+  if (!m) return 'cmd гейта compose не node <скрипт>: ' + gate.cmd;
+  if (!fs.existsSync(path.join(ROOT, m[1]))) return 'скрипта ' + m[1] + ' нет на диске';
+  return { note: mustRun.length + ' выбор, ' + mustSkip.length + ' пропуск' };
+});
 
 // ------------------------------------------------------------------ 3. шапки агентов и команд
 for (const kind of ['agents', 'commands']) {

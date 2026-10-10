@@ -6,11 +6,11 @@
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(
-  /^\/([A-Za-z]:)/,
-  "$1",
-);
+// fileURLToPath, not URL.pathname: the pathname keeps %20 and the percent
+// escapes of non-ASCII letters, and the scan would find no directory at all.
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCAN = ["apps", "packages", "scripts"];
 const EXT = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs"]);
 const SKIP_DIRS = new Set([

@@ -67,3 +67,29 @@
 - Откат: удалить `src/cli/**`, вернуть `db:migrate` на `drizzle-kit migrate`
   (тогда строка подключения снова нужна в `drizzle.config.ts`) и снять строку исключения
   в §6 System Design.
+
+## Дополнение (дополнено 10.10.2026, E0-11)
+
+Пункт «CLI молчит при успехе» заменён: `db:migrate` и `db:seed` при успехе печатают ровно
+одну строку в stdout (`migrations: applied N, M in total` / `migrations: nothing to apply,
+M already applied`; `app settings seeded`), отказ - одну строку причины в stderr и код 1.
+
+- Зачем: сервис `migrate` полного стека (`infra/docker-compose.app.yml`) - одноразовый
+  контейнер, и `docker compose logs migrate` - единственное место, где оператор видит, что
+  он сделал; без строки «применил» и «нечего применять» неразличимы без `psql`
+  (TECH_DEBT :62). Подсказка «run db:migrate first» вместо сырого `relation does not exist`
+  (:85) - тот же довод.
+- Как это сочетается с S03: вывод пишет `process.stdout.write`/`process.stderr.write`
+  (`packages/db/src/cli/run.ts`, `processOutput`), а не `console.*`, и только в слое
+  `src/cli/**`; библиотечная часть `@sf/db` по-прежнему ничего не печатает и принимает
+  подключение параметром. Структурные логи pino остаются слоем приложений.
+- Что проверяет: `packages/db/test/cli-run.test.ts` (одна строка, порядок ошибок,
+  подсказка). Удалить вывод - регресс этого дополнения, а не возврат к исходному ADR.
+- Сопутствующее в том же слое: решение «какая ошибка наружу, если упали и тело, и закрытие»
+  одно на пакет - `packages/db/src/cleanup.ts` (`withCleanup`); им пользуются раннер
+  (`runMigrations`) и точки входа (`closeAfter`). Снятие advisory-лока в `migrateDb` под эту
+  политику не подпадает (дополнено 10.10.2026, E0-11, /fix круг 2): unlock и возврат
+  `client_min_messages` идут отдельными шагами, ни один не бросает, отказ уходит в
+  `onReleaseError` (CLI пишет строку в stderr); при применённых миграциях раннер возвращает
+  результат, а лок уходит вместе с сессией при закрытии соединения. Ожидание лока ограничено
+  `lock_timeout` (`MIGRATION_LOCK_WAIT_MS`, 120 с) с понятным текстом отказа.

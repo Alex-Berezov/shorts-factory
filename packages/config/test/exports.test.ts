@@ -16,6 +16,17 @@ const ManifestSchema = z.object({
   }),
 });
 
+/** Every subpath with its target: a path, or conditions mapped to paths. */
+const AllExportsSchema = z.object({
+  exports: z.record(z.union([z.string(), z.record(z.string())])),
+});
+
+/**
+ * Subpaths a browser bundle may resolve to their own file: the list of secret
+ * names (no values; the client bundle check reads it) and the vitest setup.
+ */
+const BROWSER_SAFE_SUBPATHS = new Set(["./server-secrets", "./vitest/setup"]);
+
 function readRootEntry(): Record<string, string> {
   const raw: unknown = JSON.parse(
     readFileSync(join(packageDir, "package.json"), "utf8"),
@@ -66,6 +77,32 @@ describe("package exports", () => {
     expect(ManifestSchema.parse(raw).exports["./server"]).toBe(
       "./src/server.ts",
     );
+  });
+
+  it("sends browser bundlers of every code subpath to the server-only module", () => {
+    // A subpath that reads the environment (`./redis-url` reads REDIS_URL and
+    // the root .env) would otherwise put a server secret into a client chunk
+    // without a failing build - the root entry's rule holds for each of them.
+    const raw: unknown = JSON.parse(
+      readFileSync(join(packageDir, "package.json"), "utf8"),
+    );
+    const subpaths = Object.entries(AllExportsSchema.parse(raw).exports).filter(
+      ([subpath]) => !BROWSER_SAFE_SUBPATHS.has(subpath),
+    );
+
+    expect(subpaths.map(([subpath]) => subpath)).toContain("./redis-url");
+    for (const [subpath, target] of subpaths) {
+      const browserTarget =
+        typeof target === "string" ? target : target.browser;
+      expect({ subpath, browserTarget }).toEqual({
+        subpath,
+        browserTarget: "./src/server.ts",
+      });
+      if (typeof target !== "string") {
+        // `default` last, as for the root entry: conditions after it are dead.
+        expect(Object.keys(target).at(-1)).toBe("default");
+      }
+    }
   });
 
   it("publishes the list of server secrets as its own subpath", () => {

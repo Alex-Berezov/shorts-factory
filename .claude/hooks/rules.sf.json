@@ -154,6 +154,12 @@
       "note": "запрет search.list по исходникам; быстрая"
     },
     {
+      "id": "compose",
+      "cmd": "node scripts/check-compose.mjs",
+      "when": "glob:{compose.yaml,infra/**,scripts/check-compose.mjs,scripts/compose-rules.mjs,.dockerignore}",
+      "note": "инварианты полного стека Compose (scripts/compose-rules.mjs): наружу только web, порт api, NODE_ENV, grace воркера, healthcheck-и (у воркера - src/cli/healthcheck.ts, у redis - redis-cli ping, start_period у postgres/redis), старт после migrate (api/worker - после здорового redis, web - после здорового api), том media, pg_isready по TCP, restart: unless-stopped у всех, кроме migrate (dev postgres/redis поэтому стартуют вместе с Docker Desktop), env_file нет ни у одного сервиса, а .env проекта смонтирован в migrate/api/worker/web в /repo/.env read-only с create_host_path: false (Р9); .dockerignore контекста сборки каждого образа маскирует .env, .env.*, **/.env, **/.env.* и после первой маски нет ни одной !-строки, а рядом с Dockerfile образов нет <Dockerfile>.dockerignore (правило 11). Нужен Docker CLI (не демон), .env не читает (читает .dockerignore и проверяет, есть ли <Dockerfile>.dockerignore). Сами правила посажены юнит-тестом apps/worker/test/compose-rules.test.ts в pnpm test (E0-11); правило 11 на настоящих файлах - ещё и apps/worker/test/container.test.ts. apps/*/package.json гейт не проверяет и не выбирается на них"
+    },
+    {
       "id": "tracker",
       "cmd": "node scripts/tasks.mjs render --check",
       "when": "glob:{docs/tasks/**,docs/00_STATUS.md}",

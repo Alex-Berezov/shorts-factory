@@ -164,7 +164,8 @@
       "E0-10"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "todo"
+    "status": "in_progress",
+    "started_at": "2026-10-10"
   },
   {
     "id": "E0-12",
@@ -1580,5 +1581,31 @@
     "status": "blocked",
     "added_at": "2026-09-06",
     "blocked_reason": "запись в .claude/hooks/rules.sf.json отклоняется инструментами Write/Edit (проверено 06.09 в заходе E0-02: 4 попытки у worker и 1 у оркестратора, текст отказа - denied because Claude Code is running in don't ask mode); источник отказа установить не удалось - deny-правила на .claude/** нет ни в глобальном, ни в проектном settings, allow есть; обход через Bash запрещён, снимает только владелец; исполняется одним заходом с E0-01A"
+  },
+  {
+    "id": "E0-11A",
+    "epic": "E0",
+    "title": "api/worker: отказы, классификация, до-авторизационный лог",
+    "estimate": "?",
+    "estimate_days": null,
+    "deps": [
+      "E0-13"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-10"
+  },
+  {
+    "id": "E1-12",
+    "epic": "E1",
+    "title": "Деплой на VPS: Compose на сервере, секреты вне репозитория, TLS к базе, db-guard",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E1-11"
+    ],
+    "doc": "31_E1_TASKS.md",
+    "status": "todo",
+    "added_at": "2026-10-10"
   }
 ]

@@ -21,6 +21,15 @@ const TEST_DATABASE = "shorts_factory_test";
  * nothing and every table assertion would fail for the wrong reason.
  */
 export async function resetTestDatabase(): Promise<void> {
+  await emptyTestDatabase();
+  await runMigrations(env.DATABASE_URL);
+}
+
+/**
+ * The first half of `resetTestDatabase`: both schemas dropped, nothing
+ * migrated - for tests about the migration runner itself.
+ */
+export async function emptyTestDatabase(): Promise<void> {
   assertLocalHost(env.DATABASE_URL);
   const sql = postgres(env.DATABASE_URL, { max: 1 });
   try {
@@ -39,8 +48,6 @@ export async function resetTestDatabase(): Promise<void> {
   } finally {
     await sql.end();
   }
-
-  await runMigrations(env.DATABASE_URL);
 }
 
 /** Connection for a test file; the caller closes it with `closeDb`. */

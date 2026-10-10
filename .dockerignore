@@ -1,0 +1,25 @@
+# Build context of every image is the repository root (infra/docker/*.Dockerfile).
+# Environment files never enter the context: configuration reaches a container
+# at run time - the root `.env` mounted read-only at /repo/.env plus Compose's
+# `environment` - not through a layer.
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Dependencies and build output are produced inside the image.
+**/node_modules
+**/.next
+**/.turbo
+**/dist
+**/coverage
+**/*.tsbuildinfo
+
+# Repository tooling, case files, local data and documents.
+.git
+.github
+.claude
+.claude-snapshots
+tasks
+data
+docs

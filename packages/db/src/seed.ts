@@ -1,5 +1,6 @@
 import { QUEUE_NAMES, QUEUE_SWITCHES_KEY } from "@sf/core";
 import { sql } from "drizzle-orm";
+import { tableExists } from "./catalog.js";
 import type { Db } from "./client.js";
 import { appSetting } from "./schema/system.js";
 
@@ -94,4 +95,13 @@ async function pruneQueueSwitches(db: Db): Promise<void> {
         where entry.key not in (${known})
       )
   `);
+}
+
+/**
+ * Whether the table the seed writes to exists at all - asked by `db:seed`
+ * first, so a database `db:migrate` never touched gets a hint instead of the
+ * driver's `relation does not exist`.
+ */
+export function hasAppSettingTable(db: Db): Promise<boolean> {
+  return tableExists(db, "public.app_setting");
 }

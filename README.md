@@ -34,7 +34,7 @@ packages/core        domain types, Zod schemas (Content DNA), pure scoring
 packages/db          Drizzle schema + migrations (Postgres)
 packages/config      typed env + budget/quota limits
 packages/integrations/{youtube,gemini,tts}
-infra         docker-compose (postgres, redis)
+infra         Compose (dev: postgres, redis; full stack via root compose.yaml), Dockerfiles, backup
 docs          project documentation (RU engineering docs + original EN blueprint)
 ```
 
@@ -49,6 +49,15 @@ pnpm db:seed           # default app_setting rows, merged under the stored ones:
                        # and keys are added, your values win, an idle run leaves updated_at alone
 pnpm dev
 ```
+
+The full stack in containers (`docker compose up --build` from the root) is described in
+`infra/README.md`. `pnpm check:compose` checks its invariants (only web published, api port,
+`NODE_ENV`, healthchecks, restart policies, the root `.env` mounted read-only at `/repo/.env`, `.env` masks in the `.dockerignore` of every built image, ...) through
+`docker compose config` (the `.dockerignore` masks are read from disk by `checkBuildIgnores`, `scripts/compose-rules.mjs`): it needs the Docker CLI, not a running daemon, and never reads `.env`.
+Tested with Docker Compose v5.5.1 (Docker Desktop); no minimum version has been established.
+
+Postgres and Redis run with `restart: unless-stopped`: once started, they come back with Docker
+Desktop and keep ports 5442 and 6389 until `docker compose -f infra/docker-compose.yml stop`.
 
 Compose publishes Postgres on `localhost:5442` and Redis on `localhost:6389` - deliberately
 not the default ports, so the stack starts next to another project's Postgres or Redis;
@@ -148,10 +157,13 @@ your `.env` for local work, and 8 characters are enough there.
 change them together, nothing cross-checks them.
 
 Surrounding whitespace is not part of a value: every variable is trimmed before it is
-validated, and quoting does not preserve it (`ADMIN_PASSWORD="secret "` parses to `secret `
-and is then trimmed to `secret`). A value made of spaces only counts as not set.
-An unquoted value ends at the first `#`, with or without a space before it
-(`ADMIN_PASSWORD=Qw9#Lm2` parses to `Qw9`), so quote any value containing `#`.
+validated. A value made of spaces only counts as not set.
+
+`.env` is read by one parser on both paths: `@sf/config` reads it with Node's `util.parseEnv`
+under `pnpm dev` and in the containers of the full stack, which get the file mounted read-only
+(see `infra/README.md`). Quotes are allowed and stripped (`ADMIN_PASSWORD="Qw9#Lm2"` is
+`Qw9#Lm2`); an unquoted value ends at the first `#` (`ADMIN_PASSWORD=Qw9#Lm2` is `Qw9`) -
+quote a value that contains one.
 
 | Variable | Purpose | Default | Required |
 | --- | --- | --- | --- |
@@ -164,7 +176,7 @@ An unquoted value ends at the first `#`, with or without a space before it
 | `APP_VERSION` | build version reported by `/system/status`; unset reads as `null` there | — | no |
 | `GIT_COMMIT` | build commit, same place, same rule; any build label up to 64 characters of `A-Z a-z 0-9 . + : _ -` (a short sha, `abc1234-dirty`, `unknown`). Anything else - a space, a quote, a slash, 65 characters - reads as unset rather than stopping the service: the field is only printed by `/system/status` | — | no |
 | `API_PORT` | Fastify listen port | `3001` | no |
-| `WEB_PORT` | Next.js listen port; not wired yet, the `dev` script still hardcodes 3000 (E0-10) | `3000` | no |
+| `WEB_PORT` | Next.js listen port; not wired yet, the `dev` script still hardcodes 3000 (`apps/web/package.json`). In the full stack it is the host port of web: `${WEB_PORT:-3000}:3000` | `3000` | no |
 | `API_INTERNAL_URL` | api base URL used by web server components | `http://localhost:3001` | no |
 | `LOG_LEVEL` | pino level: `fatal`…`trace` | `info` | no |
 | `WORKER_CONCURRENCY` | BullMQ jobs per queue, not per process: the worker runs one `Worker` per queue, so the process holds up to this many jobs times the number of queues; not wired yet, no worker reads it (E0-08) | `5` | no |

@@ -2,8 +2,12 @@ import { QUEUE_NAMES } from "@sf/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { closeDb } from "../src/client.js";
 import { appSettingRepo } from "../src/repos/app-setting.js";
-import { seedAppSettings } from "../src/seed.js";
-import { openTestDb, resetTestDatabase } from "./helpers.int.js";
+import { hasAppSettingTable, seedAppSettings } from "../src/seed.js";
+import {
+  emptyTestDatabase,
+  openTestDb,
+  resetTestDatabase,
+} from "./helpers.int.js";
 
 const db = openTestDb();
 
@@ -55,6 +59,21 @@ describe("appSettingRepo", () => {
       kept: true,
     });
     expect(await stampOf("test.undefined")).toBe(before);
+  });
+});
+
+describe("hasAppSettingTable", () => {
+  it("sees the table on a migrated database", async () => {
+    expect(await hasAppSettingTable(db)).toBe(true);
+  });
+
+  it("does not see it on a database db:migrate never touched", async () => {
+    await emptyTestDatabase();
+    try {
+      expect(await hasAppSettingTable(db)).toBe(false);
+    } finally {
+      await resetTestDatabase();
+    }
   });
 });
 

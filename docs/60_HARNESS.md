@@ -147,6 +147,7 @@ shorts_factory_project/
 | test:int | `pnpm test:int` | `never` до E0-02A (там включается на `packages/db/**`, `apps/**`) |
 | build | `pnpm build` | изменены `apps/**`, `packages/**`, корневые конфиги |
 | no-search-list | `node scripts/check-no-search-list.mjs` | всегда |
+| compose | `node scripts/check-compose.mjs` (= `pnpm check:compose`) | изменены `compose.yaml`, `infra/**`, `scripts/check-compose.mjs`, `scripts/compose-rules.mjs`, `.dockerignore`; нужен Docker CLI с плагином Compose v2.30+ (демон не нужен), `.env` не читает. Правила - `scripts/compose-rules.mjs`; среди них `restart: unless-stopped` у всех сервисов, кроме `migrate` (поэтому dev-postgres/redis поднимаются вместе с Docker Desktop), `.env` проекта, смонтированный в `migrate`/`api`/`worker`/`web` в `/repo/.env` read-only с `create_host_path: false`, без `env_file` (Р9), и правило 11: `.dockerignore` контекста сборки каждого образа маскирует `.env`, `.env.*`, `**/.env`, `**/.env.*`, после первой маски нет ни одной `!`-строки, рядом с Dockerfile нет `<Dockerfile>.dockerignore`. Манифесты `apps/*/package.json` гейт не проверяет |
 | tracker | `node scripts/tasks.mjs render --check` | изменены `docs/tasks/**`, `docs/00_STATUS.md` |
 | harness-selftest | `node .claude/hooks/harness-selftest.js` | изменены `.claude/**` |
 
@@ -203,6 +204,9 @@ allow-список на `.claude/**`; режим `dontAsk` молча откло
 - Хуки регистрируются через `${CLAUDE_PROJECT_DIR:-.}` - сессию открывать в корне репозитория.
 - `test:int` требует поднятый `docker compose` (postgres, redis); без него гейт честно красный -
   это стоп-условие 4, а не повод выключить гейт.
+- Гейт `compose` гонит `docker compose config`: без Docker CLI он красный с текстом
+  `check-compose: the docker CLI is not on PATH` - это отсутствие предусловия, а не сломанный
+  Compose (сломанный файл даёт `docker compose config failed` с выводом Compose).
 - Реальные внешние API (YouTube, Gemini, TTS) тратят деньги: агент ходит в них только для
   смоук-проверок, названных в DoD задачи, и только при ключе в `.env`; иначе блокирует задачу
   как «нет предусловия».

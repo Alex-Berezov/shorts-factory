@@ -1,5 +1,5 @@
 import type { WorkerStatus } from "@sf/contracts";
-import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SEC } from "@sf/core";
+import { WORKER_HEARTBEAT_KEY, readHeartbeat } from "@sf/core";
 import type { WorkerProbe } from "../deps.js";
 
 /** The part of the Redis client this reader uses. */
@@ -21,10 +21,9 @@ export interface WorkerHeartbeatOptions {
  * processes, and a literal spelled twice makes "the key was renamed"
  * indistinguishable from "nobody wrote it".
  *
- * A missing key is not an error - the TTL is what makes the stamp an answer
- * rather than a leftover, so an expired key means the worker stopped writing.
- * The age is checked as well, because a Redis that kept the key while the
- * clock of the worker stood still would otherwise read as alive.
+ * What the stamp means - missing, unreadable, too old - is decided by
+ * `readHeartbeat` in `@sf/core`, the same rule the container healthcheck of
+ * the worker applies, so the page and the orchestrator cannot disagree.
  */
 export function createWorkerProbe(
   options: WorkerHeartbeatOptions,
@@ -34,22 +33,7 @@ export function createWorkerProbe(
   return {
     async read(): Promise<WorkerStatus> {
       const stamp = await options.redis.get(WORKER_HEARTBEAT_KEY);
-      if (stamp === null) {
-        return { heartbeatAt: null, stale: true };
-      }
-
-      const writtenAt = Date.parse(stamp);
-      if (Number.isNaN(writtenAt)) {
-        // Something else is writing under our key: not a worker we can call
-        // alive, and not a reason to fail the whole page.
-        return { heartbeatAt: null, stale: true };
-      }
-
-      const ageSec = (now().getTime() - writtenAt) / 1_000;
-      return {
-        heartbeatAt: new Date(writtenAt).toISOString(),
-        stale: ageSec > WORKER_HEARTBEAT_TTL_SEC,
-      };
+      return readHeartbeat(stamp, now());
     },
   };
 }

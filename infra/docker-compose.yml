@@ -16,9 +16,21 @@ services:
       # re-create with `docker compose down -v` or run the SQL by hand.
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sf"]
+      # Over TCP, not the local socket: while the entrypoint runs the init
+      # scripts on a fresh volume, Postgres listens on the socket only, and a
+      # socket check would let the full stack's `migrate` in too early.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "sf", "-d", "shorts_factory"]
       interval: 5s
       retries: 10
+      # A fresh volume runs initdb and the init scripts first, about 50 s on a
+      # slow disk (WSL2, a small VPS); failures in this window do not count,
+      # a success ends it at once (scripts/compose-rules.mjs, rule 4).
+      start_period: 60s
+    # The full stack's api and worker have the same policy and need this
+    # service after a reboot (scripts/compose-rules.mjs, rule 9). In
+    # development it means Postgres starts together with Docker Desktop
+    # until `docker compose down` or `stop`.
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -26,9 +38,21 @@ services:
     ports: ["127.0.0.1:6389:6379"]
     volumes: [redisdata:/data]
     command: ["redis-server", "--appendonly", "yes"]
+    # Lets the full stack wait for a Redis that answers, not for a container
+    # that merely started (`depends_on: condition: service_healthy`).
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+      # Replaying the append-only file after a restart.
+      start_period: 10s
+    # Same as Postgres: back after a reboot; in development Redis starts
+    # together with Docker Desktop.
+    restart: unless-stopped
 
-  # api / worker / web are run via `pnpm dev` locally in MVP.
-  # Production Dockerfiles will be added in epic E0 decomposition.
+  # This file alone is the development stack: api / worker / web run on the
+  # host via `pnpm dev`. The full stack in containers is the root
+  # compose.yaml, which includes this file and docker-compose.app.yml.
 
 volumes:
   pgdata:

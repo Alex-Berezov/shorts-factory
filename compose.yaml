@@ -1,0 +1,12 @@
+# The full stack: `docker compose up --build` from the repository root starts
+# Postgres, Redis, the one-shot `migrate` service, api, worker and web.
+#
+# Development keeps using infra/docker-compose.yml alone (Postgres and Redis
+# for `pnpm dev` and the integration tests):
+#   docker compose -f infra/docker-compose.yml up -d
+# Same project name, so both commands share the volumes `pgdata`, `redisdata`.
+name: shorts-factory
+
+include:
+  - infra/docker-compose.yml
+  - infra/docker-compose.app.yml
