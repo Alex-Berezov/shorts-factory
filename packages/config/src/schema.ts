@@ -77,6 +77,12 @@ function toAbsoluteMediaDir(dir: string): string {
  * Stays a plain `ZodObject`: `.shape` is the single source of the key list
  * for the fixture in `vitest/setup.ts`. Cross-field rules go to the derived
  * schema in `load-env.ts`, which would otherwise erase `.shape`.
+ *
+ * The keys whose values must never reach a browser are listed once, in
+ * `server-secrets.json` next to this file (exported as
+ * `@sf/config/server-secrets`): plain JSON, so the client bundle check of web
+ * reads it without a TypeScript loader. A key added here is classified there
+ * or in the public list of `test/server-secrets.test.ts`, or that test fails.
  */
 export const EnvSchema = z.object({
   // Fail-safe default: a machine that does not declare its environment is

@@ -9,14 +9,17 @@
     "isolatedModules": true,
     "incremental": true,
     "allowJs": true,
-    "plugins": [{ "name": "next" }]
+    "plugins": [{ "name": "next" }],
+    "paths": { "@/*": ["./src/*"] }
   },
   "include": [
     "src",
+    "test",
     "next-env.d.ts",
     ".next/types/**/*.ts",
     "next.config.ts",
-    "tailwind.config.ts"
+    "tailwind.config.ts",
+    "vitest.config.ts"
   ],
   "exclude": ["node_modules"]
 }

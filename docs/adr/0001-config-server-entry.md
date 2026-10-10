@@ -35,8 +35,11 @@
 `server-only` добавлен в `dependencies` `@sf/config`. Проводка web -> `@sf/config` состоит
 из двух настроек `apps/web/next.config.ts`, и обе обязательны:
 
-- `transpilePackages: ["@sf/config"]` - пакеты воркспейса поставляют исходники TypeScript,
-  Next компилирует их сам;
+- `transpilePackages: ["@sf/config", "@sf/api-client", "@sf/contracts", "@sf/core"]` (с E0-10) -
+  пакеты воркспейса поставляют исходники TypeScript, Next компилирует их сам; список - граф
+  импорта web, а не только прямые зависимости: `@sf/api-client -> @sf/contracts -> @sf/core`.
+  `@sf/core` в `dependencies` web не нужен: сборка E0-10 прошла без него, `Module parse failed`
+  на исходниках core нет;
 - `experimental.extensionAlias: { ".js": [".ts", ".tsx", ".js"] }` - исходники ESM ссылаются
   друг на друга спецификаторами с `.js`, которых на диске нет (`server.ts` -> `./index.js`),
   и без этой пары webpack не резолвит ни ветку `default` корневого входа, ни подвход
@@ -77,6 +80,15 @@
   запись в `docs/TECH_DEBT.md` на E0-01A/E0-10.
 - `@sf/config/server` читает файл через `node:fs`: в edge-runtime (middleware) он не работает,
   web импортирует подвход только в Node-runtime.
+- С E0-10 Node-потребителей подвхода в web два (`docs/DECISIONS.md`, 10.10.2026):
+  `apps/web/src/middleware.ts` объявлен с `config.runtime = "nodejs"` (Next 15.5.25, без
+  флага `experimental.nodeMiddleware`) и берёт `ADMIN_PASSWORD` из `@sf/config/server`
+  импортом верхнего уровня - на `next build` middleware не исполняется; маркер `server-only`
+  слой middleware в Node-runtime пропускает (сборка зелёная, `functions-config-manifest.json`:
+  `"/_middleware": {"runtime": "nodejs"}`). Второй - `apps/web/src/lib/api.server.ts`, который
+  импортирует подвход лениво, внутри `getApiClient()`: модули страниц загружаются на шаге
+  «Collecting page data», и импорт верхнего уровня распарсил бы конфиг на сборке без `.env`.
+  `process.env` в `apps/web/src` не читается.
 - Запись распространяется на `@sf/api-client` (E0-07): пакет принимает `ADMIN_PASSWORD` и
   кладёт его в заголовок `Authorization`, поэтому устроен так же - `exports` `"."` =
   `{browser: ./src/server.ts, default: ./src/index.ts}` (порядок ключей значим: условия
@@ -86,14 +98,29 @@
   в `src/index.ts`; при перестановке ключей - в `src/index.ts` в обоих случаях, поэтому
   порядок прибит `packages/api-client/test/exports.test.ts`. Прогона бандлера у пакета нет:
   потребителя нет до E0-10.
-- Условие подключения в E0-10: `@sf/api-client` добавляется в `transpilePackages`
-  (`apps/web/next.config.ts`) рядом с `@sf/config` - оба пакета source-only, Next чужие
-  исходники не транспилирует, - и там же выполняется проверка grep-ом по `.next/static`,
-  что пароля в клиентских чанках нет. До этого «пароль не попадает в бандл» держится
-  резолвом условий и маркером, а не прогоном сборки.
+- Условие подключения в E0-10 выполнено: `@sf/api-client`, `@sf/contracts` и `@sf/core`
+  добавлены в `transpilePackages` рядом с `@sf/config`, web импортирует только
+  `@sf/api-client/server`. Проверка клиентских чанков - одна команда
+  `pnpm --filter @sf/web check:bundle` (`apps/web/scripts/check-client-bundle-build.mjs`):
+  сама собирает `next build` с маяками вместо каждого серверного секрета схемы (список -
+  `packages/config/src/server-secrets.json`, экспорт `@sf/config/server-secrets`; новый ключ
+  схемы без классификации валит `packages/config/test/server-secrets.test.ts`) и сканирует
+  всё, что уходит в браузер: каждый файл `.next/static/**` и пререндер
+  `.next/server/{app,pages}/**/*.{html,rsc,body,meta}` - на имена и значения-маяки
+  (`check-client-bundle.mjs`; без значений сканер отказывает с кодом 2, а не пишет
+  «чисто»; упавшая сборка - тоже 2); в `build` и CI не встроена (E13-07).
+- Подвход `@sf/config/server-secrets` (`./src/server-secrets.json`, прибит
+  `packages/config/test/exports.test.ts`) - единственный источник списка серверных секретов
+  для проверки клиентских чанков; классификация ключей утверждена техлидом 10.10.2026.
 - Откат: удалить `src/server.ts`, строки `./server` и условный корневой вход `"."`
   (ветка `browser` -> `src/server.ts`) из `exports`, `server-only` из `dependencies`,
   а в `apps/web/next.config.ts` - обе опции, заведённые ради этой проводки:
-  `transpilePackages: ["@sf/config"]` и `experimental.extensionAlias`. Без них откат
+  `@sf/config` из `transpilePackages` и `experimental.extensionAlias`. Без них откат
   оставит несобираемую проводку: web продолжит зависеть от пакета, исходники которого
   Next не транспилирует, а ESM-расширение `.js` не сопоставит исходнику `.ts`.
+- Откат части E0-10: middleware без `@sf/config/server` теряет источник пароля - вместе
+  с подвходом убирается `apps/web/src/middleware.ts` (или переводится на другой источник
+  отдельным решением), `api.server.ts` - на другой источник `API_INTERNAL_URL`/`ADMIN_PASSWORD`;
+  `@sf/api-client`, `@sf/contracts`, `@sf/core` остаются в `transpilePackages`, пока web
+  импортирует клиент: это source-only пакеты, которые Next иначе не транспилирует, а не часть
+  проводки конфига.

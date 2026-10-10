@@ -11,6 +11,8 @@ const ManifestSchema = z.object({
   exports: z.object({
     ".": z.record(z.string()),
     "./server": z.string(),
+    // Optional here, so a missing subpath fails its own test, not every one.
+    "./server-secrets": z.string().optional(),
   }),
 });
 
@@ -63,6 +65,18 @@ describe("package exports", () => {
 
     expect(ManifestSchema.parse(raw).exports["./server"]).toBe(
       "./src/server.ts",
+    );
+  });
+
+  it("publishes the list of server secrets as its own subpath", () => {
+    // The client bundle check of apps/web reads this list from plain node,
+    // without a TypeScript loader, so it stays a JSON file.
+    const raw: unknown = JSON.parse(
+      readFileSync(join(packageDir, "package.json"), "utf8"),
+    );
+
+    expect(ManifestSchema.parse(raw).exports["./server-secrets"]).toBe(
+      "./src/server-secrets.json",
     );
   });
 });
