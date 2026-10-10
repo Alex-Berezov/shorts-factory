@@ -31,3 +31,7 @@ _Добавляется автоматически командами `node scri
 - 2026-10-10 ⛔ **E0-11** blocked — стоп 3: после 5 заходов правок и 6 кругов ревью новый блокер в зоне чтения .env (обратные кавычки обходят проверку пола 16 символов); по решению техлида Р7 - стоп без шестого захода; работа не закоммичена, лежит в рабочем дереве
 - 2026-10-10 ⛔ **E0-11** blocked — стоп 3: после захода Р12 новый блокер от правки (Q1: неверный комментарий APP_VERSION в .env.example против infra/README.md); дифф не закоммичен
 - 2026-10-10 ✅ **E0-11** Docker: Dockerfile'ы api/worker/web, полный Compose, миграции, бэкап — Full Docker stack from root: images, migrations on start, mounted .env read like pnpm dev, backup with rotation, compose gate rules 1-11
+- 2026-10-10 ➕ **E0-12A** Общий пресет vitest и test-support @sf/db: фикстура int-наборов, общий страж стека, чистка тестовых хелперов, корневой vitest-проект scripts/** (добавлена в трекер)
+- 2026-10-10 ➕ **E0-12B** Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов (добавлена в трекер)
+- 2026-10-10 ➕ **E0-12C** Гейт compose и CLI migrate: таблица правил, обязательные postgres/redis, юнит check-compose, шаги и классы ошибок migrate, единый app.Dockerfile, exec-форма CMD (добавлена в трекер)
+- 2026-10-10 ➕ **E0-12D** Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client (добавлена в трекер)

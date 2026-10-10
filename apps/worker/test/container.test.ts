@@ -7,7 +7,9 @@ import {
   checkBuildIgnores,
   checkDockerignore,
 } from "../../../scripts/compose-rules.mjs";
+import { WORKSPACE_OF } from "../../../scripts/probe-image.mjs";
 import { DEV_COMMAND } from "./dev-command.js";
+import { ROOT, dockerfilePath, imagesOf, stagesOfImage } from "./dockerfile.js";
 
 /**
  * The container starts the worker exactly the way `pnpm dev` does, and the
@@ -16,15 +18,10 @@ import { DEV_COMMAND } from "./dev-command.js";
  * the shell form of `CMD` - receives `docker stop`'s SIGTERM itself, and the
  * worker is killed after the grace period with its jobs in flight.
  */
-function dockerfilePath(image: string): string {
-  return fileURLToPath(
-    new URL(`../../../infra/docker/${image}.Dockerfile`, import.meta.url),
-  );
-}
 const MANIFEST = fileURLToPath(new URL("../package.json", import.meta.url));
 const ManifestSchema = z.object({ scripts: z.object({ dev: z.string() }) });
 const ExecFormSchema = z.array(z.string()).min(1);
-const IMAGES = ["api", "worker", "migrate", "web"];
+const IMAGES = imagesOf();
 const PackageNameSchema = z.object({ name: z.string() });
 
 /** Contents of a file, null if there is no file at `path`. */
@@ -40,31 +37,11 @@ function readIfFile(path: string): string | null {
 /** The stage every service is built from (`target:` in Compose). */
 const RUNTIME_STAGE = "runtime";
 
-/**
- * Instructions of every stage by its name, continuation lines joined. Enough
- * of the Dockerfile grammar for the images of this repository; comments are
- * dropped.
- */
+/** Instructions of every stage by its name; see `dockerfile.ts` for the grammar. */
 function stagesOf(image: string): Map<string, string[]> {
-  const dockerfile = readFileSync(dockerfilePath(image), "utf8");
-  const lines = dockerfile
-    .replace(/\\\r?\n/g, " ")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line !== "" && !line.startsWith("#"));
-
-  const stages = new Map<string, string[]>();
-  let current: string[] | undefined;
-  for (const line of lines) {
-    const from = /^FROM\s+\S+(?:\s+AS\s+(\S+))?$/i.exec(line);
-    if (from !== null) {
-      current = [];
-      stages.set((from[1] ?? "").toLowerCase(), current);
-      continue;
-    }
-    current?.push(line);
-  }
-  return stages;
+  return new Map(
+    stagesOfImage(image).map((stage) => [stage.name, stage.instructions]),
+  );
 }
 
 /** Instructions of one stage; throws when the image has no such stage. */
@@ -173,64 +150,59 @@ describe.each(IMAGES)("%s image package installs", (image) => {
  * and `pnpm dev` run. `pnpm deploy` (pnpm 9) resolves its copy again from the
  * semver ranges, so it must not come back (docs/DECISIONS.md, 10.10.2026).
  */
-describe.each([
-  ["api", "@sf/api", "apps/api"],
-  ["worker", "@sf/worker", "apps/worker"],
-  ["migrate", "@sf/db", "packages/db"],
-])("%s image dependencies", (image, pkg, dir) => {
-  const everything = [...stagesOf(image).values()].flat();
+describe.each(Object.entries(WORKSPACE_OF))(
+  "%s image dependencies",
+  (image, dir) => {
+    const everything = [...stagesOf(image).values()].flat();
+    // The package the image runs, named by the manifest of its directory: the
+    // map of scripts/probe-image.mjs is the one place that ties them.
+    const pkg = PackageNameSchema.parse(
+      JSON.parse(readFileSync(`${ROOT}${dir}/package.json`, "utf8")),
+    ).name;
 
-  it("never uses pnpm deploy", () => {
-    expect(everything.filter((line) => /\bpnpm\s+deploy\b/.test(line))).toEqual(
-      [],
-    );
-  });
+    it("never uses pnpm deploy", () => {
+      expect(
+        everything.filter((line) => /\bpnpm\s+deploy\b/.test(line)),
+      ).toEqual([]);
+    });
 
-  it("installs the package's production dependencies offline into a fresh node_modules", () => {
-    const installs = stageInstructions(image, "prod").filter((line) =>
-      /\bpnpm\s+install\b/.test(line),
-    );
+    it("installs the package's production dependencies offline into a fresh node_modules", () => {
+      const installs = stageInstructions(image, "prod").filter((line) =>
+        /\bpnpm\s+install\b/.test(line),
+      );
 
-    expect(installs).toHaveLength(1);
-    const install = installs[0] ?? "";
-    // The node_modules `pnpm fetch` left holds the whole workspace, dev tools
-    // included, and reusing it stops pnpm at a purge prompt.
-    expect(install).toMatch(/^RUN rm -rf node_modules && pnpm install\s/);
-    const flags = install.replace(/^.*\bpnpm\s+install\s+/, "").split(/\s+/);
-    expect(flags).toEqual(
-      expect.arrayContaining([
-        "--offline",
-        "--frozen-lockfile",
-        "--prod",
-        "--filter",
-        `${pkg}...`,
-      ]),
-    );
-  });
+      expect(installs).toHaveLength(1);
+      const install = installs[0] ?? "";
+      // The node_modules `pnpm fetch` left holds the whole workspace, dev tools
+      // included, and reusing it stops pnpm at a purge prompt.
+      expect(install).toMatch(/^RUN rm -rf node_modules && pnpm install\s/);
+      const flags = install.replace(/^.*\bpnpm\s+install\s+/, "").split(/\s+/);
+      expect(flags).toEqual(
+        expect.arrayContaining([
+          "--offline",
+          "--frozen-lockfile",
+          "--prod",
+          "--filter",
+          `${pkg}...`,
+        ]),
+      );
+    });
 
-  it("runs from the package's directory of that install", () => {
-    const runtime = stageInstructions(image, RUNTIME_STAGE);
-    const copies = runtime.filter((line) => /^COPY\s/i.test(line));
-    const workdirs = runtime.filter((line) => /^WORKDIR\s/i.test(line));
-    const manifest = PackageNameSchema.parse(
-      JSON.parse(
-        readFileSync(
-          new URL(`../../../${dir}/package.json`, import.meta.url),
-          "utf8",
-        ),
-      ),
-    );
+    it("runs from the package's directory of that install", () => {
+      const runtime = stageInstructions(image, RUNTIME_STAGE);
+      const copies = runtime.filter((line) => /^COPY\s/i.test(line));
+      const workdirs = runtime.filter((line) => /^WORKDIR\s/i.test(line));
 
-    expect(copies).toContain(
-      "COPY --from=prod /repo/node_modules /repo/node_modules",
-    );
-    for (const copy of copies) {
-      expect(copy).toMatch(/^COPY --from=prod \/repo\//);
-    }
-    expect(workdirs.at(-1)).toBe(`WORKDIR /repo/${dir}`);
-    expect(manifest.name).toBe(pkg);
-  });
-});
+      expect(copies).toContain(
+        "COPY --from=prod /repo/node_modules /repo/node_modules",
+      );
+      for (const copy of copies) {
+        expect(copy).toMatch(/^COPY --from=prod \/repo\//);
+      }
+      expect(workdirs.at(-1)).toBe(`WORKDIR /repo/${dir}`);
+    });
+  },
+);
 
 /**
  * Every image is built with the repository root as its context and `COPY . .`,
@@ -242,24 +214,21 @@ describe.each([
  */
 describe(".dockerignore", () => {
   it("masks every .env and lets none back in", () => {
-    const file = fileURLToPath(
-      new URL("../../../.dockerignore", import.meta.url),
-    );
+    const file = `${ROOT}.dockerignore`;
 
     expect(checkDockerignore(readFileSync(file, "utf8"), file)).toEqual([]);
   });
 
   it("is not replaced by a .dockerignore of a Dockerfile", () => {
-    // The images of this file, not the parsed Compose: the compose gate
+    // The images of infra/docker, not the parsed Compose: the compose gate
     // (scripts/check-compose.mjs) takes them from `docker compose config`.
-    const root = fileURLToPath(new URL("../../../", import.meta.url));
     const services = Object.fromEntries(
       IMAGES.map((image) => [
         image,
         {
           build: {
-            context: root,
-            dockerfile: relative(root, dockerfilePath(image)),
+            context: ROOT,
+            dockerfile: relative(ROOT, dockerfilePath(image)),
           },
         },
       ]),

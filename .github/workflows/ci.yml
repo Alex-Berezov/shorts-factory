@@ -1,8 +1,54 @@
 name: ci
-on: [push, pull_request]
+# Branches reach CI through their pull request, main through its pushes: one
+# run per commit, nothing for a second event to cancel.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A pull request is one group: a newer commit cancels the superseded run, and
+# the number keeps a fork's branch of the same name out of it. On main the
+# group is the commit: nothing is cancelled, every pushed commit keeps a
+# finished result in `gh run list`.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Same images and host ports as infra/docker-compose.yml and .env.test.
+    # The test database is made by POSTGRES_DB: the init script of the repository
+    # cannot be mounted, services start before checkout.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sf
+          POSTGRES_PASSWORD: sf
+          POSTGRES_DB: shorts_factory_test
+        ports:
+          - 5442:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U sf -d shorts_factory_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -12,4 +58,33 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      # The gates run in the form of .claude/hooks/rules.sf.json.
+      - run: node scripts/check-no-search-list.mjs
+      - run: node scripts/check-compose.mjs
+      - run: node scripts/tasks.mjs render --check
+      - run: node .claude/hooks/harness-selftest.js
+      # The entry of `pnpm db:migrate` with .env.test read by node's dotenv parser,
+      # not by a shell. --env-file sets only what the environment lacks, so a
+      # variable the runner already has wins over the file. For this step only:
+      # NODE_ENV=test must not reach `next build`.
+      - working-directory: packages/db
+        run: node --env-file=../../.env.test --import tsx src/cli/migrate.ts
+      - run: pnpm test:int
       - run: pnpm build
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [api, worker, migrate, web]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Build image
+        run: docker build --target runtime -f infra/docker/${{ matrix.image }}.Dockerfile -t sf-${{ matrix.image }}:ci .
+      # An image whose install put nothing in place must turn the job red.
+      - name: Probe installed dependencies
+        run: node scripts/probe-image.mjs ${{ matrix.image }}

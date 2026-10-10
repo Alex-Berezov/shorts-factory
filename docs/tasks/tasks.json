@@ -179,7 +179,8 @@
       "E0-11"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "todo"
+    "status": "in_progress",
+    "started_at": "2026-10-10"
   },
   {
     "id": "E0-13",
@@ -1607,6 +1608,59 @@
       "E1-11"
     ],
     "doc": "31_E1_TASKS.md",
+    "status": "todo",
+    "added_at": "2026-10-10"
+  },
+  {
+    "id": "E0-12A",
+    "epic": "E0",
+    "title": "Общий пресет vitest и test-support @sf/db: фикстура int-наборов, общий страж стека, чистка тестовых хелперов, корневой vitest-проект scripts/**",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-10"
+  },
+  {
+    "id": "E0-12B",
+    "epic": "E0",
+    "title": "Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-10"
+  },
+  {
+    "id": "E0-12C",
+    "epic": "E0",
+    "title": "Гейт compose и CLI migrate: таблица правил, обязательные postgres/redis, юнит check-compose, шаги и классы ошибок migrate, единый app.Dockerfile, exec-форма CMD",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13",
+      "E0-12A"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-10"
+  },
+  {
+    "id": "E0-12D",
+    "epic": "E0",
+    "title": "Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-13"
+    ],
+    "doc": "TECH_DEBT.md",
     "status": "todo",
     "added_at": "2026-10-10"
   }

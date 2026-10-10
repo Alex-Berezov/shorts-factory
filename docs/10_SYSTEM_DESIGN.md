@@ -42,7 +42,7 @@ _Дата: 2026-09-05. Статус: базовая версия для стар
 | Линт/формат | **Biome** | один инструмент вместо ESLint+Prettier |
 | Логи | **pino** (+ pino-pretty в dev) | структурные JSON-логи |
 | Контейнеры | **Docker Compose** (postgres, redis, api, worker, web) | локально = прод-подобно |
-| CI | GitHub Actions: lint → typecheck → test → build | базовая гигиена |
+| CI | GitHub Actions на push в `main` и на pull request, job `ci` с сервисами Postgres/Redis: lint → typecheck → test → гейты (`check-no-search-list`, `check-compose`, `tasks render --check`, `harness-selftest`) → `db:migrate` → `test:int` → build; отдельный job `docker-build` собирает и проверяет четыре образа без push | то же, что локальная проверка, включая интеграционные тесты |
 | Деплой (MVP) | один VPS (Docker Compose) или Fly.io/Railway | внутренний инструмент, минимум затрат |
 
 Сознательно **не** берём в MVP: Kubernetes, микросервисы, Kafka, ClickHouse, векторные БД (эмбеддинги для story-кластеров можно хранить в Postgres + pgvector, если понадобится — расширение уже заложено в схему как опция), собственную auth-систему (достаточно одного admin-логина/basic auth за VPN).
@@ -182,7 +182,7 @@ shorts-factory/
 │       ├── gemini/   # VideoAnalysisClient (public URL + local file), LlmClient
 │       └── tts/      # интерфейс TtsProvider + адаптеры провайдеров
 ├── infra/          # docker-compose.yml (postgres+redis, dev), docker-compose.app.yml (migrate/api/worker/web), docker/*.Dockerfile, scripts/backup.sh
-├── scripts/        # гейты репозитория: check-no-search-list, check-compose (+ compose-rules), трекер задач
+├── scripts/        # гейты репозитория: check-no-search-list, check-compose (+ compose-rules), probe-image (проба образа в job `docker-build`), трекер задач
 ├── compose.yaml    # полный стек: `docker compose up --build` из корня, include двух файлов infra/ (E0-11)
 └── docs/           # проектная документация (этот файл, ТЗ и исходные 01–06)
 ```

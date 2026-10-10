@@ -15,7 +15,7 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 - `packages/core` — `ContentDnaSchema` (совпадает с blueprint §5.2), `scoring.ts` с юнит-тестом, `idea.ts`.
 - `packages/integrations/{youtube,gemini,tts}` — заглушки клиентов и `QUOTA_COST`.
 - `apps/api` — Fastify с одним `/health`; `apps/worker` — пустые процессоры (реестр имён очередей переехал в `@sf/core`, `src/domain/queues.ts`: `QUEUE_NAMES`/`QueueName`, решение 5 и E0-04); `apps/web` — страницы-заглушки без `next.config`, Tailwind и типов.
-- `infra/docker-compose.yml` — только postgres + redis; `.github/workflows/ci.yml` — lint → typecheck → test → build.
+- `infra/docker-compose.yml` — только postgres + redis; `.github/workflows/ci.yml` — lint → typecheck → test → build (так было в скелете; с E0-12 CI описан в § E0-12).
 
 ## Замеченные дефекты скелета (закрываются задачами ниже)
 
@@ -251,10 +251,10 @@ _Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_
 
 **Сделать:**
 - `services: postgres, redis` в workflow с healthcheck; env для тестов из `.env.test`. Хостовые порты сервисов публикуются те же, что в `.env.test` (`5442` и `6389`, разведены с дефолтными в E0-04), иначе тесты не найдут базу.
-- Шаги: `install --frozen-lockfile` → `lint` → `typecheck` → `test` → `db:migrate` → `test:int` → `build`.
-- Кэш pnpm store и `.turbo` (`actions/cache`).
-- Отдельный job `docker-build`: сборка трёх образов без push (ловим сломанные Dockerfile'ы).
-- Concurrency-группа по ветке (отмена устаревших прогонов).
+- Шаги: `install --frozen-lockfile` → `lint` → `typecheck` → `test` → `db:migrate` → `test:int` → `build`; между `test` и `db:migrate` - гейты как в `rules.sf.json`: `check-no-search-list`, `check-compose`, `tracker` (`tasks.mjs render --check`), `harness-selftest`.
+- Кэш pnpm store; кэш `.turbo` - после E0-12A (решение техлида 10.10).
+- Отдельный job `docker-build`: сборка четырёх образов (api, worker, migrate, web) без push (ловим сломанные Dockerfile'ы).
+- Concurrency: push только в `main`, остальные ветки - через pull request; группа PR - по его номеру, новый коммит отменяет устаревший прогон; на `main` группа - коммит, прогоны не отменяются (решение техлида 10.10).
 
 **DoD:** workflow зелёный на `main` и в PR; падение интеграционного теста или Dockerfile ломает CI.
 **Оценка:** 0.5 д. **Зависимости:** E0-11.

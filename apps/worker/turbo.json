@@ -1,0 +1,24 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test": {
+      "inputs": [
+        "$TURBO_EXTENDS$",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/.claude/hooks/rules.sf.json",
+        "$TURBO_ROOT$/packages/db/turbo.json",
+        "$TURBO_ROOT$/infra/docker/**",
+        "$TURBO_ROOT$/apps/api/package.json",
+        "$TURBO_ROOT$/packages/db/package.json",
+        "$TURBO_ROOT$/scripts/compose-rules.mjs",
+        "$TURBO_ROOT$/scripts/compose-rules.d.mts",
+        "$TURBO_ROOT$/scripts/probe-image.mjs",
+        "$TURBO_ROOT$/scripts/probe-image.d.mts",
+        "$TURBO_ROOT$/.github/workflows/ci.yml",
+        "$TURBO_ROOT$/turbo.json",
+        "$TURBO_ROOT$/package.json"
+      ]
+    }
+  }
+}
