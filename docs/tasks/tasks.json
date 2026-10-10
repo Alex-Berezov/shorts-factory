@@ -179,8 +179,10 @@
       "E0-11"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
-    "started_at": "2026-10-10"
+    "status": "done",
+    "started_at": "2026-10-10",
+    "done_at": "2026-10-10",
+    "note": "CI с Postgres/Redis, int-тестами, гейтами и сборкой четырёх образов с пробой; зелёный на main и в PR"
   },
   {
     "id": "E0-13",
