@@ -1,6 +1,6 @@
 import { QUEUE_NAMES } from "@sf/core";
 import { Redis } from "ioredis";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   QueueCountersError,
   createQueueStats,
@@ -68,6 +68,20 @@ beforeEach(() => {
   counts = { wait: 1, paused: 2, active: 3, failed: 4, delayed: 5 };
   beforeCounts = async () => {};
 });
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+/** Closes the stats under fake timers: the drain of a hung pass is a timer. */
+async function closeAfterDrain(
+  stats: { close(): Promise<void> },
+  drainTimeoutMs: number,
+): Promise<void> {
+  const closing = stats.close();
+  await vi.advanceTimersByTimeAsync(drainTimeoutMs);
+  await closing;
+}
 
 describe("createQueueStats", () => {
   /**
@@ -150,16 +164,87 @@ describe("createQueueStats", () => {
    * Redis unclosed and the exit code at 1.
    */
   it("stops waiting for a pass that never answers and closes anyway", async () => {
+    vi.useFakeTimers();
     beforeCounts = () => new Promise<void>(() => {});
     const stats = createQueueStats({ connection, drainTimeoutMs: 20 });
     // Nobody is ever going to await this one; it is the request Redis ate.
     void stats.collect().catch(() => {});
     // Let the pass reach the fake queues before the close begins.
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await vi.advanceTimersByTimeAsync(0);
 
-    await stats.close();
+    await closeAfterDrain(stats, 20);
 
     expect(closedQueues).toHaveLength(QUEUE_NAMES.length);
+  });
+
+  /**
+   * A Redis that hangs: every pass waits forever, and a request gives up on
+   * its own deadline without cancelling the pass behind it. Requests that
+   * arrive meanwhile must join that pass rather than leave 29 more reads each
+   * on the same silent socket.
+   */
+  it("shares one pass between the requests that arrive while it reads", async () => {
+    vi.useFakeTimers();
+    const hung = vi.fn(() => new Promise<void>(() => {}));
+    beforeCounts = hung;
+    const stats = createQueueStats({ connection, drainTimeoutMs: 20 });
+
+    const requests = Array.from({ length: 5 }, () => stats.collect());
+    for (const request of requests) {
+      // Nobody awaits these; they are the requests Redis ate.
+      void request.catch(() => {});
+    }
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(hung).toHaveBeenCalledTimes(QUEUE_NAMES.length);
+    await closeAfterDrain(stats, 20);
+  });
+
+  /**
+   * Requests that each gave up on a pass that hangs - minutes apart, as a
+   * page polled every 15 seconds does - leave that one pass behind them, not
+   * one each; once it settles, the next request reads again.
+   */
+  it("keeps one pass however many requests give up on it", async () => {
+    vi.useFakeTimers();
+    const answers: Array<() => void> = [];
+    const held = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          answers.push(resolve);
+        }),
+    );
+    beforeCounts = held;
+    const stats = createQueueStats({ connection, drainTimeoutMs: 20 });
+
+    for (let poll = 0; poll < 3; poll += 1) {
+      // Nobody awaits these; they are the requests that gave up.
+      void stats.collect().catch(() => {});
+      await vi.advanceTimersByTimeAsync(15_000);
+    }
+    expect(held).toHaveBeenCalledTimes(QUEUE_NAMES.length);
+
+    // Redis answers at last: the pass settles, and the next request reads.
+    for (const answer of answers) {
+      answer();
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    beforeCounts = async () => {};
+    await expect(stats.collect()).resolves.toMatchObject({ dlq: { size: 3 } });
+    await closeAfterDrain(stats, 20);
+  });
+
+  it("starts a new pass for a request that arrives after the last one answered", async () => {
+    const reads = vi.fn(async () => {});
+    beforeCounts = reads;
+    const stats = createQueueStats({ connection });
+
+    await stats.collect();
+    await stats.collect();
+
+    // Nothing is cached: the second request asks Redis again.
+    expect(reads).toHaveBeenCalledTimes(QUEUE_NAMES.length * 2);
+    await stats.close();
   });
 
   /**

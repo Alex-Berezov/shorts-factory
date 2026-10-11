@@ -7,8 +7,8 @@ import { createBudgetProbe } from "./lib/budget.js";
 import { createHealthProbes } from "./lib/health.js";
 import { createWorkerProbe } from "./lib/heartbeat.js";
 import { createQueueStats } from "./lib/queue-stats.js";
-import { closeRedis, createRedis } from "./lib/redis.js";
-import { createShutdownHandler } from "./lib/shutdown.js";
+import { type ClosableRedis, closeRedis, createRedis } from "./lib/redis.js";
+import { type ShutdownTarget, createShutdownHandler } from "./lib/shutdown.js";
 
 export interface ComposeOptions {
   /**
@@ -52,6 +52,22 @@ export function buildInfoFrom(
 }
 
 /**
+ * The Redis client as a target of the shutdown. A socket torn down after a
+ * refused QUIT is still a closed client (`closeRedis`), so it is no failure of
+ * the stop - but it is not a QUIT either, and the line of the stop says so.
+ */
+function redisTarget(client: ClosableRedis): ShutdownTarget {
+  return {
+    close: async () => {
+      const outcome = await closeRedis(client);
+      return outcome.kind === "disconnected"
+        ? { warning: "closed by disconnect", err: outcome.err }
+        : undefined;
+    },
+  };
+}
+
+/**
  * Everything the entry point owns except the socket and the signals: the
  * connections, the collectors on top of them, the application and the
  * shutdown that closes them in order. A function rather than top-level code in
@@ -87,14 +103,9 @@ export function composeApp(env: Env, options: ComposeOptions): ComposedApp {
   // The `Queue` objects live for the process, not for the request: each one is
   // a set of listeners and a key of its own, and opening 29 of them per call
   // to `/system/status` would make the page the most expensive route of the
-  // api. Without the listener an ioredis failure of one of them reaches the
-  // process as an unhandled `EventEmitter` error and takes the api down.
-  const queueStats = openQueueStats({
-    connection: redis,
-    onError: (queue, err) => {
-      log.error({ queue, err }, "queue error");
-    },
-  });
+  // api. Their failures are not written here: the client above writes its
+  // own, and a refused pass is in the answer of the page (`redis: down`).
+  const queueStats = openQueueStats({ connection: redis });
 
   const app = buildApp(
     {
@@ -102,8 +113,9 @@ export function composeApp(env: Env, options: ComposeOptions): ComposedApp {
       buildInfo: buildInfoFrom(env),
       queues: queueStats,
       worker: createWorkerProbe({ redis }),
-      // No cache here on purpose: the page has to show a spend row written a
-      // moment ago, and a cached total would answer for the minute before it.
+      // No cache here on purpose: a request that joins a read in flight gets
+      // the state as of the start of that read - one read behind at most,
+      // nothing kept.
       budget: createBudgetProbe({ db, limits: buildLimits(env) }),
     },
     { adminPassword: env.ADMIN_PASSWORD, logger: log },
@@ -115,7 +127,7 @@ export function composeApp(env: Env, options: ComposeOptions): ComposedApp {
     // Before Redis: the queues are closed through the connection they share
     // with it, and a client that is already gone leaves them hanging.
     queues: { close: () => queueStats.close() },
-    redis: { close: () => closeRedis(redis) },
+    redis: redisTarget(redis),
     log: app.log,
     ...(options.exit === undefined ? {} : { exit: options.exit }),
   });

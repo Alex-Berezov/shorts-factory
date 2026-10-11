@@ -1,3 +1,16 @@
+/**
+ * The shared bound of every dependency call the api makes on behalf of a
+ * request: the probes of `/health` (`lib/health.ts`) and the sections of
+ * `/system/status` (`lib/system-status.ts`).
+ *
+ * One number for both, because they answer the same question - is the
+ * dependency there - and two constants of one threshold drift apart on the
+ * first edit. It sits well under the `timeout: 5s` of the api healthcheck in
+ * `infra/docker-compose.app.yml`, so a dependency that is down shows up as a
+ * 503 the healthcheck reads rather than as a healthcheck that timed out.
+ */
+export const DEPENDENCY_TIMEOUT_MS = 2_000;
+
 /** What a call that ran out of its deadline is reported as. */
 export class DeadlineError extends Error {
   constructor(timeoutMs: number) {
@@ -15,9 +28,14 @@ export class DeadlineError extends Error {
  * the state of the system has to answer during the incident that made it worth
  * opening.
  *
- * What it does not do is cancel the work: the query behind it keeps running
- * until the driver gives up on its own (docs/TECH_DEBT.md, 08.09.2026). That
- * is the reason the clients are configured to fail fast rather than to queue.
+ * It does not cancel the work: a call that outlives its deadline keeps going
+ * until its driver gives up on it (the Redis client by its `commandTimeout`
+ * in `lib/redis.ts`; a database query has no such bound) and the pile-up of
+ * such calls is bounded by `singleFlight` (`lib/single-flight.ts`) instead.
+ * No signal is handed to `run` on purpose: the calls it guards are shared
+ * between callers, and one caller cancelling on its own deadline would cancel
+ * the call for every caller that joined it. Cancelling the database probe is
+ * left to E0-12B (docs/TECH_DEBT.md, rows of E0-11B).
  */
 export async function withDeadline<T>(
   run: () => Promise<T>,

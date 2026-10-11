@@ -36,6 +36,18 @@ export function registerRoutes(app: AppInstance, deps: AppDeps): void {
         tags: ["health"],
         response: responses,
       },
+      // A verdict about this moment: a proxy or a browser that kept it would
+      // answer "up" for a database that has since gone away, or the other way
+      // round. On every answer of the route, not only the handler's: the 503
+      // of a service that is closing and a 500 leave through the error
+      // handler, and a cache with `stale-if-error` would keep serving such a
+      // 503 after the service came back. No `bodyLimit` next to it: Fastify
+      // 5.12.3 never reads the body of a GET (`bodyless` in `fastify.js:134`,
+      // `lib/handle-request.js:35`).
+      onSend: (_request, reply, payload, done) => {
+        reply.header("cache-control", "no-store");
+        done(null, payload);
+      },
     },
     async (_request, reply) => {
       const report = await deps.health.check();

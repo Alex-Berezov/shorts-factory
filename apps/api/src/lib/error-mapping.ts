@@ -33,6 +33,26 @@ const MAX_MESSAGE_LENGTH = 200;
 /** How long a code may be before it stops being an identifier. */
 const MAX_CODE_LENGTH = 64;
 
+/**
+ * What a request that arrives while the service is closing is answered with
+ * (`plugins/closing.ts`): a 503 through the error handler, so it carries the
+ * envelope and the request id of every other response (docs/DECISIONS.md,
+ * 11.10.2026, decision R-a of E0-11B). The status alone makes it
+ * `INTERNAL_ERROR` / "Service Unavailable" in `mapError` (decision R2 of
+ * E0-11A); no code of its own.
+ *
+ * Not a failure of the service either: the error log writes it as the short
+ * line of a refused request (`logError` in `lib/error-log.ts`).
+ */
+export class ServiceClosingError extends Error {
+  readonly statusCode = 503;
+
+  constructor() {
+    super("Service Unavailable");
+    this.name = "ServiceClosingError";
+  }
+}
+
 /** What one failure looks like on the wire, before it is put into a body. */
 export interface MappedError {
   status: number;

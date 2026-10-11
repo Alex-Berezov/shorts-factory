@@ -1,17 +1,21 @@
 import { type Env, loadEnv } from "@sf/config";
+import { QUEUE_NAMES } from "@sf/core";
+import { Queue } from "bullmq";
 import { Redis } from "ioredis";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildInfoFrom, composeApp } from "../src/compose-app.js";
 import { buildLoggerOptions } from "../src/lib/logger.js";
-import { createQueueStats } from "../src/lib/queue-stats.js";
-import type { createRedis } from "../src/lib/redis.js";
+import { type QueueStats, createQueueStats } from "../src/lib/queue-stats.js";
+import { createRedis } from "../src/lib/redis.js";
+import { dependencyFailureCode } from "../src/lib/system-status.js";
 import { type Recorder, recordingLogger } from "./recording-logger.js";
 
 /**
- * Nothing listens on port 1. No case here needs a connection: the database
- * client does not connect until it is asked something, and Redis is
- * `idleRedis` below, so a case that fails before its cleanup leaves no socket
- * reconnecting behind it to keep the run alive.
+ * Nothing listens on port 1. The database client does not connect until it is
+ * asked something, and no case here asks it. Redis is `idleRedis` below by
+ * default; a case that passes the real `createRedis` does reach for port 1 and
+ * is refused, and its client keeps reconnecting until the shutdown that
+ * `compose` registers for every case closes it.
  */
 const CLOSED_REDIS_URL = "redis://127.0.0.1:1";
 const CLOSED_DATABASE_URL = "postgres://sf:sf@127.0.0.1:1/shorts_factory_none";
@@ -113,25 +117,60 @@ describe("composeApp", () => {
     expect(written).toContain(STARTUP_FAILURE);
   });
 
-  it("writes a failure of a queue the status page reads", () => {
+  /**
+   * Redis is down and the status page reads the queues: every `Queue` of the
+   * pass fails its `init()` and reports it as an `error` event. The refusal is
+   * the answer of the pass (`redis: down`), and the client writes its own
+   * failure; a line per queue on top of that would be 29 error lines per poll.
+   * The pass is run on the collector the wiring built, not through the page,
+   * so that the database of the page stays out of the case.
+   */
+  it("writes no error line per queue when a pass meets a Redis that is down", async () => {
     const env = envWith();
     const { log, entries } = recordingLog(env);
-
+    const built: QueueStats[] = [];
     compose(env, {
       log,
       rejectedBuildLabels: [],
+      createRedis,
       createQueueStats: (options) => {
-        options.onError?.("system.dlq", new Error(STARTUP_FAILURE));
-        return createQueueStats(options);
+        const stats = createQueueStats(options);
+        built.push(stats);
+        return stats;
       },
     });
 
-    const entry = entries().find((e) => e.msg === "queue error");
-    expect(entry).toMatchObject({
-      level: 50,
-      queue: "system.dlq",
-      err: { message: STARTUP_FAILURE },
-    });
+    const [stats] = built;
+    if (stats === undefined) {
+      throw new Error("the wiring built no queue stats");
+    }
+    // A refused `Queue` reports its `error` before the pass drops it with a
+    // `close()`, so 29 closes mean every queue of the pass has spoken.
+    const closes = vi.spyOn(Queue.prototype, "close");
+    try {
+      const failure = await stats.collect().then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+      expect(dependencyFailureCode(failure)).toBe("unreachable");
+
+      await vi.waitFor(() => {
+        expect(closes).toHaveBeenCalledTimes(QUEUE_NAMES.length);
+        expect(
+          entries().some((entry) => entry.msg === "redis client error"),
+        ).toBe(true);
+      });
+    } finally {
+      closes.mockRestore();
+    }
+
+    const errors = entries().filter(
+      (entry) =>
+        typeof entry.level === "number" &&
+        entry.level >= 50 &&
+        entry.msg !== "redis client error",
+    );
+    expect(errors).toEqual([]);
   });
 
   it("names a build label the config dropped, without its value", () => {
@@ -203,5 +242,38 @@ describe("composeApp", () => {
       url: "/system/status",
       remotePort: 4242,
     });
+  });
+
+  /**
+   * Redis is down at the stop: the client of the api refuses the QUIT (no
+   * offline queue) and the socket is torn down instead. The stop is clean and
+   * says how Redis went - the wiring, not a stub, decides that.
+   */
+  it("stops cleanly with a warning when Redis is down at the stop", async () => {
+    const env = envWith();
+    const { log, entries } = recordingLog(env);
+    const codes: number[] = [];
+    const { shutdown } = composeApp(env, {
+      log,
+      rejectedBuildLabels: [],
+      createRedis,
+      exit: (code) => codes.push(code),
+    });
+    pending.push(() => shutdown("SIGTERM"));
+
+    await shutdown("SIGTERM");
+
+    const redisLines = entries().filter((entry) => entry.target === "redis");
+    expect(redisLines).toEqual([
+      expect.objectContaining({
+        level: 40,
+        msg: "closed by disconnect",
+        err: expect.objectContaining({
+          message:
+            "Stream isn't writeable and enableOfflineQueue options is false",
+        }),
+      }),
+    ]);
+    expect(codes).toEqual([0]);
   });
 });

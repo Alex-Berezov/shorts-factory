@@ -3,22 +3,25 @@ import { QUEUE_NAMES, type QueueName } from "@sf/core";
 import { Queue } from "bullmq";
 import type { Redis } from "ioredis";
 import type { QueueStatsProbe, QueuesSnapshot } from "../deps.js";
+import { singleFlight } from "./single-flight.js";
 
 /** The queue whose depth is the DLQ size; it has no processor of its own. */
 const DLQ_QUEUE: QueueName = "system.dlq";
 
 /**
- * How long `close()` waits for the requests that are already reading.
+ * How long `close()` waits for the passes that are still reading.
  *
- * Bounded, because the deadline of a request does not cancel the read behind
- * it: a `getJobCounts` issued while Redis is unreachable sits in
- * `waitUntilReady` for as long as the client keeps reconnecting - which, with
- * the `retryStrategy` of `lib/redis.ts`, is forever. An unbounded wait here
- * would hold the whole shutdown until its own ten-second deadline fired,
+ * Bounded, because nothing ends such a pass from here: the deadline of a
+ * request gives up on it without stopping it. A pass does end by itself -
+ * every command it sends is bounded by the `commandTimeout` of the client
+ * (`lib/redis.ts`), and a `Queue` refuses at once instead of waiting for a
+ * client that is not ready (`skipWaitingForReady` below) - but the close of a
+ * service on its way out has no reason to wait for that. An unbounded wait
+ * here would also be one more place where a pass that hangs in some way not
+ * foreseen holds the whole shutdown until its own ten-second deadline fired,
  * leaving Redis unclosed and the process leaving with code 1 after a clean
  * SIGTERM (`lib/shutdown.ts`). A read abandoned this way answers its request
- * with a connection error, which is the truth about a service that is on its
- * way out.
+ * with a connection error, which is the truth about a service on its way out.
  */
 const CLOSE_DRAIN_MS = 2_000;
 
@@ -50,8 +53,6 @@ export interface QueueStats extends QueueStatsProbe {
 
 export interface QueueStatsOptions {
   connection: Redis;
-  /** Where a connection failure of a `Queue` is written. */
-  onError?: (queue: QueueName, err: Error) => void;
   /** Overridable by tests; the default is `CLOSE_DRAIN_MS`. */
   drainTimeoutMs?: number;
 }
@@ -114,6 +115,15 @@ async function drain(
  *   as events; an `EventEmitter` error with no listener ends the process. With
  *   29 queues, a Redis outage without this is 29 ways to take the api down at
  *   exactly the moment its status page is being opened.
+ * - **`skipWaitingForReady: true`.** Without it every command of a `Queue`
+ *   opened while the client is not `ready` waits in `waitUntilReady` for a
+ *   `ready` or an `end` (bullmq `redis-connection.js`), and with the
+ *   `retryStrategy` of `lib/redis.ts` a client that cannot reach Redis
+ *   reconnects forever and reaches neither - no `commandTimeout` applies to a
+ *   command that was never sent. With it the `INFO` of the version check goes
+ *   to the client at once and is refused the way every command of the api
+ *   is while the socket is down ("Stream isn't writeable...", `unreachable`),
+ *   and the failed `Queue` is thrown away by `forget`.
  * - **`isPaused()` next to the counts.** `getJobCounts("paused")` is the
  *   length of the `paused` list, not the state of the queue: BullMQ renames
  *   `wait` to `paused` while a queue is paused, so a paused empty queue would
@@ -126,8 +136,11 @@ async function drain(
  */
 export function createQueueStats(options: QueueStatsOptions): QueueStats {
   const queues = new Map<QueueName, Queue>();
-  /** Requests that are already reading; `close` waits for them. */
-  const inFlight = new Set<Promise<unknown>>();
+  /**
+   * The pass still reading, for `close` to wait for. One at most: every
+   * request joins the pass in flight (`shared` below) until it settles.
+   */
+  let inFlight: Promise<unknown> | undefined;
   let closed = false;
 
   const queueFor = (name: QueueName): Queue => {
@@ -139,10 +152,13 @@ export function createQueueStats(options: QueueStatsOptions): QueueStats {
       connection: options.connection,
       // Read-only: see the docblock above before removing this.
       skipMetasUpdate: true,
+      // Refuse at once on a client that is not ready: see the docblock above.
+      skipWaitingForReady: true,
     });
-    queue.on("error", (err: Error) => {
-      options.onError?.(name, err);
-    });
+    // Listened to, not written: the client writes its own failure
+    // (`createRedis`), and a refused `init()` is the failure of the pass,
+    // which its answer reports. A line here would be 29 per poll.
+    queue.on("error", () => {});
     queues.set(name, queue);
     return queue;
   };
@@ -210,19 +226,34 @@ export function createQueueStats(options: QueueStatsOptions): QueueStats {
     return { queues: rows, dlq: size };
   };
 
+  /**
+   * One pass at a time, shared by every request that arrives while it runs.
+   *
+   * The deadline of a request abandons a pass without cancelling it
+   * (`CLOSE_DRAIN_MS`). Without the sharing every request made while Redis
+   * is slow would leave 29 more reads behind it; with it there is one pass in
+   * flight however often the page is opened, and each request still gives up
+   * on its own deadline. The pass is joined until it settles, which it does
+   * by itself: a command sent is bounded by the `commandTimeout` of the
+   * client, and a `Queue` does not wait for a client that is not ready
+   * (`skipWaitingForReady`).
+   */
+  const shared = singleFlight(async (): Promise<QueuesSnapshot> => {
+    const pass = read();
+    inFlight = pass;
+    try {
+      return await pass;
+    } finally {
+      inFlight = undefined;
+    }
+  });
+
   return {
     async collect(): Promise<QueuesSnapshot> {
       if (closed) {
         throw new Error("queue stats were asked for after they were closed");
       }
-
-      const pass = read();
-      inFlight.add(pass);
-      try {
-        return await pass;
-      } finally {
-        inFlight.delete(pass);
-      }
+      return shared();
     },
 
     /**
@@ -232,13 +263,17 @@ export function createQueueStats(options: QueueStatsOptions): QueueStats {
      * Both halves matter. Closing under a request in flight answers it with
      * "Connection is closed" - the last status page before a SIGTERM would
      * blame Redis for a shutdown of ours. Waiting for it without a bound is
-     * the other failure: a read issued while Redis is unreachable never
-     * settles at all (`CLOSE_DRAIN_MS`), and the stop would then hang until
-     * the shutdown deadline killed it.
+     * the other failure: a read issued while Redis is unreachable is refused
+     * at once (`skipWaitingForReady`); the bound is for a pass that hangs in a
+     * way not foreseen (`CLOSE_DRAIN_MS`), and without it the stop would then
+     * hang until the shutdown deadline killed it.
      */
     async close(): Promise<void> {
       closed = true;
-      await drain([...inFlight], options.drainTimeoutMs ?? CLOSE_DRAIN_MS);
+      await drain(
+        inFlight === undefined ? [] : [inFlight],
+        options.drainTimeoutMs ?? CLOSE_DRAIN_MS,
+      );
       const open = [...queues.values()];
       queues.clear();
       await Promise.all(open.map((queue) => queue.close()));

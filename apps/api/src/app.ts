@@ -10,6 +10,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import type { AppDeps } from "./deps.js";
 import { AccessLogController } from "./lib/error-log.js";
 import { registerAuth } from "./plugins/auth.js";
+import { registerClosing } from "./plugins/closing.js";
 import {
   clientErrorHandler,
   frameworkErrorHandler,
@@ -126,6 +127,10 @@ export function buildApp(deps: AppDeps, options: BuildAppOptions): AppInstance {
     // the access line of the service is written by the same controller, once
     // the response is out (docs/DECISIONS.md, Р10 and Д1 E0-11A).
     logController: new AccessLogController(),
+    // The 503 of a closing service is ours (`plugins/closing.ts`): Fastify's
+    // own is written straight to the socket in `lib/route.js:480-502`, in its
+    // own shape and without the request id.
+    return503OnClosing: false,
   }).withTypeProvider<ZodTypeProvider>();
 
   // Read and set by the controller above and by the error log
@@ -138,6 +143,10 @@ export function buildApp(deps: AppDeps, options: BuildAppOptions): AppInstance {
   });
 
   registerErrorHandler(app);
+
+  // Before auth: a request to an instance on its way out is answered 503
+  // whoever sent it.
+  registerClosing(app);
   registerAuth(app, { password: options.adminPassword });
   registerOpenapi(app, { version: deps.buildInfo.version });
 

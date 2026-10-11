@@ -3,6 +3,7 @@ import { type FastifyReply, type FastifyRequest, LogController } from "fastify";
 import {
   type MappedError,
   SERVER_ERROR_STATUS,
+  ServiceClosingError,
   printableLine,
 } from "./error-mapping.js";
 import { publicDetails } from "./error-response.js";
@@ -169,7 +170,8 @@ function pathOf(url: string): string {
 /**
  * The line for a request refused before the caller proved who it is - a
  * wrong password, a url the router could not parse, a broken request on the
- * socket - and for a path nobody declared. `info` and without the error: an
+ * socket - for a path nobody declared, and for any request to a service that
+ * is closing (`logError`). `info` and without the error: an
  * anonymous client on the published port can produce these at any rate it
  * likes, and at `warn` with the whole error object every one of them is a
  * multi-line record the real failures drown in (docs/DECISIONS.md, Р1
@@ -196,13 +198,21 @@ export function logRejection(
  * for: a failure of ours is an `error` with the whole error, a 4xx of a
  * caller who gave the password is a `warn` with it, a 4xx of anyone else is
  * the short `info` line of `logRejection`.
+ *
+ * The 503 of a service that is closing is the short line too, whoever the
+ * caller is: it is a 5xx but not a failure - every request that reaches an
+ * instance on its way out gets one, and at `error` with a stack each of them
+ * a deploy would read as an incident in the log and in every alert on it.
  */
 export function logError(
   request: FastifyRequest,
   err: unknown,
   mapped: MappedError,
 ): void {
-  if (mapped.status < SERVER_ERROR_STATUS && !request.authenticated) {
+  if (
+    err instanceof ServiceClosingError ||
+    (mapped.status < SERVER_ERROR_STATUS && !request.authenticated)
+  ) {
     logRejection(request, mapped);
     return;
   }

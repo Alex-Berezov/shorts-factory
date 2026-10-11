@@ -7,18 +7,14 @@ import {
 } from "../src/lib/redis.js";
 
 /** Records how the client was asked to go away, and how it answered. */
-function stubClient(quitFails: boolean): ClosableRedis & { calls: string[] } {
+function stubClient(refusal?: Error): ClosableRedis & { calls: string[] } {
   const calls: string[] = [];
   return {
     calls,
     quit: async () => {
       calls.push("quit");
-      if (quitFails) {
-        // What ioredis answers with `enableOfflineQueue: false` on a client
-        // that never connected or is reconnecting.
-        throw new Error(
-          "Stream isn't writeable and enableOfflineQueue options is false",
-        );
+      if (refusal !== undefined) {
+        throw refusal;
       }
       return "OK";
     },
@@ -30,20 +26,28 @@ function stubClient(quitFails: boolean): ClosableRedis & { calls: string[] } {
 
 describe("closeRedis", () => {
   it("quits a connected client and leaves it at that", async () => {
-    const client = stubClient(false);
+    const client = stubClient();
 
-    await closeRedis(client);
+    await expect(closeRedis(client)).resolves.toEqual({ kind: "quit" });
 
     expect(client.calls).toEqual(["quit"]);
   });
 
-  it("tears the socket down when quit is refused", async () => {
+  it("tears the socket down when quit is refused and says so", async () => {
     // The stop of a service whose Redis is down: `quit()` is rejected because
     // the command cannot be written, and the shutdown would report a failed
     // close and exit with 1 - a clean stop that reads as a crash to Compose.
-    const client = stubClient(true);
+    // It is still not a QUIT, and the outcome carries the refusal for the log.
+    // What ioredis answers with `enableOfflineQueue: false` on a client that
+    // never connected or is reconnecting.
+    const refusal = new Error(
+      "Stream isn't writeable and enableOfflineQueue options is false",
+    );
+    const client = stubClient(refusal);
 
-    await expect(closeRedis(client)).resolves.toBeUndefined();
+    const outcome = await closeRedis(client);
+
+    expect(outcome).toEqual({ kind: "disconnected", err: refusal });
     expect(client.calls).toEqual(["quit", "disconnect"]);
   });
 });

@@ -1,4 +1,5 @@
 import { Redis } from "ioredis";
+import { DEPENDENCY_TIMEOUT_MS } from "./deadline.js";
 
 /** How long a connect attempt is given before it is treated as a failure. */
 const CONNECT_TIMEOUT_MS = 1_000;
@@ -14,6 +15,12 @@ const MAX_RECONNECT_DELAY_MS = 2_000;
  *   without it `/health` hangs exactly when it is supposed to report trouble;
  * - `maxRetriesPerRequest: 1` and a short `connectTimeout` - the same reason,
  *   for a socket that is up but unresponsive;
+ * - `commandTimeout` at the deadline of the api (`DEPENDENCY_TIMEOUT_MS`) - a
+ *   command sent down a socket that is open and silent fails by itself
+ *   ("Command timed out", a `timeout` on `/system/status`) instead of waiting
+ *   for as long as the socket stays open: the deadline of a request gives up
+ *   on such a command without ending it, and every poll would leave one more
+ *   behind;
  * - a capped reconnect backoff - the client keeps trying to come back, but a
  *   long outage does not turn into a tight reconnect loop.
  *
@@ -39,6 +46,7 @@ export function createRedis(url: string, options: RedisOptions = {}): Redis {
     connectTimeout: CONNECT_TIMEOUT_MS,
     maxRetriesPerRequest: 1,
     enableOfflineQueue: false,
+    commandTimeout: DEPENDENCY_TIMEOUT_MS,
     retryStrategy: (attempt: number) =>
       Math.min(attempt * 200, MAX_RECONNECT_DELAY_MS),
   });
@@ -57,6 +65,15 @@ export interface ClosableRedis {
 }
 
 /**
+ * How the client went away: by a QUIT the server acknowledged, or by tearing
+ * the socket down after the QUIT was refused - with the refusal, so that the
+ * caller can say which one it was.
+ */
+export type RedisCloseOutcome =
+  | { kind: "quit" }
+  | { kind: "disconnected"; err: unknown };
+
+/**
  * Closes the client for good, whether or not it was ever connected.
  *
  * `quit()` sends a QUIT command, and with `enableOfflineQueue: false` a
@@ -69,13 +86,18 @@ export interface ClosableRedis {
  *
  * Tearing the socket down instead is what "already closed" means here, and it
  * is not an error: the client is gone either way, which is all a shutdown
- * asked for. A refusal of any other kind is still nothing to report - there is
- * no state left to save - so `disconnect()` closes both paths.
+ * asked for. A refusal of any other kind is still nothing to fail the stop
+ * over - there is no state left to save - so `disconnect()` closes both paths.
+ * The outcome says which path it was, for the log of the stop to say so too.
  */
-export async function closeRedis(client: ClosableRedis): Promise<void> {
+export async function closeRedis(
+  client: ClosableRedis,
+): Promise<RedisCloseOutcome> {
   try {
     await client.quit();
-  } catch {
+    return { kind: "quit" };
+  } catch (err) {
     client.disconnect();
+    return { kind: "disconnected", err };
   }
 }
