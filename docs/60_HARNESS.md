@@ -143,13 +143,13 @@ shorts_factory_project/
 | --- | --- | --- |
 | lint | `pnpm lint` | всегда |
 | typecheck | `pnpm typecheck` | всегда |
-| test | `pnpm test` | всегда |
+| test | `pnpm test` | `never` до E0-02A (там включается на каждый прогон) |
 | test:int | `pnpm test:int` | `never` до E0-02A (там включается на `packages/db/**`, `apps/**`) |
-| build | `pnpm build` | изменены `apps/**`, `packages/**`, корневые конфиги |
+| build | `pnpm build` | изменено то, что читает `next build`: `apps/web/**`, `packages/{api-client,config,contracts,core}/**`, корневые `package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, `turbo.json`, `tsconfig*.json` (E0-01A) |
 | no-search-list | `node scripts/check-no-search-list.mjs` | всегда |
 | compose | `node scripts/check-compose.mjs` (= `pnpm check:compose`) | изменены `compose.yaml`, `infra/**`, `scripts/check-compose.mjs`, `scripts/compose-rules.mjs`, `.dockerignore`; нужен Docker CLI с плагином Compose v2.30+ (демон не нужен), `.env` не читает. Правила - `scripts/compose-rules.mjs`; среди них `restart: unless-stopped` у всех сервисов, кроме `migrate` (поэтому dev-postgres/redis поднимаются вместе с Docker Desktop), `.env` проекта, смонтированный в `migrate`/`api`/`worker`/`web` в `/repo/.env` read-only с `create_host_path: false`, без `env_file` (Р9), и правило 11: `.dockerignore` контекста сборки каждого образа маскирует `.env`, `.env.*`, `**/.env`, `**/.env.*`, после первой маски нет ни одной `!`-строки, рядом с Dockerfile нет `<Dockerfile>.dockerignore`. Манифесты `apps/*/package.json` гейт не проверяет |
 | tracker | `node scripts/tasks.mjs render --check` | изменены `docs/tasks/**`, `docs/00_STATUS.md` |
-| harness-selftest | `node .claude/hooks/harness-selftest.js` | изменены `.claude/**` |
+| harness-selftest | `node .claude/hooks/harness-selftest.js` | изменены `.claude/**`, корневой `package.json`, `apps/**/package.json`, `packages/**/package.json`, `apps/**/next.config.*`, `packages/**/next.config.*`, `pnpm-workspace.yaml` (проба графа сборки сверяет их с glob `build`, корневой `scripts.build` - ровно `turbo run build`; `turbo.json` пробы не читают, E0-01A) |
 
 Только полный прогон (без `--only`) ставит `lastGates`; частичный - для работы, замок его не видит.
 

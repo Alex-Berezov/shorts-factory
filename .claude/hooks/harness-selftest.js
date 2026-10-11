@@ -2,7 +2,8 @@
 'use strict';
 /**
  * harness-selftest.js - самопроверка обвязки. Запускается руками, гейтом `harness-selftest`
- * (rules.sf.json, when: glob:.claude/**) и установщиком install.ps1.
+ * (rules.sf.json: .claude/**, корневой package.json, манифесты пакетов, next.config.* в apps/**
+ * и packages/**, pnpm-workspace.yaml) и установщиком install.ps1.
  *
  * Зачем: у обвязки нет ни типов, ни тестов, а сломанный хук ничего не запрещает - его отказ
  * неотличим от разрешения. Поэтому здесь не только синтаксис и разбор правил, но и живые пробы
@@ -177,17 +178,58 @@ function loadSelectGates() {
   return sandbox.selectGates;
 }
 
-check('гейт compose: gates.js выбирает его на файлах Compose, пропускает на посторонних, его скрипт на месте', () => {
-  // Гейт по glob, ошибка в шаблоне, в его разборе или в пути скрипта не краснеет,
-  // а молча выключает гейт (E0-11). Решение принимает настоящий selectGates.
-  const gate = ((repoRules && repoRules.gates) || []).find((g) => g.id === 'compose');
-  if (!gate) return 'гейта compose нет в правилах';
-  const selectGates = loadSelectGates();
+/**
+ * Гейт id из rules.sf.json и runs(file) - выбирает ли его настоящий selectGates на одном
+ * изменённом файле (only = null, как в полном прогоне). gates.js загружается в vm один раз
+ * на весь прогон, проба каждого гейта - тоже. Нет гейта - исключение (красная строка check).
+ */
+let loadedSelectGates = null;
+const gateProbes = new Map();
+function gateProbe(id) {
+  if (gateProbes.has(id)) return gateProbes.get(id);
+  const gate = ((repoRules && repoRules.gates) || []).find((g) => g.id === id);
+  if (!gate) throw new Error('гейта ' + id + ' нет в правилах');
+  if (!loadedSelectGates) loadedSelectGates = loadSelectGates();
+  const selectGates = loadedSelectGates;
   const runs = (file) => {
     const picked = selectGates([gate], [file], null);
     return Boolean(picked && picked[0] && picked[0].run);
   };
-  const mustRun = [
+  const res = { gate, runs };
+  gateProbes.set(id, res);
+  return res;
+}
+
+/**
+ * Общий каркас пробы гейта по glob (L-008): решение принимает настоящий selectGates,
+ * своей копии разбора when нет. Выбор, пропуск и дополнительные проверки - отдельные
+ * строки: отказ одной не скрывает состояние другой.
+ *   spec.runWhat / spec.skipWhat - хвосты названий строк выбора и пропуска;
+ *   spec.mustRun / spec.mustSkip - файлы, на которых гейт обязан выбираться / пропускаться;
+ *   spec.extra - [{ name, fn({ gate, runs }) }], результат fn - как у check.
+ */
+function checkGateSelection(id, spec) {
+  check('гейт ' + id + ': gates.js выбирает его на ' + spec.runWhat, () => {
+    const { runs } = gateProbe(id);
+    const missed = spec.mustRun.filter((f) => !runs(f));
+    if (missed.length) return 'gates.js не выбирает его на ' + missed.join(', ');
+    return { note: spec.mustRun.length + ' выбор' };
+  });
+  check('гейт ' + id + ': gates.js пропускает его на ' + spec.skipWhat, () => {
+    const { runs } = gateProbe(id);
+    const stray = spec.mustSkip.filter((f) => runs(f));
+    if (stray.length) return 'gates.js выбирает его на постороннем ' + stray.join(', ');
+    return { note: spec.mustSkip.length + ' пропуск' };
+  });
+  for (const x of spec.extra || []) check('гейт ' + id + ': ' + x.name, () => x.fn(gateProbe(id)));
+}
+
+// Гейт по glob, ошибка в шаблоне, в его разборе или в пути скрипта не краснеет,
+// а молча выключает гейт (E0-11).
+checkGateSelection('compose', {
+  runWhat: 'файлах Compose',
+  skipWhat: 'посторонних',
+  mustRun: [
     'compose.yaml',
     'infra/docker-compose.yml',
     'infra/docker-compose.app.yml',
@@ -196,18 +238,245 @@ check('гейт compose: gates.js выбирает его на файлах Comp
     'scripts/compose-rules.mjs',
     '.dockerignore',
     'infra/docker/worker.Dockerfile.dockerignore',
-  ];
+  ],
   // Манифесты приложений check-compose не читает: выбор на них обещал бы
   // проверку, которой нет (E0-11, круг 7-2).
-  const mustSkip = ['apps/web/src/app/page.tsx', 'apps/api/package.json', 'apps/worker/package.json', 'apps/web/package.json', 'apps/api/src/package.json', 'x.dockerignore', 'docs/30_E0_TASKS.md', 'README.md', 'scripts/tasks.mjs', 'xinfra/a.yml'];
-  const missed = mustRun.filter((f) => !runs(f));
-  if (missed.length) return 'gates.js не выбирает его на ' + missed.join(', ');
-  const stray = mustSkip.filter((f) => runs(f));
-  if (stray.length) return 'gates.js выбирает его на постороннем ' + stray.join(', ');
-  const m = /^node\s+(\S+)/.exec(String(gate.cmd || ''));
-  if (!m) return 'cmd гейта compose не node <скрипт>: ' + gate.cmd;
-  if (!fs.existsSync(path.join(ROOT, m[1]))) return 'скрипта ' + m[1] + ' нет на диске';
-  return { note: mustRun.length + ' выбор, ' + mustSkip.length + ' пропуск' };
+  mustSkip: ['apps/web/src/app/page.tsx', 'apps/api/package.json', 'apps/worker/package.json', 'apps/web/package.json', 'apps/api/src/package.json', 'x.dockerignore', 'docs/30_E0_TASKS.md', 'README.md', 'scripts/tasks.mjs', 'xinfra/a.yml'],
+  extra: [
+    {
+      name: 'его скрипт на месте',
+      fn: ({ gate }) => {
+        const m = /^node\s+(\S+)/.exec(String(gate.cmd || ''));
+        if (!m) return 'cmd гейта compose не node <скрипт>: ' + gate.cmd;
+        if (!fs.existsSync(path.join(ROOT, m[1]))) return 'скрипта ' + m[1] + ' нет на диске';
+        return true;
+      },
+    },
+  ],
+});
+
+/**
+ * Пакеты workspace по pnpm-workspace.yaml: { имя: { dir, pkg, transpile } }. Разбор
+ * простой - строки `- 'шаблон'` под ключом packages:, шаблон - каталог или каталог/*;
+ * комментарии и пустые строки пропускаются; иная строка внутри packages: и иной шаблон
+ * (!, **, другие маски) - исключение, а не молчаливый пропуск.
+ * transpile - transpilePackages из next.config.* пакета ([] без next.config).
+ */
+const NEXT_CONFIGS = ['next.config.ts', 'next.config.mts', 'next.config.js', 'next.config.mjs', 'next.config.cjs'];
+function workspacePackages() {
+  const text = fs.readFileSync(path.join(ROOT, 'pnpm-workspace.yaml'), 'utf8');
+  const patterns = [];
+  let inPackages = false;
+  for (const line of text.split(/\r?\n/)) {
+    // комментарий в любой колонке и пустая строка блок packages: не закрывают
+    if (/^\s*(?:#.*)?$/.test(line)) continue;
+    if (/^\S/.test(line)) { inPackages = /^packages\s*:/.test(line); continue; }
+    if (!inPackages) continue;
+    const m = /^\s*-\s*(["']?)([^"'#]*?)\1\s*(?:#.*)?$/.exec(line);
+    if (!m) throw new Error('строка packages: в pnpm-workspace.yaml не разбирается пробой: ' + line.trim());
+    patterns.push(m[2].trim());
+  }
+  if (!patterns.length) throw new Error('в pnpm-workspace.yaml нет шаблонов packages');
+  const dirs = [];
+  for (const pat of patterns) {
+    if (/^[\w.@-]+(?:\/[\w.@-]+)*\/\*$/.test(pat)) {
+      const base = pat.slice(0, -2);
+      const abs = path.join(ROOT, base);
+      if (!fs.existsSync(abs)) continue;
+      for (const d of fs.readdirSync(abs, { withFileTypes: true })) if (d.isDirectory()) dirs.push(base + '/' + d.name);
+    } else if (/^[\w.@-]+(?:\/[\w.@-]+)*$/.test(pat)) {
+      dirs.push(pat);
+    } else {
+      throw new Error('шаблон pnpm-workspace.yaml не разбирается пробой: ' + pat);
+    }
+  }
+  const ws = {};
+  for (const dir of dirs) {
+    const manifest = path.join(ROOT, dir, 'package.json');
+    if (!fs.existsSync(manifest)) continue;
+    const pkg = readJson(manifest);
+    if (!pkg.name) continue;
+    const cfg = NEXT_CONFIGS.map((f) => path.join(ROOT, dir, f)).find((p) => fs.existsSync(p));
+    ws[pkg.name] = { dir, pkg, transpile: cfg ? transpilePackages(fs.readFileSync(cfg, 'utf8'), dir + '/' + path.basename(cfg)) : [] };
+  }
+  return ws;
+}
+
+/** Исходник без комментариев // и блочных; строки (', ", `) копируются как есть. */
+function stripJsComments(src) {
+  let out = '';
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== c) j += src[j] === '\\' ? 2 : 1;
+      out += src.slice(i, j + 1);
+      i = j;
+    } else if (c === '/' && src[i + 1] === '/') {
+      while (i < src.length && src[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i + 2);
+      i = end === -1 ? src.length : end + 1;
+      out += ' ';
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+/**
+ * Строки массива transpilePackages из next.config (без комментариев). Ключа нет - [].
+ * Ключ есть, но значение не массив строковых литералов (переменная, spread, вызов) -
+ * исключение: молчаливый [] спрятал бы пакеты, которые читает сборка.
+ */
+function transpilePackages(src, file) {
+  const code = stripJsComments(src);
+  if (!/\btranspilePackages\b/.test(code)) return [];
+  const m = /transpilePackages\s*:\s*\[([^\]]*)\]/.exec(code);
+  const STR = /"[^"]*"|'[^']*'|`[^`$]*`/g;
+  if (!m || m[1].replace(STR, '').replace(/[\s,]/g, '') !== '') {
+    throw new Error('transpilePackages в ' + file + ' не массив строковых литералов - разбери руками');
+  }
+  return (m[1].match(STR) || []).map((s) => s.slice(1, -1));
+}
+
+/**
+ * Пакеты workspace, сборку которых запускает turbo run build (есть scripts.build), и всё,
+ * что они читают: транзитивные workspace-зависимости (dependencies, devDependencies,
+ * peerDependencies, optionalDependencies) и transpilePackages. Имена вне workspace
+ * (сторонние npm) не учитываются. Возвращает { builders, read, bad } - bad: пакеты,
+ * правка которых не выбирает гейт build.
+ */
+function uncoveredBuildPackages(runs, ws) {
+  const DEP_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
+  const reads = (entry) => {
+    const names = [];
+    for (const f of DEP_FIELDS) names.push.apply(names, Object.keys(entry.pkg[f] || {}));
+    return names.concat(entry.transpile || []).filter((n) => ws[n]);
+  };
+  const builders = Object.keys(ws).filter((n) => ws[n].pkg.scripts && ws[n].pkg.scripts.build);
+  const seen = new Set();
+  const queue = builders.slice();
+  while (queue.length) {
+    const name = queue.shift();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    queue.push.apply(queue, reads(ws[name]));
+  }
+  const bad = [];
+  for (const name of seen) {
+    const dir = ws[name].dir;
+    if (!runs(dir + '/package.json') || !runs(dir + '/src/index.ts')) bad.push(name + ' (' + dir + ')');
+  }
+  return { builders, read: Array.from(seen), bad };
+}
+
+// Сборка web (next build, ADR-0005) читает только apps/web и его пакеты; glob гейта
+// build сужен до них и корневых конфигов (E0-01A, docs/DECISIONS.md 11.10.2026).
+checkGateSelection('build', {
+  runWhat: 'apps/web, пакетах web и корневых конфигах',
+  skipWhat: 'api, worker, db, integrations, вложенных конфигах и docs',
+  mustRun: [
+    'apps/web/src/app/page.tsx',
+    'apps/web/package.json',
+    'apps/web/next.config.ts',
+    'apps/web/tsconfig.json',
+    'packages/api-client/src/index.ts',
+    'packages/config/src/server.ts',
+    'packages/contracts/package.json',
+    'packages/core/src/index.ts',
+    'package.json',
+    'pnpm-workspace.yaml',
+    'pnpm-lock.yaml',
+    'turbo.json',
+    'tsconfig.base.json',
+  ],
+  mustSkip: [
+    'apps/api/src/server.ts',
+    'apps/api/package.json',
+    'apps/worker/src/index.ts',
+    'packages/db/src/index.ts',
+    'packages/db/migrations/meta/_journal.json',
+    'packages/integrations/youtube/src/index.ts',
+    'apps/web-admin/x.ts',
+    'scripts/tsconfig.json',
+    'docs/package.json',
+    'docs/30_E0_TASKS.md',
+    'docs/tasks/tasks.json',
+    'docs/apps/web/x.ts',
+    'README.md',
+    '.claude/hooks/rules.sf.json',
+    'compose.yaml',
+    'infra/docker-compose.yml',
+    'scripts/tasks.mjs',
+    'xapps/a.ts',
+  ],
+  extra: [
+    {
+      name: 'cmd pnpm build и scripts.build = turbo run build в корневом package.json',
+      fn: ({ gate }) => {
+        if (gate.cmd !== 'pnpm build') return 'cmd гейта build не pnpm build: ' + gate.cmd;
+        const pkg = readJson(path.join(ROOT, 'package.json'));
+        if (!pkg.scripts || pkg.scripts.build !== 'turbo run build') {
+          return 'scripts.build в корневом package.json не turbo run build: ' + JSON.stringify(pkg.scripts && pkg.scripts.build);
+        }
+        return true;
+      },
+    },
+    {
+      name: 'пакеты со scripts.build и всё, что они читают, под glob',
+      fn: ({ runs }) => {
+        const ws = workspacePackages();
+        const real = uncoveredBuildPackages(runs, ws);
+        if (!real.builders.length) return 'ни у одного пакета workspace нет scripts.build - гейт build ничего не собирает';
+        if (real.bad.length) return 'сборка читает пакеты вне glob build: ' + real.bad.join(', ') + ' - расширь glob build';
+        // Детектор не слепой: стаб-пакет со сборкой и peer-зависимостью на @sf/db обязан дать отказ.
+        if (!ws['@sf/db']) return 'в workspace нет @sf/db - стаб-проба детектора не строится';
+        const stub = Object.assign({}, ws, {
+          '@sf/selftest-stub': { dir: ws[real.builders[0]].dir, pkg: { scripts: { build: 'x' }, peerDependencies: { '@sf/db': 'workspace:*' } }, transpile: [] },
+        });
+        if (!uncoveredBuildPackages(runs, stub).bad.some((b) => b.startsWith('@sf/db '))) return 'проба не замечает @sf/db вне glob build в стаб-данных';
+        return { note: 'сборка: ' + real.builders.join(', ') + '; читает: ' + real.read.join(', ') + '; workspace ' + Object.keys(ws).length };
+      },
+    },
+  ],
+});
+
+// Пробы гейта build выше читают корневой package.json, манифесты пакетов, next.config.*
+// и pnpm-workspace.yaml: гейт самопроверки обязан выбираться на них, иначе устаревший glob
+// build уйдёт молча. turbo.json ни одна проба не читает - выбор на нём обещал бы сверку,
+// которой нет.
+checkGateSelection('harness-selftest', {
+  runWhat: '.claude/**, корневом package.json, манифестах пакетов, next.config.*, pnpm-workspace.yaml',
+  skipWhat: 'исходниках, lockfile, turbo.json и docs',
+  mustRun: [
+    '.claude/hooks/gates.js',
+    '.claude/hooks/rules.sf.json',
+    '.claude/agents/worker.md',
+    'package.json',
+    'apps/web/package.json',
+    'apps/api/package.json',
+    'packages/core/package.json',
+    'packages/integrations/youtube/package.json',
+    'apps/web/next.config.ts',
+    'apps/web/next.config.mjs',
+    'packages/core/next.config.js',
+    'pnpm-workspace.yaml',
+  ],
+  mustSkip: [
+    'turbo.json',
+    'apps/web/src/app/page.tsx',
+    'packages/core/src/index.ts',
+    'pnpm-lock.yaml',
+    'apps/api/src/server.ts',
+    'docs/30_E0_TASKS.md',
+    'README.md',
+    'scripts/tasks.mjs',
+    'xapps/web/package.json',
+    'docs/apps/web/package.json',
+  ],
 });
 
 // ------------------------------------------------------------------ 3. шапки агентов и команд

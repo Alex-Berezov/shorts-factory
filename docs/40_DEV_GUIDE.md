@@ -134,12 +134,19 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
   - compose, tracker и harness-selftest идут только при совпадении `when: glob:` с изменёнными
     файлами: compose - `compose.yaml`, `infra/**`, `scripts/check-compose.mjs`,
     `scripts/compose-rules.mjs`, `.dockerignore`; tracker - `docs/tasks/**`,
-    `docs/00_STATUS.md`; harness-selftest - `.claude/**`. Нет совпадения - гейт молча пропущен,
+    `docs/00_STATUS.md`; harness-selftest - `.claude/**`, корневой `package.json`, манифесты
+    `apps/**/package.json` и `packages/**/package.json`, `apps/**/next.config.*`,
+    `packages/**/next.config.*`, `pnpm-workspace.yaml` (проба графа сборки, E0-01A; `turbo.json`
+    пробы не читают, на нём гейт не выбирается). Нет совпадения - гейт молча пропущен,
     так что exit 0 не значит, что compose или tracker проверены;
-  - test, test:int и build имеют `when: never` и сами не идут вплоть до E0-01A/E0-02A
-    (exit 0 не значит, что тесты и сборка зелёные). Их прогоняют руками:
-    `node .claude/hooks/gates.js --only=test,test:int,build` или напрямую `pnpm test`,
-    `pnpm test:int`, `pnpm build`;
+  - build выбирается по glob (дословно - `rules.sf.json`, гейт `build`):
+    `{apps/web/**,packages/api-client/**,packages/config/**,packages/contracts/**,packages/core/**,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,turbo.json,tsconfig*.json}`
+    - только то, что читает `next build` (E0-01A); правка `apps/api`, `apps/worker`, `packages/db`
+    его не выбирает. Пакет со `scripts.build` и всё, что он читает из workspace, обязаны быть под
+    glob - иначе краснеет harness-selftest (он выбирается и на правке корневого `package.json`, манифестов и `next.config.*`; корневой
+    `scripts.build` обязан быть ровно `turbo run build`);
+  - test и test:int имеют `when: never` и сами не идут вплоть до E0-02A (exit 0 не значит, что тесты зелёные). Их прогоняют руками:
+    `node .claude/hooks/gates.js --only=test,test:int` или напрямую `pnpm test`, `pnpm test:int`;
   - `--list` показывает выбор и причину каждого решения, `--only=<id>,<id>` - подмножество.
 - CI (`.github/workflows/ci.yml`) гоняет `pnpm test`, `pnpm test:int`, `pnpm build` и сборку
   образов отдельными шагами.

@@ -144,8 +144,8 @@
     {
       "id": "build",
       "cmd": "pnpm build",
-      "when": "never",
-      "note": "сборка всех приложений; тяжёлая, но именно она ловит ошибки Next.js и бандла. Стартует как never: до E0-01 нет зависимостей и конфигов Next. Задача E0-01 переводит when -> glob:{apps/**,packages/**,package.json,pnpm-lock.yaml,turbo.json,tsconfig*.json}"
+      "when": "glob:{apps/web/**,packages/api-client/**,packages/config/**,packages/contracts/**,packages/core/**,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,turbo.json,tsconfig*.json}",
+      "note": "сборка turbo run build (по ADR-0005 собирается только apps/web, next build); ловит ошибки Next.js и бандла, в т.ч. импорт @sf/config/server в клиентский код, которого не видит S11 (TECH_DEBT 06.09.2026). Выбирается только на том, что читает сборка web: apps/web/**, пакеты web (api-client, config, contracts, core - зависимости workspace:* и transpilePackages) и корневые package.json, pnpm-workspace.yaml, pnpm-lock.yaml, turbo.json, tsconfig*.json; tsconfig*.json - только корень. apps/api, apps/worker, packages/db, packages/integrations не выбирают его: их сборка не идёт (E0-01A, docs/DECISIONS.md 11.10.2026: glob гейта build по факту чтения next build). Каждый пакет workspace со scripts.build и его транзитивные workspace-зависимости обязаны быть под glob - это проверяет harness-selftest, который выбирается и на корневом package.json, манифестах пакетов, next.config.* в apps/** и packages/** и pnpm-workspace.yaml."
     },
     {
       "id": "no-search-list",
@@ -168,8 +168,8 @@
     {
       "id": "harness-selftest",
       "cmd": "node .claude/hooks/harness-selftest.js",
-      "when": "glob:.claude/**",
-      "note": "самопроверка обвязки: синтаксис хуков, правила, шапки агентов, пути в settings.json, живые пробы замков"
+      "when": "glob:{.claude/**,package.json,apps/**/package.json,packages/**/package.json,apps/**/next.config.*,packages/**/next.config.*,pnpm-workspace.yaml}",
+      "note": "самопроверка обвязки: синтаксис хуков, правила, шапки агентов, пути в settings.json, живые пробы замков. Кроме .claude/** выбирается на корневом package.json (проба требует scripts.build = turbo run build), манифестах пакетов workspace, next.config.* в apps/** и packages/** и pnpm-workspace.yaml: проба графа сборки сверяет их с glob гейта build; turbo.json ни одна проба не читает, на нём не выбирается (E0-01A, docs/DECISIONS.md 11.10.2026)"
     }
   ]
 }

@@ -1,6 +1,6 @@
 # E0. Каркас проекта и инфраструктура — декомпозиция на задачи
 
-_Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_DESIGN.md` §2–§6, §8. Статус эпика: ✅ декомпозирован, реализация ✅ 11.10.2026 (приёмка - § Приёмка). Открыты довески E0-01A, E0-02A, E0-11A, E0-12A-D; тесты и сборка замком коммита не гоняются до E0-01A/E0-02A._
+_Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_DESIGN.md` §2–§6, §8. Статус эпика: ✅ декомпозирован, реализация ✅ 11.10.2026 (приёмка - § Приёмка). Открыты довески E0-02A, E0-11A, E0-12A-D; тесты замком коммита не гоняются до E0-02A._
 
 ## Цель эпика
 
@@ -69,11 +69,11 @@ _Решения 1–6 оформлены как ADR-0005…0010 (E0-13): `docs/a
 
 ### E0-01A. Включить гейт build в rules.sf.json
 
-**Цель:** усилить обвязку так, чтобы любая правка `apps/**`/`packages/**`/корневых конфигов, ломающая `next build`, не уходила в коммит без сборки.
+**Цель:** усилить обвязку так, чтобы любая правка того, что читает сборка web (`apps/web/**`, пакеты web, корневые конфиги), ломающая `next build`, не уходила в коммит без сборки.
 
 **Сделать:**
-- `.claude/hooks/rules.sf.json`: у гейта `build` `when: "never"` → `"glob:{apps/**,packages/**,package.json,pnpm-lock.yaml,turbo.json,tsconfig*.json}"`, текст `note` переписать (сейчас он обещает включение в E0-01 — обещание не выполнено, гейт остался выключен).
-- `.claude/hooks/harness-selftest.js`: две пробы L-008 — на выбор гейта `build` при изменённом файле под glob и на пропуск при изменении только `docs/**`.
+- `.claude/hooks/rules.sf.json`: у гейта `build` `when: "never"` → `"glob:{apps/web/**,packages/api-client/**,packages/config/**,packages/contracts/**,packages/core/**,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,turbo.json,tsconfig*.json}"` (glob сужен до того, что читает `next build`, и дополнен `pnpm-workspace.yaml` - решение техлида 11.10.2026, `DECISIONS.md`, E0-01A; `tsconfig*.json` - только корень), текст `note` переписать (сейчас он обещает включение в E0-01 — обещание не выполнено, гейт остался выключен).
+- `.claude/hooks/harness-selftest.js`: две пробы L-008 — на выбор гейта `build` при изменённом файле под glob и на пропуск при изменении только `docs/**` (а также `apps/api`, `apps/worker`, `packages/db`, вложенных `tsconfig*.json`); третья — все пакеты, которые читает сборка web (`workspace:*` транзитивно и `transpilePackages`), под glob.
 
 **DoD:** `node .claude/hooks/harness-selftest.js` зелёный со включёнными пробами L-008; полный `node .claude/hooks/gates.js` при изменении файлов под glob запускает `build`.
 **Оценка:** 0.1 д. **Зависимости:** E0-01.
