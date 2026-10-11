@@ -134,10 +134,10 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
   - compose, tracker и harness-selftest идут только при совпадении `when: glob:` с изменёнными
     файлами: compose - `compose.yaml`, `infra/**`, `scripts/check-compose.mjs`,
     `scripts/compose-rules.mjs`, `.dockerignore`; tracker - `docs/tasks/**`,
-    `docs/00_STATUS.md`; harness-selftest - `.claude/**`, корневой `package.json`, манифесты
-    `apps/**/package.json` и `packages/**/package.json`, `apps/**/next.config.*`,
-    `packages/**/next.config.*`, `pnpm-workspace.yaml` (проба графа сборки, E0-01A; `turbo.json`
-    пробы не читают, на нём гейт не выбирается). Нет совпадения - гейт молча пропущен,
+    `docs/00_STATUS.md`; harness-selftest - `.claude/**` и файлы проекта, которые читают пробы
+    гейтов build и test:int (манифесты, конфиги сборки и int-тестов, `.env.test`; точный glob -
+    гейт `harness-selftest` в `rules.sf.json`, E0-01A, E0-02A; `turbo.json` пробы не читают, на нём
+    гейт не выбирается). Нет совпадения - гейт молча пропущен,
     так что exit 0 не значит, что compose или tracker проверены;
   - build выбирается по glob (дословно - `rules.sf.json`, гейт `build`):
     `{apps/web/**,packages/api-client/**,packages/config/**,packages/contracts/**,packages/core/**,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,turbo.json,tsconfig*.json}`
@@ -145,8 +145,11 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
     его не выбирает. Пакет со `scripts.build` и всё, что он читает из workspace, обязаны быть под
     glob - иначе краснеет harness-selftest (он выбирается и на правке корневого `package.json`, манифестов и `next.config.*`; корневой
     `scripts.build` обязан быть ровно `turbo run build`);
-  - test и test:int имеют `when: never` и сами не идут вплоть до E0-02A (exit 0 не значит, что тесты зелёные). Их прогоняют руками:
-    `node .claude/hooks/gates.js --only=test,test:int` или напрямую `pnpm test`, `pnpm test:int`;
+  - test идёт всегда; test:int - при правке того, что читают int-тесты: граф int-пакетов, корневые конфиги
+    и `.env.test` (точный glob - гейт `test:int` в `.claude/hooks/rules.sf.json`, E0-02A). test:int нужен поднятый Compose (`docker compose -f infra/docker-compose.yml up -d`):
+    без него гейт красный, и это не повод его выключать. Руками - `pnpm test` и, при поднятом Compose,
+    `pnpm test:int`. `--only` снимает только `never` и сужает набор: glob-гейт test:int без изменённых
+    файлов под своим шаблоном и при `--only=test:int` пропускается с exit 0, тесты при этом не идут;
   - `--list` показывает выбор и причину каждого решения, `--only=<id>,<id>` - подмножество.
 - CI (`.github/workflows/ci.yml`) гоняет `pnpm test`, `pnpm test:int`, `pnpm build` и сборку
   образов отдельными шагами.

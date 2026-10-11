@@ -1,6 +1,6 @@
 # E0. Каркас проекта и инфраструктура — декомпозиция на задачи
 
-_Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_DESIGN.md` §2–§6, §8. Статус эпика: ✅ декомпозирован, реализация ✅ 11.10.2026 (приёмка - § Приёмка). Открыты довески E0-02A, E0-11A, E0-12A-D; тесты замком коммита не гоняются до E0-02A._
+_Дата: 2026-09-05. Источник: `20_TZ_HIGH_LEVEL.md` (E0), `10_SYSTEM_DESIGN.md` §2–§6, §8. Статус эпика: ✅ декомпозирован, реализация ✅ 11.10.2026 (приёмка - § Приёмка). Открыты довески E0-11A, E0-12A-D._
 
 ## Цель эпика
 
@@ -99,11 +99,11 @@ _Решения 1–6 оформлены как ADR-0005…0010 (E0-13): `docs/a
 **Цель:** усилить обвязку так, чтобы правка, ломающая `pnpm test`/`pnpm test:int`, не уходила в коммит без прогона.
 
 **Сделать:**
-- `.claude/hooks/rules.sf.json`: у гейта `test` `when: "never"` → `"always"`; у гейта `test:int` `"never"` → `"glob:{packages/db/**,apps/**}"`; текст `note` переписать под факт.
+- `.claude/hooks/rules.sf.json`: у гейта `test` `when: "never"` → `"always"`; у гейта `test:int` `"never"` → glob по графу int-пакетов + корневые конфиги + `.env.test` (точный glob - гейт `test:int` в `.claude/hooks/rules.sf.json`), а не буква `{packages/db/**,apps/**}` - DECISIONS 11.10.2026 E0-02A (селектор test:int); текст `note` переписать под факт.
 - `.claude/hooks/rules.sf.json`: `note` правила про `.env*` привести к формулировке CLAUDE.md
   темы владельца 1 (исключение для корневых `.env.example`/`.env.test`) - в E0-02 недостижимо
   слоем разрешений сессии.
-- `.claude/hooks/harness-selftest.js`: пробы L-008 на выбор и на пропуск обоих гейтов.
+- `.claude/hooks/harness-selftest.js`: пробы L-008 на выбор обоих гейтов и на пропуск `test:int`; для `test:int` - ещё проба графа: каждый пакет со `scripts['test:int']`, его транзитивные workspace-зависимости, `setupFiles` из конфига `--config` и фикстура `testEnvFilePath` под glob.
 
 **DoD:** `node .claude/hooks/harness-selftest.js` зелёный со включёнными пробами; `node .claude/hooks/gates.js --list` показывает `test` и `test:int` в списке запускаемого.
 **Оценка:** 0.1 д. **Зависимости:** E0-02.

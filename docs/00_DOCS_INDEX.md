@@ -22,13 +22,13 @@ This folder is the living project documentation for the multilingual YouTube Sho
 - `05_CURRENT_STATUS_AND_NEXT_STEPS.md` — fastest project resume/status document; read this first after a break.
 - `10_SYSTEM_DESIGN.md` — engineering system design (RU): stack, topology, queues, data model, integrations.
 - `20_TZ_HIGH_LEVEL.md` — high-level spec (RU): epics E0–E13 with scope, AC, dependencies and decomposition status.
-- `30_E0_TASKS.md` — epic E0 decomposition (RU): 15 tasks (E0-01…E0-13 and E0-01A - build gate on by glob - done; E0-02A - test gates - open), architectural decisions (as ADRs, see `adr/README.md`), acceptance table; five more E0 tasks taken out of review debt (E0-11A, E0-12A…D) live in `TECH_DEBT.md`.
+- `30_E0_TASKS.md` — epic E0 decomposition (RU): 15 tasks (E0-01…E0-13 and E0-01A - build gate on by glob, E0-02A - test gates on - done), architectural decisions (as ADRs, see `adr/README.md`), acceptance table; five more E0 tasks taken out of review debt (E0-11A, E0-12A…D) live in `TECH_DEBT.md`.
 - `31_E1_TASKS.md` — epic E1 (Source Radar) decomposition (RU): 11 tasks, decisions on snapshots/baseline/clustering/quota, schema changes.
 - `32_E2_TASKS.md` … `43_E13_TASKS.md` — decompositions of epics E2–E13 (RU), same structure: goal/AC, decisions, schema changes, 0.5–2-day tasks, acceptance table. Summary table with estimates is in `20_TZ_HIGH_LEVEL.md`.
 
 ## Current state in one paragraph
 
-Epic E0 (foundation) is implemented (2026-10-11); open E0 follow-ups (E0-02A, E0-11A, E0-12A…D) are listed in `30_E0_TASKS.md`, and the live position is in `00_STATUS.md`. Product context:
+Epic E0 (foundation) is implemented (2026-10-11); open E0 follow-ups (E0-11A, E0-12A…D) are listed in `30_E0_TASKS.md`, and the live position is in `00_STATUS.md`. Product context:
 
 Phone verification is complete and Intermediate Features are enabled. Advanced Features are still waiting on Channel History because ID/video verification is unavailable in the current location. Crucially, YouTube Automatic Dubbing is already available and enabled, so development does not need to wait. English is the canonical/master language. While building the app, publish 4–7 real English Shorts per week, test Auto Dubbing, and continue building channel history. Once Advanced Features unlock, test manual custom Multi-Language Audio. The application can now proceed with Source Radar -> Gemini whole-video analysis -> Content DNA -> Idea Inbox -> Research -> Script -> Analytics -> Experiment Engine.
 

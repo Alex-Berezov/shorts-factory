@@ -1,6 +1,6 @@
 {
   "repo": "sf",
-  "note": "Правила репозитория AI Shorts Factory (pnpm + Turborepo, TypeScript strict, Fastify, BullMQ, Drizzle, Next.js). Общие пороги наследуются из rules.common.json; здесь - стандарты по добавленным строкам и гейты. Защищённых путей и парных правок нет (решение владельца 06.09.2026): применённые миграции не редактируются, .env* и pnpm-lock.yaml руками не пишутся - это правила для агента и ревьюеров, а не замки. Идентификаторы правил (S01…) - это то, на что ссылаются ревьюеры в колонке «Правило».",
+  "note": "Правила репозитория AI Shorts Factory (pnpm + Turborepo, TypeScript strict, Fastify, BullMQ, Drizzle, Next.js). Общие пороги наследуются из rules.common.json; здесь - стандарты по добавленным строкам и гейты. Защищённых путей и парных правок нет (решение владельца 06.09.2026): применённые миграции не редактируются, .env* агент не читает и не пишет, кроме корневых .env.example и .env.test - только пока они лежат в корне под этим точным именем и содержат лишь адреса локального Compose и заглушки без настоящих значений, дифф этих файлов проверяет security-ревьюер; pnpm-lock.yaml пишет только pnpm - это правила для агента и ревьюеров, а не замки. Идентификаторы правил (S01…) - это то, на что ссылаются ревьюеры в колонке «Правило».",
   "baseBranch": "main",
   "standards": [
     {
@@ -132,14 +132,14 @@
     {
       "id": "test",
       "cmd": "pnpm test",
-      "when": "never",
-      "note": "Vitest, юнит-тесты без инфраструктуры. Стартует как never: до E0-02 в пакетах нет конфигов Vitest и прогон красный по причине, не относящейся к правке. Задача E0-02 переводит when -> always (с пробой в harness-selftest)"
+      "when": "always",
+      "note": "Vitest, юнит-тесты всех пакетов (turbo run test), без инфраструктуры; запускается на каждом прогоне (E0-02A): юнит-тесты читают и не-исходники (rules.sf.json, ci.yml, infra/docker/**), поэтому выбор не сужается glob; повторы снимает кэш turbo"
     },
     {
       "id": "test:int",
       "cmd": "pnpm test:int",
-      "when": "never",
-      "note": "интеграционные тесты против Postgres/Redis из docker compose; включается (when -> glob:{packages/db/**,apps/**}) задачей E0-02, когда появится скрипт"
+      "when": "glob:{apps/api/**,apps/worker/**,packages/db/**,packages/config/**,packages/core/**,packages/contracts/**,packages/integrations/**,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,turbo.json,tsconfig*.json,.env.test}",
+      "note": "интеграционные тесты apps/api, apps/worker, packages/db (turbo run test:int --concurrency=1, по одному пакету) против Postgres/Redis из infra/docker-compose.yml; без поднятого Compose гейт честно красный (ADR-0010, docs/60_HARNESS.md, «Известные ограничения») - это стоп-условие, а не повод выключать гейт; красный по таймауту хука на холодном стеке (Hook timed out) - перезапуск при поднятом стеке, долг E0-12A (docs/TECH_DEBT.md, E0-02A). Выбирается на графе int-пакетов + корневые конфиги + .env.test (только корень): пакеты со scripts['test:int'], их транзитивные workspace-зависимости (в т.ч. @sf/config/vitest/setup), корневые манифесты и конфиги, фикстура testEnvFilePath; apps/web и packages/api-client его не выбирают (E0-02A, docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «Селектор гейта test:int»). Каждый пакет workspace со scripts['test:int'], его транзитивные workspace-зависимости, setupFiles конфига из --config и testEnvFilePath обязаны быть под glob - это проверяет harness-selftest"
     },
     {
       "id": "build",
@@ -168,8 +168,8 @@
     {
       "id": "harness-selftest",
       "cmd": "node .claude/hooks/harness-selftest.js",
-      "when": "glob:{.claude/**,package.json,apps/**/package.json,packages/**/package.json,apps/**/next.config.*,packages/**/next.config.*,pnpm-workspace.yaml}",
-      "note": "самопроверка обвязки: синтаксис хуков, правила, шапки агентов, пути в settings.json, живые пробы замков. Кроме .claude/** выбирается на корневом package.json (проба требует scripts.build = turbo run build), манифестах пакетов workspace, next.config.* в apps/** и packages/** и pnpm-workspace.yaml: проба графа сборки сверяет их с glob гейта build; turbo.json ни одна проба не читает, на нём не выбирается (E0-01A, docs/DECISIONS.md 11.10.2026)"
+      "when": "glob:{.claude/**,package.json,apps/**/package.json,packages/**/package.json,apps/**/next.config.*,packages/**/next.config.*,pnpm-workspace.yaml,apps/**/vitest.int.config.*,packages/**/vitest.int.config.*,packages/config/src/paths.ts,packages/config/vitest/**,.env.test}",
+      "note": "самопроверка обвязки: синтаксис хуков, правила, шапки агентов, пути в settings.json, живые пробы замков. Кроме .claude/** выбирается на корневом package.json (проба требует scripts.build = turbo run build), манифестах пакетов workspace, next.config.* в apps/** и packages/** и pnpm-workspace.yaml: проба графа сборки сверяет их с glob гейта build; на vitest.int.config.* пакетов, packages/config/src/paths.ts (testEnvFilePath), packages/config/vitest/** (setupFiles) и корневом .env.test (фикстура): проба графа test:int читает их же, и проба требует, чтобы каждый прочитанный ею файл выбирал этот гейт (E0-02A, docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «гейт harness-selftest не выбирается на файлах, которые читает проба графа test:int»); turbo.json ни одна проба не читает, на нём не выбирается (E0-01A, docs/DECISIONS.md 11.10.2026)"
     }
   ]
 }

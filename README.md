@@ -173,8 +173,8 @@ PowerShell unless two variants are shown. All of them run from the repository ro
    Without the stack `pnpm test:int` fails rather than skipping. `pnpm lint`,
    `pnpm typecheck` and `pnpm build` complete the set. The commit lock runs `build` when
    what the web build reads changes - `apps/web/**`, the web packages (`api-client`, `config`,
-   `contracts`, `core`) or the root manifests/configs (E0-01A); until E0-02A lands it
-   does not run `test` or `test:int`: run them by hand. Which gates
+   `contracts`, `core`) or the root manifests/configs (E0-01A); it runs `test` always and
+   `test:int` when what the integration tests read changes, with the stack up (E0-02A). Which gates
    `node .claude/hooks/gates.js` picks, and how to run the rest, is described once, in
    `docs/40_DEV_GUIDE.md`, section «Тесты и гейты» (the guide is in Russian).
 
@@ -335,5 +335,5 @@ E0 (foundation) is done: monorepo, Compose stack, api/worker/web skeletons with 
 cost accounting and the budget guard, CI - acceptance in `docs/30_E0_TASKS.md`, «Приёмка».
 Implementation proceeds epic by epic per `docs/20_TZ_HIGH_LEVEL.md`; the current and next
 tasks are in `docs/00_STATUS.md`.
-Open follow-ups of E0: E0-02A, E0-11A, E0-12A-D. Tests are not run by the
-commit lock until E0-02A lands (run them by hand, see Getting started step 7).
+Open follow-ups of E0: E0-11A, E0-12A-D. The commit lock runs the tests: `test` always,
+`test:int` on changes it reads, with the Compose stack up (see Getting started step 7).

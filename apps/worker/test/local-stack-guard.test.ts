@@ -4,8 +4,8 @@ import { assertLocalTestStack } from "./local-stack-guard.js";
 /**
  * The worker integration fixture deletes usage rows, overwrites the queue
  * switches and obliterates queues. A unit test on purpose: with Compose up the
- * guard is only ever exercised on the happy path, the `test:int` gate is not
- * on yet, and a guard removed by accident would reach a commit green.
+ * guard is only ever exercised on the happy path by `test:int`, so a guard
+ * removed by accident would reach a commit green.
  */
 const LOCAL_DB = "postgresql://sf:sf@localhost:5442/shorts_factory_test";
 const LOCAL_REDIS = "redis://localhost:6389/1";

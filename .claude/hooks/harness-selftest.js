@@ -2,8 +2,8 @@
 'use strict';
 /**
  * harness-selftest.js - самопроверка обвязки. Запускается руками, гейтом `harness-selftest`
- * (rules.sf.json: .claude/**, корневой package.json, манифесты пакетов, next.config.* в apps/**
- * и packages/**, pnpm-workspace.yaml) и установщиком install.ps1.
+ * (rules.sf.json: .claude/** и файлы проекта, которые читают пробы гейтов build и test:int,
+ * перечень - glob гейта) и установщиком install.ps1.
  *
  * Зачем: у обвязки нет ни типов, ни тестов, а сломанный хук ничего не запрещает - его отказ
  * неотличим от разрешения. Поэтому здесь не только синтаксис и разбор правил, но и живые пробы
@@ -180,7 +180,7 @@ function loadSelectGates() {
 
 /**
  * Гейт id из rules.sf.json и runs(file) - выбирает ли его настоящий selectGates на одном
- * изменённом файле (only = null, как в полном прогоне). gates.js загружается в vm один раз
+ * изменённом файле при полном прогоне (без --only). Вызов selectGates в пробах - только здесь. gates.js загружается в vm один раз
  * на весь прогон, проба каждого гейта - тоже. Нет гейта - исключение (красная строка check).
  */
 let loadedSelectGates = null;
@@ -261,9 +261,16 @@ checkGateSelection('compose', {
  * комментарии и пустые строки пропускаются; иная строка внутри packages: и иной шаблон
  * (!, **, другие маски) - исключение, а не молчаливый пропуск.
  * transpile - transpilePackages из next.config.* пакета ([] без next.config).
+ * Снимок один на прогон: пробы build, test:int и harness-selftest видят одни и те же данные;
+ * стабы снимок не правят, а строят копию.
  */
 const NEXT_CONFIGS = ['next.config.ts', 'next.config.mts', 'next.config.js', 'next.config.mjs', 'next.config.cjs'];
+let wsSnapshot = null;
 function workspacePackages() {
+  if (!wsSnapshot) wsSnapshot = readWorkspacePackages();
+  return wsSnapshot;
+}
+function readWorkspacePackages() {
   const text = fs.readFileSync(path.join(ROOT, 'pnpm-workspace.yaml'), 'utf8');
   const patterns = [];
   let inPackages = false;
@@ -297,7 +304,7 @@ function workspacePackages() {
     const pkg = readJson(manifest);
     if (!pkg.name) continue;
     const cfg = NEXT_CONFIGS.map((f) => path.join(ROOT, dir, f)).find((p) => fs.existsSync(p));
-    ws[pkg.name] = { dir, pkg, transpile: cfg ? transpilePackages(fs.readFileSync(cfg, 'utf8'), dir + '/' + path.basename(cfg)) : [] };
+    ws[pkg.name] = { dir, pkg, transpile: cfg ? stringArrayAt(fs.readFileSync(cfg, 'utf8'), 'transpilePackages', dir + '/' + path.basename(cfg), { required: false }) : [] };
   }
   return ws;
 }
@@ -327,38 +334,156 @@ function stripJsComments(src) {
 }
 
 /**
- * Строки массива transpilePackages из next.config (без комментариев). Ключа нет - [].
- * Ключ есть, но значение не массив строковых литералов (переменная, spread, вызов) -
- * исключение: молчаливый [] спрятал бы пакеты, которые читает сборка.
+ * Строки массива по ключу key (`key: ["a", 'b']`) в исходнике конфига без комментариев -
+ * общий разбор transpilePackages (next.config) и setupFiles (конфиг vitest). Ключа нет -
+ * [] при required: false, исключение при required: true. Ключ встречается больше одного раза
+ * или значение не массив строковых литералов (переменная, spread, вызов, одна строка) -
+ * исключение: молчаливый [] или первое из двух вхождений спрятали бы то, что читает гейт.
  */
-function transpilePackages(src, file) {
+function stringArrayAt(src, key, file, opts) {
   const code = stripJsComments(src);
-  if (!/\btranspilePackages\b/.test(code)) return [];
-  const m = /transpilePackages\s*:\s*\[([^\]]*)\]/.exec(code);
+  const hits = code.match(new RegExp('\\b' + key + '\\b', 'g')) || [];
+  if (!hits.length) {
+    if (opts.required) throw new Error(key + ' в ' + file + ' нет - разбери руками');
+    return [];
+  }
+  if (hits.length > 1) throw new Error(key + ' в ' + file + ' встречается ' + hits.length + ' раза - разбери руками');
+  const m = new RegExp('\\b' + key + '\\s*:\\s*\\[([^\\]]*)\\]').exec(code);
   const STR = /"[^"]*"|'[^']*'|`[^`$]*`/g;
   if (!m || m[1].replace(STR, '').replace(/[\s,]/g, '') !== '') {
-    throw new Error('transpilePackages в ' + file + ' не массив строковых литералов - разбери руками');
+    throw new Error(key + ' в ' + file + ' не массив строковых литералов - разбери руками');
   }
   return (m[1].match(STR) || []).map((s) => s.slice(1, -1));
 }
 
 /**
- * Пакеты workspace, сборку которых запускает turbo run build (есть scripts.build), и всё,
+ * Файл конфига vitest из скрипта пакета: значение `--config <файл>` / `--config=<файл>`.
+ * Флага нет - исключение: без него vitest берёт vitest.config.*, и проба сверяла бы не тот
+ * конфиг, которым гоняется скрипт.
+ */
+function vitestConfigOf(script, owner) {
+  const m = /(?:^|\s)--config(?:=|\s+)(\S+)/.exec(String(script || ''));
+  if (!m) throw new Error('скрипт ' + owner + ' не называет конфиг через --config: ' + JSON.stringify(script) + ' - разбери руками');
+  return m[1];
+}
+
+/** Чтение файлов пробой (путь от корня): диск или диск с наложенными стаб-файлами. */
+const DISK = {
+  exists: (rel) => fs.existsSync(path.join(ROOT, rel)),
+  read: (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8'),
+};
+function overlaySource(files) {
+  return {
+    exists: (rel) => Object.prototype.hasOwnProperty.call(files, rel) || DISK.exists(rel),
+    read: (rel) => (Object.prototype.hasOwnProperty.call(files, rel) ? files[rel] : DISK.read(rel)),
+  };
+}
+
+/**
+ * Файлы, которые читает модуль spec, импортированный из каталога fromDir (пути от корня):
+ * для `./…` и `../…` - файл от fromDir (спецификатор `.js` - его `.ts` на диске, как в исходниках
+ * workspace), для `@sf/<пакет>/<подпуть>` - package.json пакета и файл из exports['./<подпуть>'].
+ * Последний элемент - сам модуль. Пакета нет в workspace, нет строки exports, иная форма
+ * спецификатора или файла нет - исключение. who - кто импортирует (в тексте отказа).
+ */
+function moduleReads(spec, fromDir, ws, src, who) {
+  if (spec.startsWith('./') || spec.startsWith('../')) {
+    const rel = path.posix.normalize(fromDir + '/' + spec);
+    if (src.exists(rel)) return [rel];
+    const ts = rel.replace(/\.js$/, '.ts');
+    if (ts !== rel && src.exists(ts)) return [ts];
+    throw new Error(who + ': файла ' + rel + ' нет на диске');
+  }
+  const m = /^(@sf\/[\w-]+)\/(.+)$/.exec(spec);
+  if (!m) throw new Error(who + ': спецификатор ' + spec + ' не разбирается пробой - разбери руками');
+  const dep = ws[m[1]];
+  if (!dep) throw new Error(who + ': ' + m[1] + ' нет в workspace');
+  const target = dep.pkg.exports && dep.pkg.exports['./' + m[2]];
+  if (typeof target !== 'string') throw new Error(who + ': у ' + m[1] + ' нет строки exports["./' + m[2] + '"]');
+  const rel = path.posix.normalize(dep.dir + '/' + target);
+  if (!src.exists(rel)) throw new Error(who + ': файла ' + rel + ' (' + spec + ') нет на диске');
+  return [dep.dir + '/package.json', rel];
+}
+
+/**
+ * Пакеты workspace со scripts[script] - их запускает turbo run <script>.
+ */
+function scriptRoots(ws, script) {
+  return Object.keys(ws).filter((n) => ws[n].pkg.scripts && ws[n].pkg.scripts[script]);
+}
+
+/**
+ * Всё, что читает проба test:int сверх графа пакетов, - и что читают сами int-тесты:
+ * конфиг из --config скрипта пакета, модули его setupFiles (`./` - от каталога конфига),
+ * модуль, из которого setup импортирует testEnvFilePath, и сама фикстура - файл в корне
+ * из `join(repoRoot, "<файл>")`. Setup без импорта testEnvFilePath, иная форма
+ * testEnvFilePath, нет файла - исключение. Возвращает [{ file, why }] без повторов.
+ */
+function intProbeReads(ws, roots, src) {
+  const out = new Map();
+  const add = (file, why) => { if (!out.has(file)) out.set(file, why); };
+  const IMPORT = /\bimport\s*\{([^}]*)\}\s*from\s*(["'])([^"']+)\2/g;
+  for (const name of roots) {
+    const cfg = path.posix.normalize(ws[name].dir + '/' + vitestConfigOf(ws[name].pkg.scripts['test:int'], name));
+    if (!src.exists(cfg)) throw new Error('конфига ' + cfg + ' (--config скрипта test:int ' + name + ') нет на диске');
+    add(cfg, '--config test:int ' + name);
+    for (const spec of stringArrayAt(src.read(cfg), 'setupFiles', cfg, { required: true })) {
+      const files = moduleReads(spec, path.posix.dirname(cfg), ws, src, 'setupFiles ' + name);
+      const setup = files[files.length - 1];
+      for (const f of files) add(f, 'setupFiles ' + name);
+      const imports = Array.from(stripJsComments(src.read(setup)).matchAll(IMPORT))
+        .filter((m) => m[1].split(',').some((n) => n.trim().split(/\s+/)[0] === 'testEnvFilePath'));
+      if (imports.length !== 1) throw new Error('setup ' + setup + ' не берёт testEnvFilePath одним импортом - разбери руками');
+      const mod = moduleReads(imports[0][3], path.posix.dirname(setup), ws, src, 'setup ' + setup);
+      const pathsFile = mod[mod.length - 1];
+      for (const f of mod) add(f, 'testEnvFilePath для ' + setup);
+      const p = /\bexport\s+const\s+testEnvFilePath\s*=\s*join\(\s*repoRoot\s*,\s*(["'])([^"'/\\]+)\1\s*\)/.exec(stripJsComments(src.read(pathsFile)));
+      if (!p) throw new Error('testEnvFilePath в ' + pathsFile + ' не join(repoRoot, "<файл в корне>") - разбери руками');
+      if (!src.exists(p[2])) throw new Error('фикстуры ' + p[2] + ' (testEnvFilePath в ' + pathsFile + ') нет в корне');
+      add(p[2], 'фикстура testEnvFilePath, ' + setup);
+    }
+  }
+  return Array.from(out, ([file, why]) => ({ file, why }));
+}
+
+/**
+ * Стаб для детектора intProbeReads: пакет со scripts['test:int'] в каталоге hostDir, его конфиг
+ * берёт setup из пакета peer (вне glob test:int), setup импортирует testEnvFilePath из соседнего
+ * модуля. Возвращает { ws, roots, src, expect } - expect: setup-файл, который детектор обязан
+ * назвать. Снимок workspace не правится.
+ */
+function intProbeStub(ws, hostDir, peer) {
+  const p = ws[peer];
+  const stubWs = Object.assign({}, ws, {
+    [peer]: Object.assign({}, p, { pkg: Object.assign({}, p.pkg, { exports: { './vitest/selftest-setup': './vitest/selftest-setup.ts' } }) }),
+    '@sf/selftest-stub': { dir: hostDir, pkg: { scripts: { 'test:int': 'vitest run --config vitest.selftest.config.ts' } }, transpile: [] },
+  });
+  const setup = p.dir + '/vitest/selftest-setup.ts';
+  const src = overlaySource({
+    [hostDir + '/vitest.selftest.config.ts']: 'export default { test: { setupFiles: ["' + peer + '/vitest/selftest-setup"] } };',
+    [setup]: 'import { testEnvFilePath } from "./selftest-paths.js";\n',
+    [p.dir + '/vitest/selftest-paths.ts']: 'export const testEnvFilePath = join(repoRoot, ".env.test");\n',
+  });
+  return { ws: stubWs, roots: ['@sf/selftest-stub'], src, expect: setup };
+}
+
+/**
+ * Пакеты workspace, у которых есть scripts[script] (их запускает turbo run <script>), и всё,
  * что они читают: транзитивные workspace-зависимости (dependencies, devDependencies,
  * peerDependencies, optionalDependencies) и transpilePackages. Имена вне workspace
- * (сторонние npm) не учитываются. Возвращает { builders, read, bad } - bad: пакеты,
- * правка которых не выбирает гейт build.
+ * (сторонние npm) не учитываются. Возвращает { roots, read, bad } - bad: пакеты,
+ * правка которых не выбирает гейт (runs - его проба).
  */
-function uncoveredBuildPackages(runs, ws) {
+function uncoveredScriptPackages(runs, ws, script) {
   const DEP_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
   const reads = (entry) => {
     const names = [];
     for (const f of DEP_FIELDS) names.push.apply(names, Object.keys(entry.pkg[f] || {}));
     return names.concat(entry.transpile || []).filter((n) => ws[n]);
   };
-  const builders = Object.keys(ws).filter((n) => ws[n].pkg.scripts && ws[n].pkg.scripts.build);
+  const roots = scriptRoots(ws, script);
   const seen = new Set();
-  const queue = builders.slice();
+  const queue = roots.slice();
   while (queue.length) {
     const name = queue.shift();
     if (seen.has(name)) continue;
@@ -370,7 +495,62 @@ function uncoveredBuildPackages(runs, ws) {
     const dir = ws[name].dir;
     if (!runs(dir + '/package.json') || !runs(dir + '/src/index.ts')) bad.push(name + ' (' + dir + ')');
   }
-  return { builders, read: Array.from(seen), bad };
+  return { roots, read: Array.from(seen), bad };
+}
+
+/**
+ * Проба графа гейта, который гоняет turbo run <script> (extra-строка checkGateSelection):
+ * пакеты workspace со scripts[script], их транзитивные workspace-зависимости и файлы
+ * opts.extraReads(ws, roots, src) ([{ file, why }]) обязаны выбирать гейт.
+ * Детекторы не слепые: стаб-пакет со scripts[script] и peer-зависимостью на opts.stubPeer
+ * (пакет вне glob гейта) обязан дать отказ; при extraReads - и стаб opts.extraStub(ws, hostDir,
+ * stubPeer) (его expect обязан попасть в отказ). opts.label - кто читает, с глаголом (в тексте отказа).
+ */
+function checkScriptGraph(script, opts) {
+  const key = /^\w+$/.test(script) ? 'scripts.' + script : "scripts['" + script + "']";
+  const outside = (runs, reads) => reads.filter((r) => !runs(r.file));
+  return ({ gate, runs }) => {
+    const ws = workspacePackages();
+    const real = uncoveredScriptPackages(runs, ws, script);
+    if (!real.roots.length) return 'ни у одного пакета workspace нет ' + key + ' - гейту ' + gate.id + ' нечего запускать';
+    const extra = opts.extraReads ? opts.extraReads(ws, real.roots, DISK) : [];
+    const bad = real.bad.concat(outside(runs, extra).map((r) => r.file + ' (' + r.why + ')'));
+    if (bad.length) return opts.label + ' вне glob ' + gate.id + ': ' + bad.join(', ') + ' - расширь glob ' + gate.id;
+    if (!ws[opts.stubPeer]) return 'в workspace нет ' + opts.stubPeer + ' - стаб-проба детектора не строится';
+    const hostDir = ws[real.roots[0]].dir;
+    const stub = Object.assign({}, ws, {
+      '@sf/selftest-stub': { dir: hostDir, pkg: { scripts: { [script]: 'x' }, peerDependencies: { [opts.stubPeer]: 'workspace:*' } }, transpile: [] },
+    });
+    if (!uncoveredScriptPackages(runs, stub, script).bad.some((b) => b.startsWith(opts.stubPeer + ' '))) {
+      return 'проба не замечает ' + opts.stubPeer + ' вне glob ' + gate.id + ' в стаб-данных';
+    }
+    if (opts.extraReads) {
+      const s = opts.extraStub(ws, hostDir, opts.stubPeer);
+      if (!outside(runs, opts.extraReads(s.ws, s.roots, s.src)).some((r) => r.file === s.expect)) {
+        return 'проба не замечает ' + s.expect + ' вне glob ' + gate.id + ' в стаб-данных extraReads';
+      }
+    }
+    return { note: script + ': ' + real.roots.join(', ') + '; читает: ' + real.read.join(', ') + (extra.length ? ' и ' + extra.length + ' файлов конфигов' : '') + '; workspace ' + Object.keys(ws).length };
+  };
+}
+
+/**
+ * extra-строка гейта, который гоняет корневой скрипт: cmd гейта gateId - ровно `pnpm <script>`,
+ * scripts[script] корневого package.json - ровно expected. Точное равенство: лишний флаг
+ * (--dry, --filter, --passWithNoTests) выключил бы проверку при зелёном гейте.
+ */
+function rootScriptCheck(gateId, script, expected) {
+  const key = /^\w+$/.test(script) ? 'scripts.' + script : "scripts['" + script + "']";
+  return {
+    name: 'cmd pnpm ' + script + ' и ' + key + ' = ' + expected + ' в корневом package.json',
+    fn: ({ gate }) => {
+      if (gate.cmd !== 'pnpm ' + script) return 'cmd гейта ' + gateId + ' не pnpm ' + script + ': ' + gate.cmd;
+      const pkg = readJson(path.join(ROOT, 'package.json'));
+      const actual = pkg.scripts && pkg.scripts[script];
+      if (actual !== expected) return key + ' в корневом package.json не ' + expected + ': ' + JSON.stringify(actual);
+      return true;
+    },
+  };
 }
 
 // Сборка web (next build, ADR-0005) читает только apps/web и его пакеты; glob гейта
@@ -414,42 +594,95 @@ checkGateSelection('build', {
     'xapps/a.ts',
   ],
   extra: [
-    {
-      name: 'cmd pnpm build и scripts.build = turbo run build в корневом package.json',
-      fn: ({ gate }) => {
-        if (gate.cmd !== 'pnpm build') return 'cmd гейта build не pnpm build: ' + gate.cmd;
-        const pkg = readJson(path.join(ROOT, 'package.json'));
-        if (!pkg.scripts || pkg.scripts.build !== 'turbo run build') {
-          return 'scripts.build в корневом package.json не turbo run build: ' + JSON.stringify(pkg.scripts && pkg.scripts.build);
-        }
-        return true;
-      },
-    },
+    rootScriptCheck('build', 'build', 'turbo run build'),
     {
       name: 'пакеты со scripts.build и всё, что они читают, под glob',
-      fn: ({ runs }) => {
-        const ws = workspacePackages();
-        const real = uncoveredBuildPackages(runs, ws);
-        if (!real.builders.length) return 'ни у одного пакета workspace нет scripts.build - гейт build ничего не собирает';
-        if (real.bad.length) return 'сборка читает пакеты вне glob build: ' + real.bad.join(', ') + ' - расширь glob build';
-        // Детектор не слепой: стаб-пакет со сборкой и peer-зависимостью на @sf/db обязан дать отказ.
-        if (!ws['@sf/db']) return 'в workspace нет @sf/db - стаб-проба детектора не строится';
-        const stub = Object.assign({}, ws, {
-          '@sf/selftest-stub': { dir: ws[real.builders[0]].dir, pkg: { scripts: { build: 'x' }, peerDependencies: { '@sf/db': 'workspace:*' } }, transpile: [] },
-        });
-        if (!uncoveredBuildPackages(runs, stub).bad.some((b) => b.startsWith('@sf/db '))) return 'проба не замечает @sf/db вне glob build в стаб-данных';
-        return { note: 'сборка: ' + real.builders.join(', ') + '; читает: ' + real.read.join(', ') + '; workspace ' + Object.keys(ws).length };
-      },
+      fn: checkScriptGraph('build', { label: 'сборка читает', stubPeer: '@sf/db' }),
     },
   ],
 });
 
-// Пробы гейта build выше читают корневой package.json, манифесты пакетов, next.config.*
-// и pnpm-workspace.yaml: гейт самопроверки обязан выбираться на них, иначе устаревший glob
-// build уйдёт молча. turbo.json ни одна проба не читает - выбор на нём обещал бы сверку,
-// которой нет.
+// Юнит-тесты читают и не-исходники (rules.sf.json, ci.yml, infra/docker/**), поэтому гейт test
+// always: выбор на одном файле не отличает always от glob, правило сверяется прямо (E0-02A, L-014).
+{
+  // файл вне glob всех остальных гейтов: выбор на нём даёт только when always
+  const TEST_RUN = 'docs/30_E0_TASKS.md';
+  check('гейт test: when always', () => {
+    const { gate } = gateProbe('test');
+    return gate.when === 'always' || 'when гейта test не always: ' + gate.when;
+  });
+  check('гейт test: gates.js выбирает его на файле вне всех glob (' + TEST_RUN + ')', () => {
+    const { runs } = gateProbe('test');
+    return runs(TEST_RUN) || 'gates.js не выбирает его на ' + TEST_RUN;
+  });
+  const cmd = rootScriptCheck('test', 'test', 'turbo run test');
+  check('гейт test: ' + cmd.name, () => cmd.fn(gateProbe('test')));
+}
+
+// Int-тесты api, worker, db читают свои пакеты, их зависимости, @sf/config/vitest/setup и
+// корневой .env.test; glob гейта test:int - по факту чтения (docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «Селектор гейта test:int: буква эпика, glob по графу зависимостей или always»).
+checkGateSelection('test:int', {
+  runWhat: 'int-пакетах, их зависимостях, .env.test и корневых конфигах',
+  skipWhat: 'web, api-client, вложенных конфигах и docs',
+  mustRun: [
+    'apps/api/src/index.ts',
+    'apps/api/package.json',
+    'apps/worker/src/index.ts',
+    'apps/worker/package.json',
+    'apps/worker/test/local-stack-guard.test.ts',
+    'packages/db/src/index.ts',
+    'packages/db/package.json',
+    'packages/config/src/index.ts',
+    'packages/config/package.json',
+    'packages/core/src/index.ts',
+    'packages/core/package.json',
+    'packages/contracts/src/index.ts',
+    'packages/contracts/package.json',
+    'packages/integrations/youtube/src/index.ts',
+    'packages/integrations/gemini/package.json',
+    'packages/integrations/tts/src/index.ts',
+    '.env.test',
+    'package.json',
+    'pnpm-workspace.yaml',
+    'pnpm-lock.yaml',
+    'turbo.json',
+    'tsconfig.base.json',
+  ],
+  mustSkip: [
+    'apps/web/src/app/page.tsx',
+    'apps/web/package.json',
+    'packages/api-client/src/index.ts',
+    'docs/30_E0_TASKS.md',
+    'README.md',
+    '.claude/hooks/rules.sf.json',
+    'infra/docker-compose.yml',
+    'scripts/tasks.mjs',
+    'scripts/tsconfig.json',
+    'apps/web/.env.test',
+    'xapps/a.ts',
+    'docs/apps/api/x.ts',
+  ],
+  extra: [
+    rootScriptCheck('test:int', 'test:int', 'turbo run test:int --concurrency=1'),
+    {
+      name: "пакеты со scripts['test:int'], всё, что они читают, конфиги --config, setupFiles и фикстура testEnvFilePath под glob",
+      fn: checkScriptGraph('test:int', {
+        label: 'int-тесты читают',
+        stubPeer: '@sf/api-client',
+        extraReads: intProbeReads,
+        extraStub: intProbeStub,
+      }),
+    },
+  ],
+});
+
+// Проба графа test:int выше читает не только .claude/**, но и файлы проекта (манифесты, конфиги
+// int-тестов, setup, фикстуру): гейт самопроверки обязан выбираться на каждом из них, иначе
+// устаревший glob test:int уйдёт молча. Файлы пробы build (манифесты, конфиги сборки) здесь
+// перечислены как есть, но сверки "каждый прочитанный файл" для build нет - долг E0-12D (docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «гейт harness-selftest не выбирается на файлах, которые читает проба графа test:int»).
+// turbo.json ни одна проба не читает - выбор на нём обещал бы сверку, которой нет.
 checkGateSelection('harness-selftest', {
-  runWhat: '.claude/**, корневом package.json, манифестах пакетов, next.config.*, pnpm-workspace.yaml',
+  runWhat: '.claude/** и файлах проекта, которые читают пробы build и test:int',
   skipWhat: 'исходниках, lockfile, turbo.json и docs',
   mustRun: [
     '.claude/hooks/gates.js',
@@ -464,9 +697,20 @@ checkGateSelection('harness-selftest', {
     'apps/web/next.config.mjs',
     'packages/core/next.config.js',
     'pnpm-workspace.yaml',
+    'apps/api/vitest.int.config.ts',
+    'apps/worker/vitest.int.config.ts',
+    'packages/db/vitest.int.config.ts',
+    'packages/config/src/paths.ts',
+    'packages/config/vitest/setup.ts',
+    '.env.test',
   ],
   mustSkip: [
     'turbo.json',
+    'apps/api/.env.test',
+    'apps/api/vitest.config.ts',
+    'packages/config/src/index.ts',
+    'xapps/api/vitest.int.config.ts',
+    'docs/apps/api/vitest.int.config.ts',
     'apps/web/src/app/page.tsx',
     'packages/core/src/index.ts',
     'pnpm-lock.yaml',
@@ -476,6 +720,20 @@ checkGateSelection('harness-selftest', {
     'scripts/tasks.mjs',
     'xapps/web/package.json',
     'docs/apps/web/package.json',
+  ],
+  extra: [
+    {
+      // файлы берутся тем же intProbeReads, что и в пробе test:int: конфиг из --config с любым
+      // именем, setup-модули, модуль testEnvFilePath, фикстура
+      name: 'его выбирает каждый файл, который читает проба test:int',
+      fn: ({ runs }) => {
+        const ws = workspacePackages();
+        const reads = intProbeReads(ws, scriptRoots(ws, 'test:int'), DISK);
+        const stray = reads.filter((r) => !runs(r.file));
+        if (stray.length) return 'проба test:int читает вне glob harness-selftest: ' + stray.map((r) => r.file + ' (' + r.why + ')').join(', ');
+        return { note: reads.length + ' файлов' };
+      },
+    },
   ],
 });
 
