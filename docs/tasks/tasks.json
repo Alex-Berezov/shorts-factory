@@ -1603,8 +1603,11 @@
       "E0-13"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-10"
+    "status": "done",
+    "added_at": "2026-10-10",
+    "started_at": "2026-10-11",
+    "done_at": "2026-10-11",
+    "note": "Один конверт ошибки api во всех ветках вкл. отказы сокета, лог до пароля без url, строка доступа, логгер до соединений, dev без watch; остаток - TECH_DEBT E0-12B"
   },
   {
     "id": "E1-12",
@@ -1671,5 +1674,31 @@
     "doc": "TECH_DEBT.md",
     "status": "todo",
     "added_at": "2026-10-10"
+  },
+  {
+    "id": "E0-11B",
+    "epic": "E0",
+    "title": "api: классификация отказов зависимостей, дедлайны и отмена проб, параллельная остановка",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-11"
+  },
+  {
+    "id": "E0-11C",
+    "epic": "E0",
+    "title": "worker/core: пульс воркера (строгий ISO, допуск, штамп прежнего процесса), healthcheck функцией, второй SIGINT",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-11"
   }
 ]

@@ -39,3 +39,6 @@ _Добавляется автоматически командами `node scri
 - 2026-10-10 ✅ **E0-13** Документация разработчика, ADR, закрытие эпика — README checked on clean Windows/Linux copies, ADR 0005-0010, developer guide, E0 acceptance closed; strict numeric jobId parts and DLQ timestamp normalisation
 - 2026-10-11 ✅ **E0-01A** Включить гейт build в rules.sf.json — build gate on by web build graph glob; selftest probe checks build graph against glob
 - 2026-10-11 ✅ **E0-02A** Включить гейты test и test:int в rules.sf.json — Гейт test запускается всегда, test:int - по графу int-пакетов; самопроверка обвязки держит граф build и test:int
+- 2026-10-11 ➕ **E0-11B** api: классификация отказов зависимостей, дедлайны и отмена проб, параллельная остановка (добавлена в трекер)
+- 2026-10-11 ➕ **E0-11C** worker/core: пульс воркера (строгий ISO, допуск, штамп прежнего процесса), healthcheck функцией, второй SIGINT (добавлена в трекер)
+- 2026-10-11 ✅ **E0-11A** api/worker: отказы, классификация, до-авторизационный лог — Один конверт ошибки api во всех ветках вкл. отказы сокета, лог до пароля без url, строка доступа, логгер до соединений, dev без watch; остаток - TECH_DEBT E0-12B
