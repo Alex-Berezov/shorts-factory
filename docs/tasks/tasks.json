@@ -1571,9 +1571,11 @@
       "E0-01"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-09-06",
-    "started_at": "2026-10-11"
+    "started_at": "2026-10-11",
+    "done_at": "2026-10-11",
+    "note": "build gate on by web build graph glob; selftest probe checks build graph against glob"
   },
   {
     "id": "E0-02A",
