@@ -9,8 +9,8 @@ import type { Env } from "@sf/config";
  * The last three cover the other secret this service holds: ioredis attaches
  * the command it was running to the error it emits (`err.command = { name,
  * args }`), pino's error serializer copies every own property of an error, and
- * `server.ts` logs the whole Redis error - so a failed `auth` against a Redis
- * with a password would print that password.
+ * `compose-app.ts` logs the whole Redis error - so a failed `auth` against a
+ * Redis with a password would print that password.
  */
 export const REDACTED_LOG_PATHS = [
   "req.headers.authorization",

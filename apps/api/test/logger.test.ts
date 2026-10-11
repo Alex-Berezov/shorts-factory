@@ -1,7 +1,7 @@
 import { type Env, loadEnv } from "@sf/config";
-import { pino } from "pino";
 import { describe, expect, it } from "vitest";
 import { buildLoggerOptions } from "../src/lib/logger.js";
+import { recordingLogger } from "./recording-logger.js";
 
 /** A parsed config, built the way the service builds it - no hand-made object. */
 function envWith(overrides: Record<string, string>): Env {
@@ -33,15 +33,11 @@ describe("buildLoggerOptions", () => {
   });
 
   it("keeps the redis password out of the log", () => {
-    // `server.ts` logs the whole ioredis error, and ioredis hangs the command
-    // it failed on off that error - `auth` carries the password in `args`.
-    const lines: string[] = [];
+    // `compose-app.ts` logs the whole ioredis error, and ioredis hangs the
+    // command it failed on off that error - `auth` carries the password in
+    // `args`.
     const { transport: _unused, ...options } = buildLoggerOptions(envWith({}));
-    const log = pino(options, {
-      write: (line: string) => {
-        lines.push(line);
-      },
-    });
+    const { log, lines } = recordingLogger(options);
     const err = Object.assign(new Error("connection refused"), {
       command: { name: "auth", args: ["sup3r-s3cret"] },
     });

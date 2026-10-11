@@ -97,12 +97,27 @@ describe("worker image", () => {
 });
 
 /**
+ * The command `pnpm dev` runs the api with, read from its manifest as an
+ * argv. Read as a file, not imported: one app does not import another, and
+ * the manifest is among the inputs of this test (`apps/worker/turbo.json`).
+ */
+function apiDevCommand(): string[] {
+  const manifest = ManifestSchema.parse(
+    JSON.parse(readFileSync(`${ROOT}apps/api/package.json`, "utf8")),
+  );
+  return manifest.scripts.dev.split(/\s+/);
+}
+
+/**
  * api and web stop the same way: `docker stop` sends SIGTERM to PID 1, and
  * only node itself in that place closes the server and its connections
- * before the grace period ends in SIGKILL.
+ * before the grace period ends in SIGKILL. The api image runs the very
+ * command `pnpm dev` runs (Р8 E0-11A): the expected argv is the api's own
+ * `scripts.dev`, so a change to either side alone is red here. web has no
+ * dev command of that shape, and its argv is stated as it is.
  */
 describe.each([
-  ["api", ["node", "--import", "tsx", "src/server.ts"]],
+  ["api", apiDevCommand()],
   ["web", ["node", "apps/web/server.js"]],
 ])("%s image", (image, expected) => {
   const instructions = stageInstructions(image, RUNTIME_STAGE);

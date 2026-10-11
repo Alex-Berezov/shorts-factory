@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { type EnvLike, isEnvValueSet } from "./env-file.js";
-import { type Env, EnvSchema } from "./schema.js";
+import {
+  BUILD_LABEL_NAMES,
+  type BuildLabelName,
+  type Env,
+  EnvSchema,
+  isBuildLabel,
+} from "./schema.js";
 
 /** Minimum admin password length once the app runs in production. */
 const PRODUCTION_ADMIN_PASSWORD_MIN = 16;
@@ -56,4 +62,26 @@ const LoadedEnvSchema = EnvSchema.superRefine((env, ctx) => {
  */
 export function loadEnv(source: EnvLike = process.env): Env {
   return LoadedEnvSchema.parse(normalizeValues(source));
+}
+
+/**
+ * The build labels that were set to something that is not a label, and were
+ * therefore read as unset (`buildLabel()` in `schema.ts`).
+ *
+ * The parse itself stays silent on purpose - a cosmetic field must not stop
+ * the service - but silence made `APP_VERSION="1.4.0 (2026-09-08)"` look
+ * exactly like a variable nobody passed: `"version": null` either way. This
+ * is the second half of that answer: the caller that owns a logger writes
+ * which variable was dropped. Names only, never the value - it is whatever
+ * the build system put there. Same source and the same notion of "set" as
+ * `loadEnv`: an empty or blank value is not set, so it is not a rejection.
+ */
+export function rejectedBuildLabels(
+  source: EnvLike = process.env,
+): BuildLabelName[] {
+  const values = normalizeValues(source);
+  return BUILD_LABEL_NAMES.filter((name) => {
+    const value = values[name];
+    return value !== undefined && !isBuildLabel(value);
+  });
 }

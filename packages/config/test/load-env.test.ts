@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { EnvLike } from "../src/env-file.js";
-import { loadEnv } from "../src/load-env.js";
+import { loadEnv, rejectedBuildLabels } from "../src/load-env.js";
 import { repoRoot } from "../src/paths.js";
 import { EnvSchema } from "../src/schema.js";
 import { baseSource, envIssues, issuePaths } from "./helpers.js";
@@ -279,6 +279,49 @@ describe("loadEnv - build fingerprint", () => {
     expect(
       loadEnv(baseSource({ APP_VERSION: "1.4.0-rc.1+build.5" })).APP_VERSION,
     ).toBe("1.4.0-rc.1+build.5");
+  });
+});
+
+describe("rejectedBuildLabels", () => {
+  // The parse reads an unusable label as unset; this is how the dropped value
+  // stays distinguishable from a variable nobody passed.
+  it("names a label that was set to something that is not a label", () => {
+    expect(
+      rejectedBuildLabels(baseSource({ APP_VERSION: "1.4.0 (2026-09-08)" })),
+    ).toEqual(["APP_VERSION"]);
+    expect(
+      rejectedBuildLabels(baseSource({ GIT_COMMIT: "feature/x-abc1234" })),
+    ).toEqual(["GIT_COMMIT"]);
+  });
+
+  it("names both when both were dropped", () => {
+    expect(
+      rejectedBuildLabels(
+        baseSource({ APP_VERSION: "1.4 beta", GIT_COMMIT: "feature/x" }),
+      ),
+    ).toEqual(["APP_VERSION", "GIT_COMMIT"]);
+  });
+
+  it("names nothing when the labels are labels", () => {
+    expect(
+      rejectedBuildLabels(
+        baseSource({ APP_VERSION: "1.4.0-rc.1", GIT_COMMIT: "abc1234-dirty" }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not count an absent, empty or blank value as a rejection", () => {
+    // Unset is what the variable is on every machine that is not a build.
+    expect(rejectedBuildLabels(baseSource({}))).toEqual([]);
+    expect(
+      rejectedBuildLabels(baseSource({ APP_VERSION: "", GIT_COMMIT: "   " })),
+    ).toEqual([]);
+  });
+
+  it("judges the trimmed value, the one the config keeps", () => {
+    expect(
+      rejectedBuildLabels(baseSource({ APP_VERSION: "  1.4.0  " })),
+    ).toEqual([]);
   });
 });
 

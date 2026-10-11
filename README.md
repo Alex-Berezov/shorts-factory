@@ -109,8 +109,8 @@ PowerShell unless two variants are shown. All of them run from the repository ro
    pnpm dev
    ```
 
-   One turbo process starts api on `http://localhost:3001` (`tsx watch`), the worker (no file
-   watcher - see [Worker](#worker)) and web on `http://localhost:3000` (`next dev`; the port
+   One turbo process starts api on `http://localhost:3001` (no file watcher - see [API](#api)),
+   the worker (no file watcher - see [Worker](#worker)) and web on `http://localhost:3000` (`next dev`; the port
    is fixed in `apps/web/package.json`, so stop anything else on 3000 first - the `web`
    container of the full stack, for one: `docker compose stop web`). Open
    `http://localhost:3000/system`: the browser asks for credentials - any user name, the
@@ -218,7 +218,12 @@ name recorded in `migrations/meta/_journal.json`. An applied migration file is n
 
 ## API
 
-`pnpm --filter @sf/api dev` starts Fastify on `API_PORT` (3001 by default). Nothing but
+`pnpm --filter @sf/api dev` starts Fastify on `API_PORT` (3001 by default) - `node --import
+tsx src/server.ts`, the same command the container runs, and no file watcher: `tsx watch`
+takes Ctrl+C for itself, kills the server with `child.kill()` (on Windows that is an outright
+`TerminateProcess`) and follows with SIGKILL five seconds later, so requests in flight were
+cut off and the log never said `shutdown complete`. Restart it by hand after a change -
+Ctrl+C, then the same command. Nothing but
 `/health` is public: the rest of the API is behind basic auth with `ADMIN_PASSWORD`, the user
 name is not checked (send `admin`), and that includes `/docs` and `/openapi.json`.
 
@@ -233,10 +238,12 @@ Every failure comes back in one shape - `{"error":{"code","message","requestId",
 and `requestId` matches the `x-request-id` header of the response (send your own header to
 correlate a call end to end). A domain error keeps its status and its `code` in both ranges,
 so "the provider is down, try later" stays apart from "we have a bug"; the text of one travels
-only in the 4xx range, and a 5xx says the status class and nothing else. Nothing of an
-unexpected error reaches the body: it is logged and answered with `INTERNAL_ERROR`. That shape
-is guaranteed for everything that reached the router; a request Node's own HTTP parser rejects
-before Fastify sees it (400, 408, 431) is answered by the runtime itself, with no `requestId`.
+only in the 4xx range, and a 5xx says the reason phrase of its status and nothing else.
+Nothing of an unexpected error reaches the body: it is logged and answered with
+`INTERNAL_ERROR`. The shape holds for a request Node's own HTTP parser rejects before Fastify
+sees it as well (400 `BAD_REQUEST`, 408 `REQUEST_TIMEOUT`, 431
+`REQUEST_HEADER_FIELDS_TOO_LARGE`): the body carries a generated `requestId`, the same value
+is in `x-request-id`, and the connection is closed after it.
 
 Running it without a repository `.env` - the variables of the process win over the file:
 

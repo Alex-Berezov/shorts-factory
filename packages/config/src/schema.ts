@@ -55,9 +55,23 @@ function buildLabel(): z.ZodType<string | undefined, z.ZodTypeDef, unknown> {
     .string()
     .optional()
     .transform((value) =>
-      value !== undefined && BUILD_LABEL.test(value) ? value : undefined,
+      value !== undefined && isBuildLabel(value) ? value : undefined,
     );
 }
+
+/** Whether a value may be used as a build label (`BUILD_LABEL`). */
+export function isBuildLabel(value: string): boolean {
+  return BUILD_LABEL.test(value);
+}
+
+/**
+ * The variables parsed with `buildLabel()`. Named once so that the report of
+ * what was dropped (`rejectedBuildLabels` in `load-env.ts`) cannot miss a
+ * label added here.
+ */
+export const BUILD_LABEL_NAMES = ["APP_VERSION", "GIT_COMMIT"] as const;
+
+export type BuildLabelName = (typeof BUILD_LABEL_NAMES)[number];
 
 /**
  * Media files live in one place for every package. A relative value is

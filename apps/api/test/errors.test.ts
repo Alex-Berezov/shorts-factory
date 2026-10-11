@@ -10,6 +10,7 @@ import { z } from "zod";
 import type { AppInstance } from "../src/app.js";
 import { errorResponses } from "../src/lib/route-schemas.js";
 import { AUTH_HEADER, buildTestApp, parseErrorBody } from "./helpers.js";
+import { recordingLogger } from "./recording-logger.js";
 
 /** A url with a secret in it, the way a provider error carries one. */
 const LEAKED_URL = "https://www.googleapis.com/youtube/v3?key=super-secret-key";
@@ -33,6 +34,23 @@ const WORDY_MESSAGE = `row rejected${LINE_BREAK}${ESCAPE}[31m${"very ".repeat(10
 const WORDY_CODE = `TIMEOUT${LINE_BREAK}${ESCAPE}[31m${"UP".repeat(100)}`;
 /** The same, short enough to read but still not an identifier. */
 const SPACED_CODE = "connect ETIMEDOUT 142.250.1.1:443";
+/** A `code` the size of a provider answer, with a forged second line. */
+const HUGE_CODE = `${"A".repeat(10_000)}${LINE_BREAK}FORGED_LINE`;
+/**
+ * A short code padded with a run of blanks longer than the logged bound: one
+ * line, once the run collapses into one space, and nothing to cut.
+ */
+const PADDED_CODE = `UPSTREAM${" ".repeat(300)}PADDED`;
+/** The message of the error behind an `AppError`. */
+const ROOT_CAUSE = "socket hang up at the root";
+/** A code with a line break in it, left non-enumerable on the error. */
+const HIDDEN_CODE = `UPSTREAM${LINE_BREAK}HIDDEN`;
+/** A code nothing needs to be done to, but kept where pino does not look. */
+const CLEAN_HIDDEN_CODE = "UPSTREAM_HIDDEN";
+/** The same, behind a getter. */
+const GETTER_CODE = "UPSTREAM_GETTER";
+/** What an object put into `code` says when it is turned into text. */
+const OBJECT_CODE_TEXT = "TEXT_OF_THE_THROWER";
 /** A line separator, a next line and a no-break space: three characters a
  * range check on `0x20` lets through, `JSON.stringify` leaves as they are and
  * a reader of the resulting line breaks on. */
@@ -172,6 +190,105 @@ function registerFailingRoutes(app: AppInstance): void {
 
   app.get("/test/client-leaked-url-code", failing, async () => {
     throw new AppError(LEAKED_URL, "channel id is not a channel id", 400);
+  });
+
+  // A path parameter the router measures before it looks any further: one
+  // over `maxParamLength` (100) is refused with 414 before auth runs.
+  app.get("/test/param/:id", failing, async () => undefined);
+
+  app.get("/test/insufficient-storage", failing, async () => {
+    throw new AppError("DISK_FULL", "render volume is full", 507);
+  });
+
+  app.get("/test/phraseless-server-status", failing, async () => {
+    throw new AppError("EDGE_FAILED", "nothing to say", 599);
+  });
+
+  app.get("/test/huge-code", failing, async () => {
+    // Ten kilobytes of provider output with a line break in it, as `code`.
+    throw new AppError(HUGE_CODE, "upstream answered with a novel", 502);
+  });
+
+  app.get("/test/padded-code", failing, async () => {
+    throw new AppError(PADDED_CODE, "upstream answered with blanks", 502);
+  });
+
+  app.get("/test/caused", failing, async () => {
+    // `details` filled by the thrower and a cause behind it: the two together
+    // are what a `catch` around a provider call produces.
+    throw Object.assign(
+      new ValidationError("upstream rejected the request", {
+        config: { url: LEAKED_URL },
+      }),
+      { cause: new Error(ROOT_CAUSE) },
+    );
+  });
+
+  // `code` is typed `string`, but nothing stops a plain JavaScript caller or
+  // a subclass from leaving something else in it, or from hiding it.
+  app.get("/test/null-code", failing, async () => {
+    const err = new AppError("PLACEHOLDER", "code went missing", 502);
+    Object.defineProperty(err, "code", { value: null });
+    throw err;
+  });
+
+  app.get("/test/numeric-code", failing, async () => {
+    const err = new AppError("PLACEHOLDER", "code is a number", 502);
+    Object.defineProperty(err, "code", { value: 503 });
+    throw err;
+  });
+
+  app.get("/test/hidden-code", failing, async () => {
+    const err = new AppError("PLACEHOLDER", "code is not enumerable", 502);
+    Object.defineProperty(err, "code", {
+      value: HIDDEN_CODE,
+      enumerable: false,
+    });
+    throw err;
+  });
+
+  app.get("/test/clean-hidden-code", failing, async () => {
+    const err = new AppError("PLACEHOLDER", "clean code, not enumerable", 502);
+    Object.defineProperty(err, "code", {
+      value: CLEAN_HIDDEN_CODE,
+      enumerable: false,
+    });
+    throw err;
+  });
+
+  app.get("/test/getter-code", failing, async () => {
+    const err = new AppError("PLACEHOLDER", "clean code behind a getter", 502);
+    Object.defineProperty(err, "code", {
+      get: (): string => GETTER_CODE,
+      enumerable: false,
+    });
+    throw err;
+  });
+
+  app.get("/test/object-code", failing, async () => {
+    // Turning this into text runs a function of the thrower's.
+    const err = new AppError("PLACEHOLDER", "code is an object", 502);
+    Object.defineProperty(err, "code", {
+      value: { toString: (): string => OBJECT_CODE_TEXT },
+    });
+    throw err;
+  });
+
+  app.get("/test/foreign-server-error", failing, async () => {
+    // The shape `@fastify/under-pressure` and http clients produce: a plain
+    // error with a 5xx `statusCode`, a code of its own and an inside message.
+    throw Object.assign(new Error(`overloaded, ${INTERNAL_MESSAGE}`), {
+      statusCode: 503,
+      code: "FST_UNDER_PRESSURE",
+    });
+  });
+
+  app.get("/test/foreign-absurd-status", failing, async () => {
+    throw Object.assign(new Error("redirect elsewhere"), { statusCode: 302 });
+  });
+
+  app.get("/test/phraseless-client-status", failing, async () => {
+    throw Object.assign(new Error("client went away"), { statusCode: 499 });
   });
 }
 
@@ -386,9 +503,97 @@ describe("error handler", () => {
     expect(res.statusCode).toBe(418);
     expect(parseErrorBody(res.payload).error).toMatchObject({
       code: "CLIENT_ERROR",
-      message: "Request failed",
+      message: "I'm a Teapot",
     });
     expect(res.payload).not.toContain("nothing brews here");
+  });
+
+  it("answers a parameter over the length limit with its own code and text", async () => {
+    // The router raises 414 itself (`FST_ERR_MAX_PARAM_LENGTH`); the code and
+    // the text have to name that failure, not the catch-all of the 4xx class.
+    const res = await app.inject({
+      method: "GET",
+      url: `/test/param/${"x".repeat(200)}`,
+    });
+
+    expect(res.statusCode).toBe(414);
+    expect(parseErrorBody(res.payload).error).toMatchObject({
+      code: "URI_TOO_LONG",
+      message: "URI Too Long",
+    });
+  });
+
+  it("says the reason phrase of a 5xx status outside any table", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/test/insufficient-storage",
+      headers: authorized,
+    });
+
+    expect(res.statusCode).toBe(507);
+    expect(parseErrorBody(res.payload).error).toMatchObject({
+      code: "DISK_FULL",
+      message: "Insufficient Storage",
+    });
+  });
+
+  it.each([
+    [
+      "5xx",
+      "/test/phraseless-server-status",
+      599,
+      "EDGE_FAILED",
+      "Internal Server Error",
+    ],
+    [
+      "4xx",
+      "/test/phraseless-client-status",
+      499,
+      "CLIENT_ERROR",
+      "Request failed",
+    ],
+  ])(
+    "says the class of a %s status that has no reason phrase",
+    async (_name, url, status, code, message) => {
+      const res = await app.inject({ method: "GET", url, headers: authorized });
+
+      expect(res.statusCode).toBe(status);
+      expect(parseErrorBody(res.payload).error).toMatchObject({
+        code,
+        message,
+      });
+    },
+  );
+
+  it("keeps the 5xx status of an error that is not ours, and nothing else of it", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/test/foreign-server-error",
+      headers: authorized,
+    });
+
+    // 503 says "back off" to a balancer; collapsed into 500 it says "retry".
+    expect(res.statusCode).toBe(503);
+    expect(parseErrorBody(res.payload).error).toMatchObject({
+      code: "INTERNAL_ERROR",
+      message: "Service Unavailable",
+    });
+    expect(res.payload).not.toContain("FST_UNDER_PRESSURE");
+    expect(res.payload).not.toContain("hunter2");
+  });
+
+  it("answers an error that is not ours with a status outside 4xx-5xx as an internal one", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/test/foreign-absurd-status",
+      headers: authorized,
+    });
+
+    expect(res.statusCode).toBe(500);
+    expect(parseErrorBody(res.payload).error).toMatchObject({
+      code: "INTERNAL_ERROR",
+      message: "Internal Server Error",
+    });
   });
 
   it("answers an AppError with an impossible status as an internal one", async () => {
@@ -547,20 +752,13 @@ describe("error handler", () => {
  * where nobody is watching what ends up in it.
  */
 describe("error log", () => {
-  const lines: string[] = [];
+  const recorder = recordingLogger();
   let app: AppInstance;
 
   beforeAll(async () => {
     app = buildTestApp({
       routes: registerFailingRoutes,
-      logger: {
-        level: "trace",
-        stream: {
-          write: (line: string): void => {
-            lines.push(line);
-          },
-        },
-      },
+      logger: recorder.log,
     });
     await app.ready();
   });
@@ -569,15 +767,17 @@ describe("error log", () => {
     await app.close();
   });
 
-  /** Everything written while one request was handled. */
-  async function logOf(url: string): Promise<string> {
-    lines.length = 0;
-    await app.inject({
-      method: "GET",
-      url,
-      headers: { authorization: AUTH_HEADER },
-    });
-    return lines.join("");
+  /**
+   * Everything written while one request was handled; with the password
+   * unless a case is about the caller who has none.
+   */
+  async function logOf(
+    url: string,
+    headers: Record<string, string> = { authorization: AUTH_HEADER },
+  ): Promise<string> {
+    recorder.clear();
+    await app.inject({ method: "GET", url, headers });
+    return recorder.raw();
   }
 
   it("keeps the secret an AppError carried in details out of the log", async () => {
@@ -592,6 +792,206 @@ describe("error log", () => {
     expect(written).toContain("[omitted]");
   });
 
+  /** The one line the error handler wrote for a request, parsed. */
+  async function failureLineOf(
+    url: string,
+    headers?: Record<string, string>,
+  ): Promise<Record<string, unknown>> {
+    await logOf(url, headers);
+    // Every line of the request, not only the failure ones: an access line or
+    // a second failure line next to it is exactly what must not be there.
+    const written = recorder.entries();
+    expect(written).toHaveLength(1);
+    const entry = written[0] ?? {};
+    expect(["request failed", "request rejected"]).toContain(entry.msg);
+    return entry;
+  }
+
+  /** pino's numeric levels, by the name the decision uses. */
+  const LEVEL = { info: 30, warn: 40, error: 50 } as const;
+
+  it("writes a refused password as a short info line without the error", async () => {
+    // Anyone on the published port can produce this one at any rate: a warn
+    // with the whole error per attempt is what the real failures drown in.
+    const entry = await failureLineOf("/test/boom?probe=caller-typed-text", {
+      authorization: "Basic bm90OnRoZS1wYXNzd29yZA==",
+    });
+
+    expect(entry).toMatchObject({
+      level: LEVEL.info,
+      status: 401,
+      code: "UNAUTHORIZED",
+      method: "GET",
+      routeUrl: "/test/boom",
+    });
+    expect(typeof entry.requestId).toBe("string");
+    expect(entry.err).toBeUndefined();
+    expect(JSON.stringify(entry)).not.toContain("caller-typed-text");
+  });
+
+  it("writes a url the router refused as a short info line without the url", async () => {
+    const entry = await failureLineOf(BAD_URL, {});
+
+    expect(entry).toMatchObject({
+      level: LEVEL.info,
+      status: 400,
+      code: "BAD_REQUEST",
+      method: "GET",
+    });
+    expect(entry.err).toBeUndefined();
+    expect(entry.routeUrl).toBeUndefined();
+    expect(JSON.stringify(entry)).not.toContain(BAD_URL_SUFFIX);
+  });
+
+  it("writes an unknown path tried with the password as a short info line", async () => {
+    // A run of 404 from a client that has the password is worth seeing, and
+    // used to leave nothing behind.
+    const entry = await failureLineOf("/no-such-route-tried");
+
+    expect(entry).toMatchObject({
+      level: LEVEL.info,
+      status: 404,
+      code: "NOT_FOUND",
+      method: "GET",
+    });
+    expect(entry.err).toBeUndefined();
+    expect(JSON.stringify(entry)).not.toContain("no-such-route-tried");
+  });
+
+  it("answers an unknown path without the password with 401 and its line", async () => {
+    const entry = await failureLineOf("/no-such-route-tried", {});
+
+    expect(entry).toMatchObject({ level: LEVEL.info, status: 401 });
+    expect(JSON.stringify(entry)).not.toContain("no-such-route-tried");
+  });
+
+  it("writes a 4xx of a caller with the password as a warn with the error", async () => {
+    const entry = await failureLineOf("/test/not-found");
+
+    expect(entry).toMatchObject({ level: LEVEL.warn, status: 404 });
+    expect(errOf(entry).type).toBe("NotFoundError");
+  });
+
+  it("writes a failure of ours as an error with the type and the stack", async () => {
+    const entry = await failureLineOf("/test/boom");
+    const err = errOf(entry);
+
+    expect(entry).toMatchObject({
+      level: LEVEL.error,
+      status: 500,
+      method: "GET",
+      routeUrl: "/test/boom",
+    });
+    // The id is what ties this line to the client's report of the failure.
+    expect(typeof entry.requestId).toBe("string");
+    expect(err.type).toBe("Error");
+    expect(String(err.stack)).toContain(`Error: ${INTERNAL_MESSAGE}`);
+  });
+
+  /** The `err` object of a parsed line, narrowed to read its fields. */
+  function errOf(entry: Record<string, unknown>): Record<string, unknown> {
+    const err = entry.err;
+    expect(typeof err).toBe("object");
+    return typeof err === "object" && err !== null ? { ...err } : {};
+  }
+
+  it("writes a code of any size as one bounded line", async () => {
+    const entry = await failureLineOf("/test/huge-code");
+    const code = errOf(entry).code;
+
+    // The code that went out is the identifier; the one written down is the
+    // original, cut to a line an operator can read.
+    expect(entry.code).toBe("INTERNAL_ERROR");
+    expect(typeof code).toBe("string");
+    const logged = String(code);
+    expect(logged.length).toBeLessThanOrEqual(259);
+    expect(logged.startsWith("AAAA")).toBe(true);
+    expect(logged.endsWith("...")).toBe(true);
+    expect(logged).not.toContain(LINE_BREAK);
+    expect(recorder.raw()).not.toContain("A".repeat(300));
+  });
+
+  it("bounds a code by the line it makes, not by the text it came from", async () => {
+    // The bound is about what a reader gets: a run of blanks collapses first,
+    // and a code that is short once collapsed is written whole.
+    const entry = await failureLineOf("/test/padded-code");
+
+    expect(errOf(entry).code).toBe("UPSTREAM PADDED");
+  });
+
+  it("answers and writes down an AppError whose code is not a string", async () => {
+    recorder.clear();
+    const res = await app.inject({
+      method: "GET",
+      url: "/test/null-code",
+      headers: { authorization: AUTH_HEADER },
+    });
+
+    // Our envelope, not the payload of Fastify's own handler, which takes over
+    // when ours throws.
+    expect(res.statusCode).toBe(502);
+    expect(parseErrorBody(res.payload).error.code).toBe("INTERNAL_ERROR");
+    const entry = await failureLineOf("/test/null-code");
+    expect(entry).toMatchObject({ level: LEVEL.error, status: 502 });
+    expect(errOf(entry).code).toBe("null");
+  });
+
+  it("writes a numeric code as the number it is", async () => {
+    const entry = await failureLineOf("/test/numeric-code");
+
+    expect(errOf(entry).code).toBe("503");
+  });
+
+  it("writes a code the error kept out of its enumerable properties", async () => {
+    const entry = await failureLineOf("/test/hidden-code");
+
+    // pino walks the enumerable properties only: the bounded copy of the
+    // code has to be one, whatever the original was.
+    expect(errOf(entry).code).toBe("UPSTREAM HIDDEN");
+  });
+
+  it("writes a clean code the error kept out of its enumerable properties", async () => {
+    const entry = await failureLineOf("/test/clean-hidden-code");
+
+    expect(errOf(entry).code).toBe(CLEAN_HIDDEN_CODE);
+  });
+
+  it("writes a clean code the error keeps behind a getter", async () => {
+    const entry = await failureLineOf("/test/getter-code");
+
+    expect(errOf(entry).code).toBe(GETTER_CODE);
+  });
+
+  it("writes a code that is an object by its type, without running it", async () => {
+    const entry = await failureLineOf("/test/object-code");
+
+    expect(entry).toMatchObject({ level: LEVEL.error, status: 502 });
+    expect(errOf(entry).code).toBe("[object]");
+    expect(recorder.raw()).not.toContain(OBJECT_CODE_TEXT);
+  });
+
+  it("keeps the frames of the throw on an error whose details were replaced", async () => {
+    const entry = await failureLineOf("/test/leaky");
+    const stack = String(errOf(entry).stack);
+
+    // The place the handler threw from, not only the name of the failure.
+    expect(stack).toContain("upstream rejected the request");
+    expect(stack).toMatch(/\n\s+at .*errors\.test\.ts:\d+:\d+/);
+  });
+
+  it("keeps the cause of an AppError whose details were replaced", async () => {
+    const entry = await failureLineOf("/test/caused");
+    const err = errOf(entry);
+
+    // pino appends the chain of causes to the message and the stack of the
+    // error it is given; a stand-in without the cause has no chain to append.
+    expect(String(err.message)).toContain(ROOT_CAUSE);
+    expect(String(err.stack)).toContain(`caused by: Error: ${ROOT_CAUSE}`);
+    expect(err.type).toBe("ValidationError");
+    expect(err.details).toBe("[omitted]");
+    expect(recorder.raw()).not.toContain("super-secret-key");
+  });
+
   it("writes the details a caller would have been shown anyway", async () => {
     const written = await logOf("/test/budget");
 
@@ -600,12 +1000,12 @@ describe("error log", () => {
   });
 
   it("logs a request id and a rejection line for a url the router refused", async () => {
-    lines.length = 0;
+    recorder.clear();
     const res = await app.inject({ method: "GET", url: BAD_URL });
 
     // A run of malformed urls is worth seeing; the router answers them on its
     // own and leaves nothing behind unless the reply goes through us.
-    const written = lines.join("");
+    const written = recorder.raw();
     expect(written).toContain(parseErrorBody(res.payload).error.requestId);
     expect(written).toContain("request rejected");
   });

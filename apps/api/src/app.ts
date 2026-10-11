@@ -4,13 +4,14 @@ import { REQUEST_ID_HEADER } from "@sf/contracts";
 import Fastify, {
   type FastifyBaseLogger,
   type FastifyInstance,
-  type FastifyServerOptions,
   type RawServerDefault,
 } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import type { AppDeps } from "./deps.js";
+import { AccessLogController } from "./lib/error-log.js";
 import { registerAuth } from "./plugins/auth.js";
 import {
+  clientErrorHandler,
   frameworkErrorHandler,
   registerErrorHandler,
 } from "./plugins/error-handler.js";
@@ -48,13 +49,16 @@ export interface BuildAppOptions {
    */
   adminPassword: string;
   /**
-   * Required, with no default: the service passes `buildLoggerOptions(env)`
-   * and a test passes `false`. A default of `true` would give pino Fastify's
-   * own settings and none of our `redact` paths, so the next caller that
-   * forgot the option would quietly log the `authorization` header - the admin
-   * password in base64 - the first time something dumps request headers.
+   * Required, with no default: the service passes the pino instance it built
+   * from `buildLoggerOptions(env)` before it opened a single connection
+   * (`compose-app.ts`), and a test passes `false` or a pino of its own. There
+   * is deliberately no way to ask for Fastify's default logger: `true` would
+   * give pino Fastify's own settings and none of our `redact` paths, so the
+   * next caller that forgot the option would quietly log the `authorization`
+   * header - the admin password in base64 - the first time something dumps
+   * request headers.
    */
-  logger: NonNullable<FastifyServerOptions["logger"]>;
+  logger: FastifyBaseLogger | false;
 }
 
 /**
@@ -81,7 +85,11 @@ function suppliedRequestId(req: IncomingMessage): string | undefined {
  */
 export function buildApp(deps: AppDeps, options: BuildAppOptions): AppInstance {
   const app = Fastify({
-    logger: options.logger,
+    // `logger` and `loggerInstance` are mutually exclusive in Fastify 5, and
+    // the instance is the one the connections already write to.
+    ...(options.logger === false
+      ? { logger: false }
+      : { loggerInstance: options.logger }),
     // The header is read here rather than through `requestIdHeader`, which
     // takes the value as it comes: a caller that already has a correlation id
     // keeps it if it looks like one, everyone else - and anyone being creative
@@ -104,7 +112,25 @@ export function buildApp(deps: AppDeps, options: BuildAppOptions): AppInstance {
     // before the hook above and without a log line. The handler lives with
     // the other one, in `plugins/error-handler.ts`.
     frameworkErrors: frameworkErrorHandler,
+    // The same for the failures Node raises on the socket before there is a
+    // request to route - oversized headers, a timeout, bytes that are not
+    // HTTP: Fastify's default answers them in its own shape and logs them at
+    // `trace`.
+    clientErrorHandler,
+    // Fastify's own pair of lines per request (`incoming request`, `request
+    // completed`) is written before the `onRequest` hooks run, so it cannot
+    // know whether the caller gave the password, and it carries the requested
+    // url - whatever an anonymous client typed - along with the remote
+    // address. The controller drops the pair and keeps Fastify's lines about
+    // a response that broke or an error handler that threw, without the url;
+    // the access line of the service is written by the same controller, once
+    // the response is out (docs/DECISIONS.md, Р10 and Д1 E0-11A).
+    logController: new AccessLogController(),
   }).withTypeProvider<ZodTypeProvider>();
+
+  // Read and set by the controller above and by the error log
+  // (`lib/error-log.ts`), whatever else is registered.
+  app.decorateRequest("failureLogged", false);
 
   app.addHook("onSend", (request, reply, payload, done) => {
     reply.header(REQUEST_ID_HEADER, request.id);

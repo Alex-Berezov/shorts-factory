@@ -33,7 +33,7 @@ export const env: Env = loadEnv();
 /** Operational limits derived from the current env. */
 export const limits: Limits = buildLimits(env);
 
-export { loadEnv } from "./load-env.js";
+export { loadEnv, rejectedBuildLabels } from "./load-env.js";
 export { buildLimits } from "./limits.js";
-export type { Env } from "./schema.js";
+export type { BuildLabelName, Env } from "./schema.js";
 export type { Limits } from "./limits.js";

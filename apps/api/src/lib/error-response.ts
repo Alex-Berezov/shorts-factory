@@ -1,37 +1,25 @@
 import type { ErrorBody, ErrorDetailItem } from "@sf/contracts";
 import { type AppError, BudgetExceededError, ValidationError } from "@sf/core";
 import { z } from "zod";
+import type { MappedError } from "./error-mapping.js";
 
 /**
- * What a caller of `buildErrorBody` has in hand. The wire shape itself -
- * `ErrorBody` - is declared in `@sf/contracts` and shared with the client;
- * this is the input side of it, where `details` is always stated and often
- * `undefined`.
- */
-export interface ErrorBodyInput {
-  code: string;
-  message: string;
-  requestId: string;
-  /**
-   * Required and often `undefined`: every caller states what it has, and the
-   * decision what that means for the payload is made in one place below.
-   */
-  details: unknown;
-}
-
-/**
- * The one place that decides what an absent `details` looks like on the wire:
- * the field is attached only when there is something to attach.
+ * The envelope of one failure: what `mapError` and its siblings decided, with
+ * the id of the request it belongs to. The one function every answer of the
+ * error handlers is built with, so the shape of the envelope is written once.
+ *
+ * It is also the one place that decides what an absent `details` looks like on
+ * the wire: the field is attached only when there is something to attach.
  * `exactOptionalPropertyTypes` forbids assigning `undefined` to an optional
  * property, and an explicit `"details": null` in the payload would make every
  * client handle a third state.
  */
-export function buildErrorBody(input: ErrorBodyInput): ErrorBody {
-  const { code, message, requestId } = input;
-  if (input.details === undefined) {
+export function errorBodyOf(mapped: MappedError, requestId: string): ErrorBody {
+  const { code, message } = mapped;
+  if (mapped.details === undefined) {
     return { error: { code, message, requestId } };
   }
-  return { error: { code, message, requestId, details: input.details } };
+  return { error: { code, message, requestId, details: mapped.details } };
 }
 
 /**
@@ -68,8 +56,8 @@ export function toDetailItems(issues: unknown): ErrorDetailItem[] | undefined {
  * into the field (docs/TECH_DEBT.md, 07.09.2026). Serializing the field as it
  * is would publish that; instead each error class states what of it is
  * describable to a caller. The rest is not written down either - the log line
- * keeps a marker in place of the field (`logError` in
- * `src/plugins/error-handler.ts`), because the same value would reach the same
+ * keeps a marker in place of the field (`loggableError` in
+ * `src/lib/error-log.ts`), because the same value would reach the same
  * disk:
  *
  * - `ValidationError` - the list of failed fields, and only when `details`

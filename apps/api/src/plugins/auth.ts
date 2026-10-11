@@ -25,6 +25,18 @@ import type {
  */
 export const PUBLIC_ROUTES: ReadonlySet<string> = new Set(["/health"]);
 
+declare module "fastify" {
+  interface FastifyRequest {
+    /**
+     * Whether the caller gave the admin password. `false` on a public route,
+     * on a failure raised before the check ran (the router's own, the socket's)
+     * and on a rejected password: the error log writes what happened to such
+     * a request without the error object (`lib/error-log.ts`).
+     */
+    authenticated: boolean;
+  }
+}
+
 /** Realm shown by the browser prompt. */
 const REALM = "shorts-factory";
 
@@ -83,6 +95,8 @@ export function registerAuth(app: FastifyInstance, options: AuthOptions): void {
     },
   });
 
+  app.decorateRequest("authenticated", false);
+
   app.addHook("onRequest", (request, reply, done) => {
     if (
       request.routeOptions.url !== undefined &&
@@ -93,6 +107,11 @@ export function registerAuth(app: FastifyInstance, options: AuthOptions): void {
     }
 
     const authenticate: BasicAuthHook = app.basicAuth;
-    authenticate.call(app, request, reply, done);
+    authenticate.call(app, request, reply, (err?: Error) => {
+      if (err === undefined) {
+        request.authenticated = true;
+      }
+      done(err);
+    });
   });
 }

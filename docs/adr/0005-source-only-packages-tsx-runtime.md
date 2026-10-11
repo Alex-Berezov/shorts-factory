@@ -16,8 +16,8 @@
   (в `package.json` каждого) и нет скрипта `build`. Потребитель получает исходники.
 - **api, worker и CLI `@sf/db` исполняются через `tsx`, без шага компиляции**, одинаково
   в разработке и в образе:
-  - `apps/api`: `dev` = `tsx watch src/server.ts` (`apps/api/package.json:7`), в образе
-    `CMD ["node", "--import", "tsx", "src/server.ts"]` (`infra/docker/api.Dockerfile:56`);
+  - `apps/api`: `dev` = `node --import tsx src/server.ts` (`apps/api/package.json:7`), в образе
+    тот же запуск - `CMD ["node", "--import", "tsx", "src/server.ts"]` (`infra/docker/api.Dockerfile:56`);
   - `apps/worker`: `dev` = `node --import tsx src/index.ts` (`apps/worker/package.json:7`),
     в образе тот же запуск (`infra/docker/worker.Dockerfile:36`);
   - `packages/db`: `db:migrate`/`db:seed` = `tsx src/cli/*.ts`, в образе `migrate`
@@ -30,6 +30,9 @@
 - **Воркер запускается без watch** (`docs/DECISIONS.md`, 10.09.2026, E0-08): перезапуск
   по сохранению файла убивает активную джобу, а `tsx watch` добивает дочерний процесс раньше,
   чем истекает 25-секундный дедлайн мягкой остановки. Подробно - `README.md`, § Worker.
+- **api тоже запускается без watch** (`docs/DECISIONS.md`, 11.10.2026, Р8 E0-11A): `tsx watch`
+  забирает Ctrl+C себе и обрывает запросы в полёте до мягкого закрытия Fastify. Подробно -
+  `README.md`, § API; замок - `apps/api/test/dev-command.test.ts`.
 - **`apps/web` компилирует пакеты сам**: `transpilePackages: ["@sf/config", "@sf/api-client",
   "@sf/contracts", "@sf/core"]` и `experimental.extensionAlias` в `apps/web/next.config.ts`
   (механизм и почему нужны обе настройки - ADR-0001). `pnpm build` собирает только web

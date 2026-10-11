@@ -79,6 +79,20 @@ describe("error codes", () => {
     expect(CLIENT_ERROR_CODES[404]).toBe(new NotFoundError("route").code);
   });
 
+  it("names the status the router refuses an oversized parameter with", () => {
+    // `FST_ERR_MAX_PARAM_LENGTH` is a 414; without its own entry it reaches a
+    // client as the catch-all `CLIENT_ERROR`.
+    expect(CLIENT_ERROR_CODES[414]).toBe("URI_TOO_LONG");
+  });
+
+  it("names the statuses Node refuses a request with on the socket", () => {
+    // A request that took too long to arrive and headers over the size limit:
+    // the api answers both itself (`clientErrorHandler`), and without their
+    // own entries they would reach a client as `CLIENT_ERROR`.
+    expect(CLIENT_ERROR_CODES[408]).toBe("REQUEST_TIMEOUT");
+    expect(CLIENT_ERROR_CODES[431]).toBe("REQUEST_HEADER_FIELDS_TOO_LARGE");
+  });
+
   it("gives every status of the table a distinct code", () => {
     const codes = Object.values(CLIENT_ERROR_CODES);
 

@@ -40,9 +40,8 @@ export {
   VALIDATION_ERROR_CODE,
 };
 
-/** Code and message every unmapped failure is reported with. */
+/** Code every unmapped failure is reported with. */
 export const INTERNAL_ERROR_CODE = "INTERNAL_ERROR";
-export const INTERNAL_ERROR_MESSAGE = "Internal Server Error";
 /** Code of a 4xx whose status is not in the table below. */
 export const CLIENT_ERROR_CODE = "CLIENT_ERROR";
 
@@ -61,10 +60,13 @@ export const CLIENT_ERROR_CODES: Readonly<Record<number, string>> = {
   404: NOT_FOUND_ERROR_CODE,
   405: "METHOD_NOT_ALLOWED",
   406: "NOT_ACCEPTABLE",
+  408: "REQUEST_TIMEOUT",
   409: "CONFLICT",
   413: "PAYLOAD_TOO_LARGE",
+  414: "URI_TOO_LONG",
   415: "UNSUPPORTED_MEDIA_TYPE",
   429: "TOO_MANY_REQUESTS",
+  431: "REQUEST_HEADER_FIELDS_TOO_LARGE",
 };
 
 /**
