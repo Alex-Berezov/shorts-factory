@@ -38,3 +38,4 @@ _Добавляется автоматически командами `node scri
 - 2026-10-10 ✅ **E0-12** CI: сервисы Postgres/Redis, кэш, интеграционные тесты, сборка образов — CI с Postgres/Redis, int-тестами, гейтами и сборкой четырёх образов с пробой; зелёный на main и в PR
 - 2026-10-10 ✅ **E0-13** Документация разработчика, ADR, закрытие эпика — README checked on clean Windows/Linux copies, ADR 0005-0010, developer guide, E0 acceptance closed; strict numeric jobId parts and DLQ timestamp normalisation
 - 2026-10-11 ✅ **E0-01A** Включить гейт build в rules.sf.json — build gate on by web build graph glob; selftest probe checks build graph against glob
+- 2026-10-11 ✅ **E0-02A** Включить гейты test и test:int в rules.sf.json — Гейт test запускается всегда, test:int - по графу int-пакетов; самопроверка обвязки держит граф build и test:int

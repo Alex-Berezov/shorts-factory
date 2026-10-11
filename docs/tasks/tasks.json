@@ -1587,9 +1587,11 @@
       "E0-02"
     ],
     "doc": "30_E0_TASKS.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-09-06",
-    "started_at": "2026-10-11"
+    "started_at": "2026-10-11",
+    "done_at": "2026-10-11",
+    "note": "Гейт test запускается всегда, test:int - по графу int-пакетов; самопроверка обвязки держит граф build и test:int"
   },
   {
     "id": "E0-11A",
