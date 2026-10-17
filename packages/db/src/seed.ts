@@ -8,9 +8,10 @@ import { appSetting } from "./schema/system.js";
  * One switch per queue of the shared registry. All of them start enabled:
  * money and the channel are guarded by the budget guard (E0-09), the hard caps
  * of §8 and by publishing being an explicit operator action, not by these
- * switches.
+ * switches. Exported for the integration fixture (`@sf/db/test-support/fixture`),
+ * which seeds the same defaults, and kept out of the package root.
  */
-function defaultQueueSwitches(): Record<string, boolean> {
+export function defaultQueueSwitches(): Record<string, boolean> {
   return Object.fromEntries(QUEUE_NAMES.map((name) => [name, true]));
 }
 

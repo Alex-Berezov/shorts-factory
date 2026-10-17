@@ -173,6 +173,7 @@ shorts-factory/
 ├── packages/
 │   ├── core/       # доменные типы, Zod-схемы (ContentDNA, Idea, Script...), чистая бизнес-логика скоринга
 │   ├── db/         # Drizzle-схема, миграции, репозитории, учёт расхода: `createUsageLogger`, `createBudgetGuard` (E0-09)
+│   │   └── test-support/ # общая тестовая обвязка int-наборов: страж стека, фикстура базы (`@sf/db/test-support/*`, только из тестов; ADR-0011)
 │   ├── config/     # типизированный .env (Zod), константы квот/бюджета
 │   ├── contracts/  # Zod-схемы запросов/ответов API, общие для api и web (E0-07)
 │   ├── api-client/ # типизированный fetch-клиент по контрактам (E0-07)
@@ -183,6 +184,9 @@ shorts-factory/
 │       └── tts/      # интерфейс TtsProvider + адаптеры провайдеров
 ├── infra/          # docker-compose.yml (postgres+redis, dev), docker-compose.app.yml (migrate/api/worker/web), docker/*.Dockerfile, scripts/backup.sh
 ├── scripts/        # гейты репозитория: check-no-search-list, check-compose (+ compose-rules), probe-image (проба образа в job `docker-build`), трекер задач
+├── test/           # корневой vitest-проект: тесты репозитория вне пакетов (`pnpm test:repo`, ADR-0011)
+├── vitest.preset.ts        # общий пресет vitest: каждый `vitest*.config.ts` пакета - тонкий вызов в него (ADR-0011)
+├── vitest.repo.config.mts  # конфиг корневого проекта `test/`
 ├── compose.yaml    # полный стек: `docker compose up --build` из корня, include двух файлов infra/ (E0-11)
 └── docs/           # проектная документация (этот файл, ТЗ и исходные 01–06)
 ```
@@ -198,7 +202,7 @@ shorts-factory/
 у `@sf/config` (ADR-0001). Импорт клиента из клиентского компонента web — ошибка сборки,
 а не пароль в браузерном чанке.
 
-Единственное исключение: `packages/db/src/cli/**`, `packages/db/test/**` и `packages/db/vitest*.config.ts` импортируют `@sf/config`, чтобы взять `DATABASE_URL` (команды `db:migrate`, `db:seed`, тесты пакета и их конфиги, включая `setupFiles` в `vitest.int.config.ts`). Библиотечная часть `@sf/db` (`client`, `migrate`, `seed`, `repos`, `schema`) конфигурации не знает и принимает подключение параметром — см. `docs/adr/0002-db-connection-and-cli-config.md`.
+Единственное исключение: `packages/db/src/cli/**`, `packages/db/test/**`, `packages/db/test-support/**` и `packages/db/vitest*.config.ts` импортируют `@sf/config`, чтобы взять `DATABASE_URL` (команды `db:migrate`, `db:seed`, тесты пакета и их конфиги, включая `setupFiles` в `vitest.int.config.ts`, и фикстура int-наборов `test-support/fixture.ts`, которую через подпуть `@sf/db/test-support/fixture` берут и int-тесты api/worker - ADR-0011). `test-support/**` импортируется только из тестов; из `src/**` любого пакета - нарушение (замок - E0-12D). Библиотечная часть `@sf/db` (`client`, `migrate`, `seed`, `repos`, `schema`) конфигурации не знает и принимает подключение параметром — см. `docs/adr/0002-db-connection-and-cli-config.md`.
 
 ---
 

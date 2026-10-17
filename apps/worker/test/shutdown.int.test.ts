@@ -10,9 +10,9 @@ import {
   openTestDb,
   openTestRedis,
   seedQueueSwitches,
-  testLogger,
   waitFor,
 } from "./helpers.int.js";
+import { silentLogger } from "./recording-logger.js";
 
 /**
  * The half of the DoD a signal cannot be sent for on Windows: `Ctrl+C` must
@@ -49,7 +49,7 @@ beforeAll(async () => {
     env,
     db,
     redis,
-    log: testLogger(),
+    log: silentLogger(),
     processors: { "system.smoke": slowJob },
     switchIntervalMs: 60_000,
   });

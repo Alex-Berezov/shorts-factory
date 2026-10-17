@@ -1,9 +1,3 @@
-import { configDefaults, defineConfig } from "vitest/config";
+import { unitTestConfig } from "../../../vitest.preset.js";
 
-export default defineConfig({
-  test: {
-    environment: "node",
-    include: ["test/**/*.test.ts", "src/**/*.test.ts"],
-    exclude: [...configDefaults.exclude, "**/*.int.test.ts"],
-  },
-});
+export default unitTestConfig();

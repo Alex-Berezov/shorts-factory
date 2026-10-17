@@ -3,6 +3,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { closeDb, createDb } from "../src/client.js";
 import { pingDb } from "../src/health.js";
+import { TEST_STACK } from "../test-support/stack-guard.js";
 
 /**
  * Talks to the real Postgres from `infra/docker-compose.yml` (test database
@@ -17,7 +18,7 @@ beforeAll(async () => {
   // Gates the whole file: a future truncate/seed in this suite must never
   // run against anything but the isolated test database.
   const rows = await sql`SELECT current_database() AS name`;
-  expect(rows[0]?.name).toBe("shorts_factory_test");
+  expect(rows[0]?.name).toBe(TEST_STACK.database);
 });
 
 afterAll(async () => {

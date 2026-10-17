@@ -1,45 +1,40 @@
 import { env } from "@sf/config";
-import { QUEUE_NAMES, QUEUE_SWITCHES_KEY, type QueueName } from "@sf/core";
-import { type Db, appSettingRepo, createDb } from "@sf/db";
+import { QUEUE_SWITCHES_KEY, type QueueName } from "@sf/core";
+import { type Db, appSettingRepo } from "@sf/db";
+import { defaultQueueSwitches } from "@sf/db/test-support/fixture";
+import { suiteRedisUrl } from "@sf/db/test-support/stack-guard";
 import { Queue } from "bullmq";
 import type { Redis } from "ioredis";
-import { pino } from "pino";
 import { createRedis } from "../src/lib/redis.js";
-import { assertLocalTestStack } from "./local-stack-guard.js";
+
+export { openTestDb } from "@sf/db/test-support/fixture";
 
 /**
  * Shared setup for the worker integration tests.
  *
- * The test Redis is `db 1` of the local Compose (`.env.test`), which this
- * suite has to itself - the integration tests of the api were moved to `db 2`
- * exactly so that a pause of theirs could not reach a queue this one is taking
- * jobs from (`apps/api/test/local-stack-guard.ts`). BullMQ keys still survive
- * a run that crashed, so every file wipes the queues it uses both before and
- * after itself: a leftover job from a previous run would make the next one
- * green for the wrong reason - or red for one.
+ * The test Redis is the database `.env.test` names, which this suite has to
+ * itself - the integration tests of the api work in a database of their own
+ * exactly so that a pause of theirs could not reach a queue this one is
+ * taking jobs from (both numbers: `TEST_REDIS_DATABASE_OF` in
+ * `@sf/db/test-support/stack-guard`). BullMQ keys still survive a run that
+ * crashed, so every file wipes the queues it uses both before and after
+ * itself: a leftover job from a previous run would make the next one green
+ * for the wrong reason - or red for one.
  *
  * Everything below is destructive - `obliterate`, deletes from
  * `api_usage_log`, an overwrite of the switch row - so the stack is checked
- * before anything else in this module runs, and it is checked here because
- * every integration file of this app goes through it (including the ones that
- * write their own SQL). A `.env.test` pointing at a tunnelled host or at the
- * development database is refused rather than obeyed.
+ * before the first file of the run, by the entry check the preset gives this
+ * run (`entryCheck: "migrated-stack"` in `vitest.int.config.ts`): both URLs of
+ * `.env.test` - Redis too, which the processes this suite forks read as is -
+ * then that `@sf/db`'s integration run has migrated the database (this suite
+ * does not migrate it). A file that forgets this module is still behind it;
+ * the connections are opened here all the same, and check their URL once
+ * more, so that a file written by copying another inherits the guard.
  */
-assertLocalTestStack(env.DATABASE_URL, env.REDIS_URL);
 
 /** Connection for a test file; the caller closes it. */
 export function openTestRedis(): Redis {
-  return createRedis(env.REDIS_URL);
-}
-
-/** Database handle for a test file; the caller closes it with `closeDb`. */
-export function openTestDb(): Db {
-  return createDb(env.DATABASE_URL, { max: 2 });
-}
-
-/** Logger that keeps the test output readable but still exists. */
-export function testLogger() {
-  return pino({ level: "silent" });
+  return createRedis(suiteRedisUrl(env.REDIS_URL, "worker"));
 }
 
 /**
@@ -62,17 +57,18 @@ export async function obliterateQueues(
 }
 
 /**
- * Writes the switch row the way `pnpm db:seed` would, plus the overrides a
- * test needs. Written rather than assumed: the integration tests of `@sf/db`
- * reset the same database and leave whatever their last case wrote, and a
- * worker refuses to start without this row.
+ * Writes the switch row the way `pnpm db:seed` would - from the same
+ * `defaultQueueSwitches` - plus the overrides a test needs. Written rather
+ * than assumed: the integration tests of `@sf/db` reset the same database and
+ * leave whatever their last case wrote, and a worker refuses to start without
+ * this row.
  */
 export async function seedQueueSwitches(
   db: Db,
   overrides: Record<string, boolean> = {},
 ): Promise<void> {
   await appSettingRepo.set(db, QUEUE_SWITCHES_KEY, {
-    ...Object.fromEntries(QUEUE_NAMES.map((name) => [name, true])),
+    ...defaultQueueSwitches(),
     ...overrides,
   });
 }

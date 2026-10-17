@@ -44,7 +44,8 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
    - юнит api - `apps/api/test/<модуль>.test.ts`: `buildTestApp()` и `TEST_PASSWORD`/`AUTH_HEADER`
      из `apps/api/test/helpers.ts`, запросы через `app.inject`; кейс без пароля → 401;
    - интеграционный - `apps/api/test/<модуль>.int.test.ts`, если роут читает или пишет БД/Redis
-     (образец - `apps/api/test/system-status.int.test.ts`, стражи - `local-stack-guard.ts`);
+     (образец - `apps/api/test/system-status.int.test.ts`; страж стека и Redis-база набора - через
+     `apps/api/test/helpers.int.ts`, общий страж - `@sf/db/test-support/stack-guard`, ADR-0011);
    - клиент - `packages/api-client/test/client.test.ts`: фейковый `fetch` из опций клиента,
      кейс на каждое состояние ответа, включая штатные не-2xx (L-013).
 
@@ -118,16 +119,22 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
 6. **Время** сравнивается с тем же источником, что штамп: колонка с `defaultNow()` - значит
    `now()` базы в запросе, а не `new Date()` процесса (урок L-009).
 7. **Тесты** - `packages/db/test/<таблица>.int.test.ts` против `shorts_factory_test` (хелперы -
-   `packages/db/test/helpers.int.ts`); перечисление, совпадающее с union в `@sf/core`, сторожит
+   `packages/db/test-support/fixture.ts`, страж - `packages/db/test-support/stack-guard.ts`, ADR-0011);
+   перечисление, совпадающее с union в `@sf/core`, сторожит
    `packages/db/test/enum-parity.test.ts`.
 
 ## Тесты и гейты
 
-- `pnpm test` - юнит-тесты всех пакетов (`turbo run test`), без инфраструктуры (ADR-0010).
+- `pnpm test` - юнит-тесты всех пакетов и корневого проекта `test/` (`turbo run test test:repo`),
+  без инфраструктуры (ADR-0010). Конфиги vitest пакетов - тонкие вызовы корневого
+  `vitest.preset.ts` (`unitTestConfig`/`intTestConfig`, ADR-0011); новый пакет с тестами заводит
+  такой же, копию политики ловит `test/vitest-preset.test.ts`.
 - `pnpm test:int` - интеграционные `apps/api`, `apps/worker`, `packages/db` по одному пакету
   (`--concurrency=1`). Нужны поднятый `infra/docker-compose.yml` и мигрированная база
-  `shorts_factory_test`; без Compose прогон красный, а не пропущенный. Команды - `README.md`,
-  «Getting started», шаг 7.
+  `shorts_factory_test`; без Compose прогон красный, а не пропущенный. Каждый прогон пакета до
+  первого файла проходит входную проверку стека (`globalSetup`, который ставит `intTestConfig`:
+  `@sf/db/test-support/entry-check/*`, ADR-0011) - новый int-файл за ней без единой строки.
+  Команды - `README.md`, «Getting started», шаг 7.
 - `pnpm lint` (Biome), `pnpm typecheck`, `pnpm build` (собирает только `apps/web`, ADR-0005).
 - `node .claude/hooks/gates.js` (выбор - `selectGates` в `.claude/hooks/gates.js`, правила - `.claude/hooks/rules.sf.json`):
   - всегда идут lint, typecheck и no-search-list (`when: always`);

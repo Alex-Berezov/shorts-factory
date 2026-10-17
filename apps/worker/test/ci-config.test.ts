@@ -477,6 +477,8 @@ describe("turbo cache hash", () => {
   it("keeps the files only this package reads out of the inputs of every package", () => {
     const allowed = [
       "$TURBO_DEFAULT$",
+      // Read by the tests of every package: every vitest config calls it.
+      "$TURBO_ROOT$/vitest.preset.ts",
       "$TURBO_ROOT$/.env.test",
       "$TURBO_ROOT$/.env.example",
     ];

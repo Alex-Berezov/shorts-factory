@@ -615,12 +615,37 @@ checkGateSelection('build', {
     const { runs } = gateProbe('test');
     return runs(TEST_RUN) || 'gates.js не выбирает его на ' + TEST_RUN;
   });
-  const cmd = rootScriptCheck('test', 'test', 'turbo run test');
+  const cmd = rootScriptCheck('test', 'test', 'turbo run test test:repo');
   check('гейт test: ' + cmd.name, () => cmd.fn(gateProbe('test')));
+  // cmd гейта - pnpm test, поэтому test:repo сверяется как скрипт, точным равенством: echo или
+  // --passWithNoTests выключили бы корневые тесты (замок «копий нет» пресета) при зелёном гейте
+  check("гейт test: scripts['test:repo'] = vitest run --config vitest.repo.config.mts в корневом package.json", () => {
+    const pkg = readJson(path.join(ROOT, 'package.json'));
+    const actual = pkg.scripts && pkg.scripts['test:repo'];
+    const expected = 'vitest run --config vitest.repo.config.mts';
+    return actual === expected || "scripts['test:repo'] в корневом package.json не " + expected + ': ' + JSON.stringify(actual);
+  });
 }
 
-// Int-тесты api, worker, db читают свои пакеты, их зависимости, @sf/config/vitest/setup и
-// корневой .env.test; glob гейта test:int - по факту чтения (docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «Селектор гейта test:int: буква эпика, glob по графу зависимостей или always»).
+// Гейт typecheck гоняет и пакеты, и корневой проект (tsconfig.json корня: test/, vitest.preset.ts,
+// vitest.repo.config.mts - ADR-0011): выпавший typecheck:repo оставил бы корневые тесты без tsc.
+{
+  check('гейт typecheck: when always', () => {
+    const { gate } = gateProbe('typecheck');
+    return gate.when === 'always' || 'when гейта typecheck не always: ' + gate.when;
+  });
+  const cmd = rootScriptCheck('typecheck', 'typecheck', 'turbo run typecheck typecheck:repo');
+  check('гейт typecheck: ' + cmd.name, () => cmd.fn(gateProbe('typecheck')));
+  // cmd гейта - pnpm typecheck, поэтому typecheck:repo сверяется как скрипт, точным равенством
+  check("гейт typecheck: scripts['typecheck:repo'] = tsc -p tsconfig.json в корневом package.json", () => {
+    const pkg = readJson(path.join(ROOT, 'package.json'));
+    const actual = pkg.scripts && pkg.scripts['typecheck:repo'];
+    return actual === 'tsc -p tsconfig.json' || "scripts['typecheck:repo'] в корневом package.json не tsc -p tsconfig.json: " + JSON.stringify(actual);
+  });
+}
+
+// Int-тесты api, worker, db читают свои пакеты, их зависимости, @sf/config/vitest/setup,
+// корневой vitest.preset.ts (ADR-0011) и корневой .env.test; glob гейта test:int - по факту чтения (docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «Селектор гейта test:int: буква эпика, glob по графу зависимостей или always»).
 checkGateSelection('test:int', {
   runWhat: 'int-пакетах, их зависимостях, .env.test и корневых конфигах',
   skipWhat: 'web, api-client, вложенных конфигах и docs',
@@ -629,7 +654,7 @@ checkGateSelection('test:int', {
     'apps/api/package.json',
     'apps/worker/src/index.ts',
     'apps/worker/package.json',
-    'apps/worker/test/local-stack-guard.test.ts',
+    'apps/worker/test/helpers.int.ts',
     'packages/db/src/index.ts',
     'packages/db/package.json',
     'packages/config/src/index.ts',
@@ -647,11 +672,14 @@ checkGateSelection('test:int', {
     'pnpm-lock.yaml',
     'turbo.json',
     'tsconfig.base.json',
+    'vitest.preset.ts',
   ],
   mustSkip: [
     'apps/web/src/app/page.tsx',
     'apps/web/package.json',
     'packages/api-client/src/index.ts',
+    'docs/vitest.preset.ts',
+    'vitest.repo.config.mts',
     'docs/30_E0_TASKS.md',
     'README.md',
     '.claude/hooks/rules.sf.json',

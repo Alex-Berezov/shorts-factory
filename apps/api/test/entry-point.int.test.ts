@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { env } from "@sf/config";
 import { SystemStatusResponseSchema } from "@sf/contracts";
+import {
+  TEST_REDIS_DATABASE_OF,
+  suiteRedisUrl,
+} from "@sf/db/test-support/stack-guard";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-// Imported for its check of the stack, before the process below opens a
-// connection to it.
-import "./helpers.int.js";
 import { devCommandParts } from "./dev-command.js";
+import { openTestRedis } from "./helpers.int.js";
 import { basicAuthHeader } from "./helpers.js";
 
 /**
@@ -77,9 +79,11 @@ describe("api entry point", () => {
       cwd: APP_DIR,
       execArgv,
       // The config of the test run (`.env.test`, loaded by the vitest setup)
-      // with the two labels and the port of this case on top.
+      // with the two labels and the port of this case on top, and the Redis
+      // database of the api suite instead of the one the worker suite uses.
       env: {
         ...process.env,
+        REDIS_URL: suiteRedisUrl(env.REDIS_URL, "api"),
         API_PORT: String(port),
         APP_VERSION: VERSION,
         GIT_COMMIT: REJECTED_COMMIT,
@@ -124,5 +128,27 @@ describe("api entry point", () => {
       expect.objectContaining({ level: 40, variable: "GIT_COMMIT" }),
     ]);
     expect(output).not.toContain(REJECTED_COMMIT);
+  });
+
+  it("keeps its Redis connections out of the database of the worker suite", async () => {
+    await statusOf(port);
+    const redis = openTestRedis();
+    try {
+      // No offline queue: a command before the socket is up is refused.
+      if (redis.status !== "ready") {
+        await new Promise<void>((resolve) => {
+          redis.once("ready", () => {
+            resolve();
+          });
+        });
+      }
+      const clients = String(await redis.client("LIST"));
+
+      expect(clients).not.toMatch(
+        new RegExp(`\\bdb=${TEST_REDIS_DATABASE_OF.worker}\\b`),
+      );
+    } finally {
+      redis.disconnect();
+    }
   });
 });

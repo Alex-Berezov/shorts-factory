@@ -4,6 +4,7 @@
     "src",
     "drizzle.config.ts",
     "test",
+    "test-support",
     "vitest.config.ts",
     "vitest.int.config.ts"
   ]

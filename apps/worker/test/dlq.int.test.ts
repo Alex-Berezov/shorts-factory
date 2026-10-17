@@ -11,9 +11,9 @@ import {
   openTestDb,
   openTestRedis,
   seedQueueSwitches,
-  testLogger,
   waitFor,
 } from "./helpers.int.js";
+import { silentLogger } from "./recording-logger.js";
 
 /**
  * A job that has spent its attempts ends up in `system.dlq` with everything an
@@ -62,7 +62,7 @@ beforeAll(async () => {
     env,
     db,
     redis,
-    log: testLogger(),
+    log: silentLogger(),
     processors: { "system.smoke": failingJob },
     switchIntervalMs: 60_000,
   });

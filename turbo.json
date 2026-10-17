@@ -7,16 +7,26 @@
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
       "env": ["NEXT_OUTPUT_STANDALONE"]
     },
-    "typecheck": { "dependsOn": ["^typecheck"] },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/vitest.preset.ts"]
+    },
     "test": {
       "dependsOn": ["^test"],
       "inputs": [
         "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/vitest.preset.ts",
         "$TURBO_ROOT$/.env.test",
         "$TURBO_ROOT$/.env.example"
       ]
     },
-    "test:int": { "dependsOn": ["^test:int"], "cache": false },
+    "//#typecheck:repo": {},
+    "//#test:repo": {},
+    "test:int": {
+      "dependsOn": ["^test:int"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/vitest.preset.ts"],
+      "cache": false
+    },
     "dev": { "cache": false, "persistent": true }
   }
 }

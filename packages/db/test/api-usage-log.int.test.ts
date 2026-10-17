@@ -2,11 +2,15 @@ import { ValidationError } from "@sf/core";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { closeDb } from "../src/client.js";
+import { type Db, closeDb } from "../src/client.js";
 import { apiUsageLogRepo } from "../src/repos/api-usage-log.js";
 import * as schema from "../src/schema/index.js";
 import { apiUsageLog } from "../src/schema/system.js";
-import { openTestDb, openTestSql, resetTestDatabase } from "./helpers.int.js";
+import {
+  openTestDb,
+  openTestSql,
+  resetTestDatabase,
+} from "../test-support/fixture.js";
 
 /**
  * Fixed instant, so day and month boundaries are asserted instead of waited
@@ -35,10 +39,11 @@ const costThisMonth = {
   period: "month",
 } as const;
 
-const db = openTestDb();
+let db: Db;
 
 beforeAll(async () => {
   await resetTestDatabase();
+  db = openTestDb();
 
   const rows = [
     // today by UTC, yesterday by Pacific time
@@ -79,7 +84,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await closeDb(db);
+  // Still unassigned when `beforeAll` failed before opening it - a refusal of
+  // the guard, a database that is down - whatever its type says; that failure
+  // is the one to read, not a TypeError from here.
+  if (db !== undefined) {
+    await closeDb(db);
+  }
 });
 
 describe("apiUsageLogRepo.sumUsage", () => {

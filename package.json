@@ -8,8 +8,10 @@
     "dev": "turbo run dev",
     "build": "turbo run build",
     "lint": "biome check .",
-    "typecheck": "turbo run typecheck",
-    "test": "turbo run test",
+    "typecheck": "turbo run typecheck typecheck:repo",
+    "typecheck:repo": "tsc -p tsconfig.json",
+    "test": "turbo run test test:repo",
+    "test:repo": "vitest run --config vitest.repo.config.mts",
     "test:int": "turbo run test:int --concurrency=1",
     "check:compose": "node scripts/check-compose.mjs",
     "db:generate": "pnpm --filter @sf/db db:generate",
@@ -19,6 +21,7 @@
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
     "turbo": "^2.10.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
   }
 }

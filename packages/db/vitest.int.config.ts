@@ -1,13 +1,11 @@
-import { defineConfig } from "vitest/config";
+import { intTestConfig } from "../../vitest.preset.js";
 
-export default defineConfig({
-  test: {
-    environment: "node",
-    include: ["**/*.int.test.ts"],
-    setupFiles: ["@sf/config/vitest/setup"],
-    testTimeout: 15_000,
-    // Every file resets the same test database, so two workers would drop the
-    // schema under each other.
-    fileParallelism: false,
-  },
+/**
+ * Integration run of `@sf/db`: every file resets the same test database, which
+ * is why the preset runs the files one at a time.
+ */
+export default intTestConfig({
+  setupFiles: ["@sf/config/vitest/setup"],
+  entryCheck: "postgres",
+  testTimeout: 15_000,
 });

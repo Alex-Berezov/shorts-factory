@@ -10,9 +10,9 @@ import {
   openTestDb,
   openTestRedis,
   seedQueueSwitches,
-  testLogger,
   waitFor,
 } from "./helpers.int.js";
+import { silentLogger } from "./recording-logger.js";
 
 /**
  * Both halves of the E0-09 acceptance, against the real runtime.
@@ -74,7 +74,7 @@ beforeAll(async () => {
     env,
     db,
     redis,
-    log: testLogger(),
+    log: silentLogger(),
     processors: { "system.smoke": paidJob },
     switchIntervalMs: 60_000,
     // The guard of the process, with caps this test can reach; production

@@ -10,9 +10,11 @@ import { type Db, closeDb, createDb } from "./client.js";
  * Resolved from this module, not from `process.cwd()`: turbo runs tasks from
  * the package directory, the Compose one-shot service (E0-11) and CI run them
  * from elsewhere, and a folder missing at runtime would look like "no
- * migrations to apply" instead of an error.
+ * migrations to apply" instead of an error. Exported for the test support of
+ * this package (`assertMigrated` compares a database against it), not
+ * through the barrel: nothing at runtime needs the path.
  */
-const migrationsFolder = resolve(
+export const migrationsFolder = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../migrations",
 );

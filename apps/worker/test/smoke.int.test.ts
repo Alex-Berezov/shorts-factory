@@ -11,9 +11,9 @@ import {
   openTestDb,
   openTestRedis,
   seedQueueSwitches,
-  testLogger,
   waitFor,
 } from "./helpers.int.js";
+import { silentLogger } from "./recording-logger.js";
 
 /**
  * The acceptance criterion of E0: a job goes through Redis, runs in the worker
@@ -34,7 +34,7 @@ beforeAll(async () => {
     env,
     db,
     redis,
-    log: testLogger(),
+    log: silentLogger(),
     processors: { "system.smoke": systemSmokeJob },
     // The resync is not what this file is about; a tick in the middle of it
     // would add nothing but noise.

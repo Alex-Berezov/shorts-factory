@@ -154,7 +154,7 @@ PowerShell unless two variants are shown. All of them run from the repository ro
    Unit tests, no infrastructure needed. The integration tests need the Postgres and Redis of
    step 3 (they use the database `shorts_factory_test` and, on the Redis of `.env.test`,
    database 1 for the worker suite and database 2 for the api suite -
-   `apps/api/test/local-stack-guard.ts`; never the development data, which lives in
+   `packages/db/test-support/stack-guard.ts`; never the development data, which lives in
    database 0) and the schema of the test database - the same command CI runs, once and
    again after every new migration:
 

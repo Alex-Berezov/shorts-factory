@@ -6,7 +6,10 @@
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./test/local-host-guard.js": "./test/local-host-guard.ts"
+    "./test-support/stack-guard": "./test-support/stack-guard.ts",
+    "./test-support/fixture": "./test-support/fixture.ts",
+    "./test-support/entry-check/postgres": "./test-support/entry-check/postgres.ts",
+    "./test-support/entry-check/migrated-stack": "./test-support/entry-check/migrated-stack.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

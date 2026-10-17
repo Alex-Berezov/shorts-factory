@@ -1,6 +1,6 @@
 import { env } from "@sf/config";
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SEC } from "@sf/core";
-import { type Db, closeDb, createDb } from "@sf/db";
+import { type Db, closeDb } from "@sf/db";
 import type { Queue } from "bullmq";
 import type { Redis } from "ioredis";
 import { type Logger, pino } from "pino";
@@ -16,10 +16,13 @@ import {
   openTestDb,
   openTestRedis,
   seedQueueSwitches,
-  testLogger,
 } from "./helpers.int.js";
 import { recordingUsage, unusedBudget } from "./job-deps.js";
-import { type LoggedLine, recordingLogger } from "./recording-logger.js";
+import {
+  type LoggedLine,
+  recordingLogger,
+  silentLogger,
+} from "./recording-logger.js";
 
 /**
  * The liveness stamp against a real Redis: what a fake cannot have is the
@@ -35,7 +38,7 @@ import { type LoggedLine, recordingLogger } from "./recording-logger.js";
  * each opens a database of its own and closes it, and they leave a heartbeat
  * scheduler and its ticks in Redis, cleared around the file.
  */
-const db: Db = createDb(env.DATABASE_URL, { max: 1 });
+const db: Db = openTestDb();
 const redis = openTestRedis();
 
 const QUEUES = ["system.heartbeat", "system.smoke", "system.dlq"] as const;
@@ -57,7 +60,7 @@ afterAll(async () => {
 /** The heartbeat spends nothing: both spend-related deps refuse to be used. */
 function jobDeps() {
   return {
-    log: testLogger(),
+    log: silentLogger(),
     db,
     redis,
     budget: unusedBudget(),
@@ -197,7 +200,7 @@ describe("worker start against redis", () => {
         env,
         db: runtimeDb,
         redis,
-        log: testLogger(),
+        log: silentLogger(),
         processors: {},
         switchIntervalMs: 60_000,
       });
@@ -256,6 +259,10 @@ describe("worker start against redis", () => {
     const { log, lines } = recordingLogger();
     const codes: number[] = [];
     const events: string[] = [];
+    // The queues the start opens are closed here, whatever the start did: the
+    // case is about the start failing, and must not lean on that failure
+    // closing what it opened.
+    const queueFactory = createQueueFactory(redis);
     const runtimeDb = openTestDb();
     try {
       await seedQueueSwitches(runtimeDb);
@@ -271,7 +278,7 @@ describe("worker start against redis", () => {
             log,
             processors: {},
             switchIntervalMs: 60_000,
-            queues: noting(createQueueFactory(redis), events),
+            queues: noting(queueFactory, events),
           }),
         connections: [],
         subscribe: () => {},
@@ -282,6 +289,7 @@ describe("worker start against redis", () => {
 
       expect(runtime).toBeUndefined();
     } finally {
+      await queueFactory.close();
       await closeDb(runtimeDb);
     }
 

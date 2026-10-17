@@ -127,19 +127,19 @@
       "id": "typecheck",
       "cmd": "pnpm typecheck",
       "when": "always",
-      "note": "tsc --noEmit по всем workspace-пакетам через turbo"
+      "note": "tsc --noEmit по всем workspace-пакетам и корневому проекту (turbo run typecheck typecheck:repo; typecheck:repo - tsc -p tsconfig.json корня: test/, vitest.preset.ts, vitest.repo.config.mts - ADR-0011) через turbo"
     },
     {
       "id": "test",
       "cmd": "pnpm test",
       "when": "always",
-      "note": "Vitest, юнит-тесты всех пакетов (turbo run test), без инфраструктуры; запускается на каждом прогоне (E0-02A): юнит-тесты читают и не-исходники (rules.sf.json, ci.yml, infra/docker/**), поэтому выбор не сужается glob; повторы снимает кэш turbo"
+      "note": "Vitest, юнит-тесты всех пакетов и корневого проекта test/ (turbo run test test:repo, пресет vitest.preset.ts - ADR-0011), без инфраструктуры; запускается на каждом прогоне (E0-02A): юнит-тесты читают и не-исходники (rules.sf.json, ci.yml, infra/docker/**), поэтому выбор не сужается glob; повторы снимает кэш turbo"
     },
     {
       "id": "test:int",
       "cmd": "pnpm test:int",
-      "when": "glob:{apps/api/**,apps/worker/**,packages/db/**,packages/config/**,packages/core/**,packages/contracts/**,packages/integrations/**,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,turbo.json,tsconfig*.json,.env.test}",
-      "note": "интеграционные тесты apps/api, apps/worker, packages/db (turbo run test:int --concurrency=1, по одному пакету) против Postgres/Redis из infra/docker-compose.yml; без поднятого Compose гейт честно красный (ADR-0010, docs/60_HARNESS.md, «Известные ограничения») - это стоп-условие, а не повод выключать гейт; красный по таймауту хука на холодном стеке (Hook timed out) - перезапуск при поднятом стеке, долг E0-12A (docs/TECH_DEBT.md, E0-02A). Выбирается на графе int-пакетов + корневые конфиги + .env.test (только корень): пакеты со scripts['test:int'], их транзитивные workspace-зависимости (в т.ч. @sf/config/vitest/setup), корневые манифесты и конфиги, фикстура testEnvFilePath; apps/web и packages/api-client его не выбирают (E0-02A, docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «Селектор гейта test:int»). Каждый пакет workspace со scripts['test:int'], его транзитивные workspace-зависимости, setupFiles конфига из --config и testEnvFilePath обязаны быть под glob - это проверяет harness-selftest"
+      "when": "glob:{apps/api/**,apps/worker/**,packages/db/**,packages/config/**,packages/core/**,packages/contracts/**,packages/integrations/**,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,turbo.json,tsconfig*.json,vitest.preset.ts,.env.test}",
+      "note": "интеграционные тесты apps/api, apps/worker, packages/db (turbo run test:int --concurrency=1, по одному пакету) против Postgres/Redis из infra/docker-compose.yml; без поднятого Compose гейт честно красный (ADR-0010, docs/60_HARNESS.md, «Известные ограничения») - это стоп-условие, а не повод выключать гейт; красный по таймауту хука на холодном стеке (Hook timed out) - перезапуск при поднятом стеке (docs/TECH_DEBT.md, E0-02A; в E0-12A не воспроизведён за 4 холодных прогона). Выбирается на графе int-пакетов + корневые конфиги + .env.test (только корень): пакеты со scripts['test:int'], их транзитивные workspace-зависимости (в т.ч. @sf/config/vitest/setup), корневые манифесты и конфиги, корневой vitest.preset.ts (его вызывает каждый vitest.int.config.ts, ADR-0011), фикстура testEnvFilePath; apps/web и packages/api-client его не выбирают (E0-02A, docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «Селектор гейта test:int»). Каждый пакет workspace со scripts['test:int'], его транзитивные workspace-зависимости, setupFiles конфига из --config и testEnvFilePath обязаны быть под glob - это проверяет harness-selftest"
     },
     {
       "id": "build",

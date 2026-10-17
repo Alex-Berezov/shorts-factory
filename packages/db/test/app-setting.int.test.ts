@@ -1,22 +1,28 @@
 import { QUEUE_NAMES } from "@sf/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { closeDb } from "../src/client.js";
+import { type Db, closeDb } from "../src/client.js";
 import { appSettingRepo } from "../src/repos/app-setting.js";
 import { hasAppSettingTable, seedAppSettings } from "../src/seed.js";
 import {
   emptyTestDatabase,
   openTestDb,
   resetTestDatabase,
-} from "./helpers.int.js";
+} from "../test-support/fixture.js";
 
-const db = openTestDb();
+let db: Db;
 
 beforeAll(async () => {
   await resetTestDatabase();
+  db = openTestDb();
 });
 
 afterAll(async () => {
-  await closeDb(db);
+  // Still unassigned when `beforeAll` failed before opening it - a refusal of
+  // the guard, a database that is down - whatever its type says; that failure
+  // is the one to read, not a TypeError from here.
+  if (db !== undefined) {
+    await closeDb(db);
+  }
 });
 
 describe("appSettingRepo", () => {

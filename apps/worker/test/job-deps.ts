@@ -1,9 +1,11 @@
+import type { ApiUsageEntry, UsageLogger } from "@sf/core";
 import {
-  type ApiUsageEntry,
-  ApiUsageEntrySchema,
-  type UsageLogger,
-} from "@sf/core";
-import { type BudgetCheck, type BudgetGuard, createDb } from "@sf/db";
+  type ApiUsageInsert,
+  type BudgetGuard,
+  closeDb,
+  createDb,
+  toUsageRow,
+} from "@sf/db";
 import { Redis } from "ioredis";
 import { expect, vi } from "vitest";
 import type { JobRuntimeDeps } from "../src/lib/define-job.js";
@@ -28,36 +30,40 @@ export function unusedBudget(): BudgetGuard {
   };
 }
 
-/** A guard that always clears the call, with the answer a caller may read. */
-export function allowingBudget(check: BudgetCheck): BudgetGuard {
-  return {
-    check: async () => check,
-    assert: async () => check,
-  };
-}
-
 /**
- * A usage logger that records the entries instead of writing them.
+ * A usage logger that records the rows it would write instead of writing them.
  *
- * The entry is parsed on the way in, exactly as `createUsageLogger` parses it
- * before it writes: a job that reported spend the real logger would refuse -
- * a paid provider without `costUsd`, units on a provider that has none - has
- * to fail its test here rather than at the first live run.
+ * The entry goes through `toUsageRow` on the way in - the same function
+ * `createUsageLogger` turns an entry into a row with, not a second parse: a
+ * job that reported spend the real logger would refuse - a paid provider
+ * without `costUsd`, units on a provider that has none - fails its test here
+ * with the error the real logger throws (`ValidationError`, issues without
+ * the rejected value), rather than at the first live run.
+ *
+ * What is recorded is the row `toUsageRow` returned, not the entry the job
+ * passed: the parsed values with the job stamped in, as `api_usage_log` would
+ * hold them - so a change the job makes to its object after logging it is
+ * not what a test asserts on.
  */
 export function recordingUsage(): {
   createUsage: (jobId?: string) => UsageLogger;
-  entries: Array<{ jobId: string | undefined; entry: ApiUsageEntry }>;
+  rows: ApiUsageInsert[];
 } {
-  const entries: Array<{ jobId: string | undefined; entry: ApiUsageEntry }> =
-    [];
+  const rows: ApiUsageInsert[] = [];
   return {
-    entries,
+    rows,
     createUsage:
       (jobId?: string): UsageLogger =>
       async (entry: ApiUsageEntry) => {
-        entries.push({ jobId, entry: ApiUsageEntrySchema.parse(entry) });
+        rows.push(toUsageRow(entry, jobId === undefined ? {} : { jobId }));
       },
   };
+}
+
+/** The two connections of `unusedConnections`, and how to let go of them. */
+export interface UnusedConnections
+  extends Pick<JobRuntimeDeps, "db" | "redis"> {
+  close(): Promise<void>;
 }
 
 /**
@@ -68,15 +74,21 @@ export function recordingUsage(): {
  * out honestly by hand, and a cast to them is the same hole whichever spelling
  * it takes. Neither opens a socket - postgres-js connects on the first query
  * and ioredis is created with `lazyConnect` - so a handler that did reach for
- * one would fail loudly instead of reading a fake answer. Built once for the
- * file: nothing here holds state a test could see.
+ * one would fail loudly instead of reading a fake answer.
+ *
+ * A new pair on every call, closed by the caller (`afterAll` of its file):
+ * nothing is kept by this module, so a pool that did open is closed by the
+ * file that opened it instead of outliving the run.
  */
-let connections: Pick<JobRuntimeDeps, "db" | "redis"> | undefined;
-
-export function unusedConnections(): Pick<JobRuntimeDeps, "db" | "redis"> {
-  connections ??= {
-    db: createDb("postgres://sf:sf@127.0.0.1:5442/unused", { max: 1 }),
-    redis: new Redis({ lazyConnect: true, port: 6399 }),
+export function unusedConnections(): UnusedConnections {
+  const db = createDb("postgres://sf:sf@127.0.0.1:5442/unused", { max: 1 });
+  const redis = new Redis({ lazyConnect: true, port: 6399 });
+  return {
+    db,
+    redis,
+    close: async () => {
+      redis.disconnect();
+      await closeDb(db);
+    },
   };
-  return connections;
 }

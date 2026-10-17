@@ -1,12 +1,12 @@
-import { env, limits } from "@sf/config";
+import { limits } from "@sf/config";
 import { SystemStatusResponseSchema } from "@sf/contracts";
 import {
   QUEUE_NAMES,
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_SEC,
 } from "@sf/core";
-import { closeDb, createDb, createUsageLogger } from "@sf/db";
-import { Queue } from "bullmq";
+import { closeDb, createUsageLogger } from "@sf/db";
+import { TEST_REDIS_DATABASE_OF } from "@sf/db/test-support/stack-guard";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type AppInstance, buildApp } from "../src/app.js";
 import { createBudgetProbe } from "../src/lib/budget.js";
@@ -14,7 +14,7 @@ import { createHealthProbes } from "../src/lib/health.js";
 import { createWorkerProbe } from "../src/lib/heartbeat.js";
 import { type QueueStats, createQueueStats } from "../src/lib/queue-stats.js";
 import { closeRedis } from "../src/lib/redis.js";
-import { openTestRedis } from "./helpers.int.js";
+import { openTestDb, openTestQueue, openTestRedis } from "./helpers.int.js";
 import { AUTH_HEADER, TEST_PASSWORD } from "./helpers.js";
 
 /**
@@ -22,10 +22,12 @@ import { AUTH_HEADER, TEST_PASSWORD } from "./helpers.js";
  * `infra/docker-compose.yml`: a row written into `api_usage_log` is visible in
  * `/system/status`, and the queue counters and the heartbeat are the real ones.
  *
- * The two suites run at the same time (`turbo run test:int`), so this one
- * keeps to a Redis database of its own (`local-stack-guard.ts`) and to a
- * provider of its own in the shared test database: the worker spends `gemini`,
- * this file spends `youtube_data`, and everything it writes it also removes.
+ * The api and the worker suites share one test stack, one after the other
+ * (`turbo run test:int --concurrency=1`), and whatever a crashed run leaves
+ * behind is met by the next one, so this suite keeps to a Redis database of its
+ * own (`suiteRedisUrl` in `helpers.int.ts`) and to a provider of its own in the
+ * shared test database: the worker spends `gemini`, this file spends
+ * `youtube_data`, and everything it writes it also removes.
  */
 const JOB_ID = "api-system-status-int";
 const PROBE_QUEUE = "system.smoke";
@@ -39,14 +41,15 @@ const PAUSE_QUEUE = "radar.snapshot";
 /** Units of the fixture call, large enough to be visible against any total. */
 const SPENT_UNITS = 37;
 
-const db = createDb(env.DATABASE_URL, { max: 2 });
+const db = openTestDb();
 const redis = openTestRedis();
 let queueStats: QueueStats;
 let app: AppInstance;
 
 async function clean(): Promise<void> {
-  // By job id, never by provider: the worker suite is running against the same
-  // table, and a delete by provider would take rows it is counting.
+  // By job id, never by provider: the suites share the table (only their Redis
+  // databases differ), and a delete by provider would take rows of another
+  // suite, left by a crashed run or counted by a case of its own.
   await db.$client`delete from api_usage_log where job_id = ${JOB_ID}`;
   await redis.del(WORKER_HEARTBEAT_KEY, `bull:${UNTOUCHED_QUEUE}:meta`);
 }
@@ -146,7 +149,9 @@ describe("GET /system/status against the live stack", () => {
    * "nothing to do" instead of "nobody is taking it".
    */
   it("tells a paused queue from an idle one", async () => {
-    const queue = new Queue(PAUSE_QUEUE, { connection: redis });
+    // Opened without writing its meta: the case after this one holds the page
+    // to that, and a fixture that wrote it would teach the opposite.
+    const queue = openTestQueue(PAUSE_QUEUE, redis);
     try {
       await queue.pause();
 
@@ -159,7 +164,7 @@ describe("GET /system/status against the live stack", () => {
       // reported the pause for the whole registry would be as wrong as one
       // that missed it. That the pause cannot reach the queues of the worker
       // suite is a property of the namespace this file runs in, and it is
-      // asserted where it is decided - `local-stack-guard.test.ts` - rather
+      // asserted where it is decided - `packages/db/test/stack-guard.test.ts` - rather
       // than by reading the Redis database that suite owns.
       expect(
         body.queues?.find((entry) => entry.name === PROBE_QUEUE),
@@ -209,5 +214,19 @@ describe("GET /system/status against the live stack", () => {
       db: { status: "up", reason: null },
       redis: { status: "up", reason: null },
     });
+  });
+});
+
+describe("the Redis of the api suite", () => {
+  it("is the api's own database, not the one the worker suite takes jobs from", async () => {
+    // The pause above must not reach a queue of the worker suite: the two
+    // keep apart by database, and this is the connection every case uses.
+    expect(redis.options.db).toBe(Number(TEST_REDIS_DATABASE_OF.api));
+    expect(redis.options.db).not.toBe(Number(TEST_REDIS_DATABASE_OF.worker));
+    // And the server agrees: the connection really sits in that database.
+    const info = await redis.client("INFO");
+    expect(String(info)).toMatch(
+      new RegExp(`\\bdb=${TEST_REDIS_DATABASE_OF.api}\\b`),
+    );
   });
 });

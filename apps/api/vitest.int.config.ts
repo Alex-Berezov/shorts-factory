@@ -1,16 +1,12 @@
-import { defineConfig } from "vitest/config";
+import { intTestConfig } from "../../vitest.preset.js";
 
 /**
- * Integration run: the same tests only make sense against the Postgres and
- * Redis of `infra/docker-compose.yml`, so they are kept out of `pnpm test`
- * and asked for explicitly (`pnpm --filter @sf/api test:int`). A stack that is
- * not up makes this run red - the point is to notice.
+ * Integration run of the api (`pnpm --filter @sf/api test:int`): its files
+ * share the test database and Redis database 2, which is why the preset runs
+ * them one at a time.
  */
-export default defineConfig({
-  test: {
-    environment: "node",
-    include: ["**/*.int.test.ts"],
-    setupFiles: ["@sf/config/vitest/setup"],
-    testTimeout: 15_000,
-  },
+export default intTestConfig({
+  setupFiles: ["@sf/config/vitest/setup"],
+  entryCheck: "migrated-stack",
+  testTimeout: 15_000,
 });

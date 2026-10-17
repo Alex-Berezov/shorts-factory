@@ -2,6 +2,9 @@
 
 Дата: 2026-10-10   Статус: принято   Задача: E0-13 (решение 6 эпика E0; реализовано в E0-02, E0-04, E0-08, E0-09, E0-12)
 
+Где записана тестовая политика (пресет vitest), фикстура тестовой базы и страж стека - ADR-0011
+(`docs/adr/0011-vitest-preset-and-test-support.md`, E0-12A).
+
 ## Контекст
 
 Половина поведения системы живёт на границе с Postgres и Redis: миграции, агрегаты расхода,
@@ -12,8 +15,8 @@
 
 ## Решение
 
-- **Юнит-тесты** - `*.test.ts`, `vitest.config.ts` каждого пакета, `pnpm test`
-  (`turbo run test`). Без Postgres, Redis и сети, всегда.
+- **Юнит-тесты** - `*.test.ts`, `vitest.config.ts` каждого пакета (тонкий вызов корневого
+  `vitest.preset.ts`, ADR-0011), `pnpm test` (`turbo run test test:repo`). Без Postgres, Redis и сети, всегда.
 - **Интеграционные** - `*.int.test.ts`, отдельный `vitest.int.config.ts` в `apps/api`,
   `apps/worker` и `packages/db`, `pnpm test:int` (`turbo run test:int --concurrency=1`,
   корневой `package.json`). Ходят в настоящие Postgres 16 и Redis 7 из
@@ -26,21 +29,23 @@
   и заглушки) направляет прогон в отдельную базу `shorts_factory_test` (создаётся
   `infra/postgres/init/01-test-db.sql`, в CI - `POSTGRES_DB`) и в Redis того же стека, не в db `0`
   разработки. `.env.test` называет db `1`; набор `apps/worker` работает в ней, набор `apps/api`
-  выводит из того же URL db `2` (`apiTestRedisUrl`, `apps/api/test/local-stack-guard.ts`), чтобы два
+  выводит из того же URL db `2` (`suiteRedisUrl`, `@sf/db/test-support/stack-guard`), чтобы два
   набора не делили пространство ключей BullMQ. Загружает его
   `@sf/config/vitest/setup` (`setupFiles` конфигов), предварительно вычищая из `process.env`
   все ключи схемы env.
-- **Стражи перед разрушительными шагами**: `packages/db/test/local-host-guard.ts`
-  (`assertLocalHost`, `assertLocalTestDatabase`, `assertLocalRedisDatabase`) и
-  `apps/{api,worker}/test/local-stack-guard.ts` поверх него - только `localhost`/`127.0.0.1`/`::1`,
-  только `shorts_factory_test` и Redis, который в `.env.test` назван db `1` (страж api сверяет
-  именно её и работает в db `2`). Стражи без зависимостей и проверяются юнит-тестами
-  в `pnpm test`.
+- **Страж перед разрушительными шагами** - один на все наборы, по функции на сервис:
+  `assertLocalTestPostgres`/`assertLocalTestRedis` (`@sf/db/test-support/stack-guard`,
+  ADR-0011) - только схемы `postgres:`/`postgresql:`/`redis:`, только
+  `localhost`/`127.0.0.1`/`::1` так, как хост прочтёт драйвер, только порты Compose
+  `5442`/`6389`, без строки запроса в URL, только `shorts_factory_test` и Redis, который в
+  `.env.test` назван db `1` (набор api сверяет именно её и работает в db `2`). Каждый
+  int-прогон встречает его до первого файла - во входной проверке, которую `intTestConfig`
+  ставит безусловно (`globalSetup`: у `@sf/db` - Postgres, у api и worker - весь стек и сверка
+  миграций `assertMigrated()`), и ещё раз в каждом хелпере, открывающем соединение. Страж без
+  зависимостей и проверяется юнит-тестами в `pnpm test`.
 - **Порядок**: пакеты гоняют интеграционные тесты по одному (`--concurrency=1`): у них общие
-  база и Redis. Внутри `apps/worker` и `packages/db` файлы тоже идут последовательно
-  (`fileParallelism: false` в их `vitest.int.config.ts`); у `apps/api` этой настройки нет,
-  его файлы идут параллельно на одной базе - пункт задачи E0-12A (`docs/TECH_DEBT.md`, строки
-  по `apps/api/vitest.int.config.ts`; задача в трекере - `docs/tasks/tasks.json`).
+  база и Redis. Внутри пакета файлы тоже идут последовательно - `fileParallelism: false`
+  безусловно в `intTestConfig` пресета (ADR-0011), у всех трёх int-наборов.
 - **Подготовка**: схема тестовой базы - миграция с `.env.test`; в CI шаг
   `node --env-file=../../.env.test --import tsx src/cli/migrate.ts` в `packages/db`
   (`.github/workflows/ci.yml:82-83`). Testcontainers не используем.
@@ -58,7 +63,7 @@
 
 - Перед `pnpm test:int` нужен поднятый `infra/docker-compose.yml` и мигрированная тестовая
   база (README, Getting started); без них прогон честно падает.
-- Новый интеграционный тест с удалением данных идёт через стражи своего пакета, а не через
-  собственную проверку.
+- Новый интеграционный тест с удалением данных идёт через общий страж и фикстуру
+  `@sf/db/test-support` (ADR-0011), а не через собственную проверку.
 - `pnpm test` остаётся быстрым и не зависит от окружения - его гоняют хуки и гейт `test`;
   `test:int` - гейт и шаг CI.

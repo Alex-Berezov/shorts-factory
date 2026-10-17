@@ -13,9 +13,9 @@ import {
   openTestDb,
   openTestRedis,
   seedQueueSwitches,
-  testLogger,
   waitFor,
 } from "./helpers.int.js";
+import { silentLogger } from "./recording-logger.js";
 
 /**
  * What the runtime does while it is stopping, against a real Redis.
@@ -90,7 +90,7 @@ describe("worker runtime", () => {
       env,
       db,
       redis,
-      log: testLogger(),
+      log: silentLogger(),
       processors: { "system.smoke": failingJob },
       queues: withSlowDlqWrites(createQueueFactory(redis), DLQ_WRITE_DELAY_MS),
       switchIntervalMs: 60_000,
@@ -156,7 +156,7 @@ describe("worker runtime", () => {
         env,
         db,
         redis,
-        log: testLogger(),
+        log: silentLogger(),
         processors: { "system.smoke": failingJob },
         queues: factory,
         switchIntervalMs: 50,
@@ -178,7 +178,7 @@ describe("worker runtime", () => {
       env,
       db,
       redis,
-      log: testLogger(),
+      log: silentLogger(),
       processors: {
         "system.smoke": failingJob,
         "system.heartbeat": undefined,

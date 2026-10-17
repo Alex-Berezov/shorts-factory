@@ -1,11 +1,15 @@
 import { BudgetExceededError } from "@sf/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type BudgetLimits, createBudgetGuard } from "../src/budget.js";
-import { closeDb } from "../src/client.js";
+import {
+  type BudgetGuard,
+  type BudgetLimits,
+  createBudgetGuard,
+} from "../src/budget.js";
+import { type Db, closeDb } from "../src/client.js";
 import { apiUsageLogRepo } from "../src/repos/api-usage-log.js";
 import { apiUsageLog } from "../src/schema/system.js";
 import { createUsageLogger } from "../src/usage-logger.js";
-import { openTestDb, resetTestDatabase } from "./helpers.int.js";
+import { openTestDb, resetTestDatabase } from "../test-support/fixture.js";
 
 /**
  * The guard against the real table: what a job asks before it spends.
@@ -22,14 +26,22 @@ const LIMITS: BudgetLimits = {
   ttsMonthlyBudgetUsd: 10,
 };
 
-const db = openTestDb();
-const guard = createBudgetGuard({ db, limits: LIMITS });
+let db: Db;
+let guard: BudgetGuard;
 
 beforeAll(async () => {
   await resetTestDatabase();
+  db = openTestDb();
+  guard = createBudgetGuard({ db, limits: LIMITS });
 });
 
 afterAll(async () => {
+  // Still unassigned when `beforeAll` failed before opening it - a refusal of
+  // the guard, a database that is down - whatever its type says; that failure
+  // is the one to read, not a TypeError from here.
+  if (db === undefined) {
+    return;
+  }
   await db.$client`delete from api_usage_log`;
   await closeDb(db);
 });

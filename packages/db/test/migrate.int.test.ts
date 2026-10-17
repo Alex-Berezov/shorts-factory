@@ -17,7 +17,7 @@ import {
   emptyTestDatabase,
   openTestSql,
   resetTestDatabase,
-} from "./helpers.int.js";
+} from "../test-support/fixture.js";
 
 /** Migrations the repository ships, read from drizzle's own journal. */
 const SHIPPED_MIGRATIONS = (

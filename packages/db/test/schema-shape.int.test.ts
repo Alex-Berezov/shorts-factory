@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { openTestSql, resetTestDatabase } from "./helpers.int.js";
+import { openTestSql, resetTestDatabase } from "../test-support/fixture.js";
 
 /**
  * Indexes the schema revision of E0-04 added: every foreign key that had no

@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 
 /**
  * The public surface of `@sf/db` is declared once, in `exports`: the package
- * root and the test guard the app fixtures share. The entry points under
+ * root and the test support the integration suites of the apps share - the
+ * stack guard and the database fixture (`test-support/`). The entry points under
  * `src/cli/` read the whole configuration and connect the moment they load, so
  * they must not be importable by name from anywhere - not from web code, not
  * from another package.
@@ -42,10 +43,19 @@ describe("@sf/db exports", () => {
     expect(resolveFromConsumer("@sf/db")).toBe(urlOf("src/index.ts"));
   });
 
-  it("resolves the shared local-host guard the app fixtures import", () => {
-    expect(resolveFromConsumer("@sf/db/test/local-host-guard.js")).toBe(
-      urlOf("test/local-host-guard.ts"),
-    );
+  it.each([
+    ["@sf/db/test-support/stack-guard", "test-support/stack-guard.ts"],
+    ["@sf/db/test-support/fixture", "test-support/fixture.ts"],
+    [
+      "@sf/db/test-support/entry-check/postgres",
+      "test-support/entry-check/postgres.ts",
+    ],
+    [
+      "@sf/db/test-support/entry-check/migrated-stack",
+      "test-support/entry-check/migrated-stack.ts",
+    ],
+  ])("resolves the shared test support %s", (specifier, file) => {
+    expect(resolveFromConsumer(specifier)).toBe(urlOf(file));
   });
 
   it.each([
@@ -53,6 +63,10 @@ describe("@sf/db exports", () => {
     "@sf/db/src/cli/migrate.js",
     "@sf/db/src/cli/seed.ts",
     "@sf/db/src/migrate.ts",
+    // The guard's old address, replaced by test-support: an import left on it
+    // must fail loudly rather than reach a second copy.
+    "@sf/db/test/local-host-guard.js",
+    "@sf/db/test-support/migration-check",
   ])("refuses the deep import %s", (specifier) => {
     expect(resolveFromConsumer(specifier)).toBe(
       "ERR ERR_PACKAGE_PATH_NOT_EXPORTED",

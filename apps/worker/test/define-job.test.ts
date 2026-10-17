@@ -1,8 +1,8 @@
-import { BudgetExceededError } from "@sf/core";
+import { BudgetExceededError, ValidationError } from "@sf/core";
 import type { BudgetCheck, BudgetGuard } from "@sf/db";
 import { UnrecoverableError } from "bullmq";
 import { type Logger, pino } from "pino";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
   type JobRuntimeDeps,
@@ -27,6 +27,12 @@ function fakeQueue() {
 }
 
 /** The connections a processor is run with; nothing here touches them. */
+const connections = unusedConnections();
+
+afterAll(async () => {
+  await connections.close();
+});
+
 function deps(
   log: Logger = pino({ level: "silent" }),
   overrides: Partial<JobRuntimeDeps> = {},
@@ -34,7 +40,8 @@ function deps(
   return {
     log,
     // Carried through to the handler and never called by the handlers here.
-    ...unusedConnections(),
+    db: connections.db,
+    redis: connections.redis,
     budget: unusedBudget(),
     createUsage: recordingUsage().createUsage,
     ...overrides,
@@ -181,19 +188,62 @@ describe("defineJob context", () => {
       deps(undefined, { createUsage: usage.createUsage }),
     );
 
-    expect(usage.entries).toEqual([
+    expect(usage.rows).toEqual([
       {
+        provider: "system",
+        operation: "smoke",
+        units: 0,
+        tokensIn: null,
+        tokensOut: null,
+        costUsd: null,
         jobId: "intel.analyze/abc",
-        entry: { provider: "system", operation: "smoke", units: 0 },
+      },
+    ]);
+  });
+
+  it("records the row the real logger would write, not the object the job passed", async () => {
+    // A change the job makes to its object after the call is not in the row,
+    // and the row has the columns a write would have: nulls, the stamped job.
+    const usage = recordingUsage();
+    const definition = defineJob({
+      queue: "system.smoke",
+      payloadSchema: PayloadSchema,
+      jobIdFrom: () => "system.smoke/x",
+      handler: async (_payload, ctx) => {
+        const sent: { provider: "system"; operation: string; units: number } = {
+          provider: "system",
+          operation: "smoke",
+          units: 1,
+        };
+        await ctx.usage(sent);
+        sent.units = 99;
+      },
+    });
+
+    await definition.process(
+      fakeJob({ videoId: "abc" }),
+      deps(undefined, { createUsage: usage.createUsage }),
+    );
+
+    expect(usage.rows).toEqual([
+      {
+        provider: "system",
+        operation: "smoke",
+        units: 1,
+        tokensIn: null,
+        tokensOut: null,
+        costUsd: null,
+        jobId: "intel.analyze/abc",
       },
     ]);
   });
 
   /**
    * The fixture holds a job to the same contract the real logger does
-   * (`createUsageLogger` parses before it writes). A spend row the database
-   * would refuse - here a cost below zero - must fail the test that produced
-   * it, not be recorded as if it had been written.
+   * (`createUsageLogger` runs `toUsageRow` before it writes). A spend row the
+   * database would refuse - here a cost below zero - must fail the test that
+   * produced it, with the error the real logger throws, not be recorded as if
+   * it had been written.
    */
   it("refuses a spend row the real logger would refuse", async () => {
     const usage = recordingUsage();
@@ -210,13 +260,23 @@ describe("defineJob context", () => {
       },
     });
 
-    await expect(
-      definition.process(
+    const error = await definition
+      .process(
         fakeJob({ videoId: "abc" }),
         deps(undefined, { createUsage: usage.createUsage }),
-      ),
-    ).rejects.toThrow();
-    expect(usage.entries).toEqual([]);
+      )
+      .then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+    expect(error).toBeInstanceOf(ValidationError);
+    // Where and what, never the value - the rejected entry stays out of the
+    // error, as it does for the real logger: the whole of `details`, so a
+    // value next to the path or an empty `details` both fail.
+    expect(error instanceof ValidationError ? error.details : null).toEqual({
+      issues: [{ path: "costUsd", code: "too_small" }],
+    });
+    expect(usage.rows).toEqual([]);
   });
 
   it("gives the handler the budget guard of the process", async () => {

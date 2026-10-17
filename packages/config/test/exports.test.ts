@@ -91,6 +91,9 @@ describe("package exports", () => {
     );
 
     expect(subpaths.map(([subpath]) => subpath)).toContain("./redis-url");
+    // `./paths` resolves the repository root on the server: the test support
+    // of the packages takes `.env.test` from it (ADR-0011, "Границы").
+    expect(subpaths.map(([subpath]) => subpath)).toContain("./paths");
     for (const [subpath, target] of subpaths) {
       const browserTarget =
         typeof target === "string" ? target : target.browser;

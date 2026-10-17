@@ -53,12 +53,19 @@ const MANIFEST = fileURLToPath(new URL("../package.json", import.meta.url));
 const ManifestSchema = z.object({ scripts: z.object({ dev: z.string() }) });
 /** Enough jobs that the worker is busy when the signal arrives. */
 const JOB_COUNT = 30;
+/** How long the worker may take to come up and say so. */
+const START_DEADLINE_MS = 20_000;
 /**
- * The longest the usage table stays locked, whatever happens to the case:
- * under the 30 s test timeout, so that a case that fails or hangs never takes
+ * The longest the usage table stays locked once the worker is up, whatever
+ * happens to the case. Counted from the start of the worker, not from the
+ * lock: a slow start must not use up the hold before the second signal is
+ * sent, or the drain finishes and the case is red for a reason that is not the
+ * code. Far above what the case needs after the start (the jobs, the first
+ * signal, the repeat window, the second signal); with the start deadline it
+ * stays under the 30 s test timeout, so a case that fails or hangs never takes
  * the lock into the next case or the next file.
  */
-const HOLD_MAX_MS = 25_000;
+const HOLD_MAX_MS = 8_000;
 
 const db = openTestDb();
 const redis = openTestRedis();
@@ -75,8 +82,15 @@ interface Run {
  * `twice` sends the signal a second time once the first one has started the
  * stop and the repeat window has passed - an operator pressing Ctrl+C again
  * rather than waiting for the drain, not a copy of the first keypress.
+ * `onStarted` runs once the worker said it is up.
+ *
+ * Whatever fails between the start and the signal - the start deadline, a job
+ * never picked up - kills the child before the failure is thrown: a worker
+ * left running would keep taking the jobs of the next case.
  */
-async function runUnderSignal(options: { twice?: boolean } = {}): Promise<Run> {
+async function runUnderSignal(
+  options: { twice?: boolean; onStarted?: () => void } = {},
+): Promise<Run> {
   const child = fork(ENTRY, [], {
     execArgv: ["--import", "tsx"],
     stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -96,40 +110,48 @@ async function runUnderSignal(options: { twice?: boolean } = {}): Promise<Run> {
     });
   });
 
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`the worker never started; it said: ${stdout}`));
-    }, 25_000);
-    child.on("message", (message: unknown) => {
-      if (message === "started") {
-        clearTimeout(timer);
-        resolve();
-      }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`the worker never started; it said: ${stdout}`));
+      }, START_DEADLINE_MS);
+      child.on("message", (message: unknown) => {
+        if (message === "started") {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
     });
-  });
+    options.onStarted?.();
 
-  for (let index = 0; index < JOB_COUNT; index += 1) {
-    await systemSmokeJob.enqueue(smoke, { requestedAtMs: Date.now() + index });
-  }
-  await waitFor(
-    async () => ((await smoke.getActiveCount()) > 0 ? true : undefined),
-    { what: "the worker to pick a job up" },
-  );
-
-  child.send("signal");
-  if (options.twice === true) {
+    for (let index = 0; index < JOB_COUNT; index += 1) {
+      await systemSmokeJob.enqueue(smoke, {
+        requestedAtMs: Date.now() + index,
+      });
+    }
     await waitFor(
-      async () =>
-        stdout.includes("shutdown started, draining active jobs")
-          ? true
-          : undefined,
-      { what: "the first signal to start the stop", intervalMs: 20 },
+      async () => ((await smoke.getActiveCount()) > 0 ? true : undefined),
+      { what: "the worker to pick a job up" },
     );
-    await new Promise((resolve) =>
-      setTimeout(resolve, SIGINT_REPEAT_WINDOW_MS + 100),
-    );
+
     child.send("signal");
+    if (options.twice === true) {
+      await waitFor(
+        async () =>
+          stdout.includes("shutdown started, draining active jobs")
+            ? true
+            : undefined,
+        { what: "the first signal to start the stop", intervalMs: 20 },
+      );
+      await new Promise((resolve) =>
+        setTimeout(resolve, SIGINT_REPEAT_WINDOW_MS + 100),
+      );
+      child.send("signal");
+    }
+  } catch (err) {
+    child.kill("SIGKILL");
+    await ended.catch(() => undefined);
+    throw err;
   }
   return await ended;
 }
@@ -140,17 +162,22 @@ async function runUnderSignal(options: { twice?: boolean } = {}): Promise<Run> {
  * row goes into `api_usage_log`, and an exclusive lock held here blocks writes
  * to it (reads, which the start of the worker may need, still pass). Without
  * it the drain of a job this short races the second message over IPC.
- * The returned function lets the writes through and ends the transaction; a
- * timer lets them through anyway after `HOLD_MAX_MS`, so the lock cannot
- * outlive the case. A transaction that fails before it holds the lock fails
- * the wait for it, rather than leaving the case waiting on nothing.
+ * `release` lets the writes through and ends the transaction; `armBackstop`,
+ * called once the worker is up, lets them through anyway `HOLD_MAX_MS` later,
+ * so the lock cannot outlive the case (a worker that never comes up fails the
+ * case through the start deadline, and the case releases the lock itself).
+ * A transaction that fails before it holds the lock fails the wait for it,
+ * rather than leaving the case waiting on nothing.
  */
-async function holdUsageWrites(): Promise<() => Promise<void>> {
+async function holdUsageWrites(): Promise<{
+  armBackstop: () => void;
+  release: () => Promise<void>;
+}> {
   let release = (): void => undefined;
   const released = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const backstop = setTimeout(() => release(), HOLD_MAX_MS);
+  let backstop: NodeJS.Timeout | undefined;
   let locked = (): void => undefined;
   let refused = (_err: unknown): void => undefined;
   const isLocked = new Promise<void>((resolve, reject) => {
@@ -167,10 +194,15 @@ async function holdUsageWrites(): Promise<() => Promise<void>> {
     refused(err);
   });
   await isLocked;
-  return async () => {
-    clearTimeout(backstop);
-    release();
-    await transaction;
+  return {
+    armBackstop: () => {
+      backstop ??= setTimeout(() => release(), HOLD_MAX_MS);
+    },
+    release: async () => {
+      clearTimeout(backstop);
+      release();
+      await transaction;
+    },
   };
 }
 
@@ -237,18 +269,18 @@ describe("worker entry point under a signal", () => {
   });
 
   it("leaves at once with 130 when the signal comes a second time", async () => {
-    let releaseUsage: (() => Promise<void>) | undefined;
+    let hold: Awaited<ReturnType<typeof holdUsageWrites>> | undefined;
     let run: Run;
     try {
-      releaseUsage = await holdUsageWrites();
-      run = await runUnderSignal({ twice: true });
+      hold = await holdUsageWrites();
+      run = await runUnderSignal({ twice: true, onStarted: hold.armBackstop });
     } catch (err) {
       // This failure is the one that explains the red case; a release that
       // fails on top of it must not replace it.
-      await releaseUsage?.().catch(() => undefined);
+      await hold?.release().catch(() => undefined);
       throw err;
     }
-    await releaseUsage();
+    await hold.release();
 
     // The process chose the code itself; nothing outside killed it.
     expect(run.signal).toBeNull();

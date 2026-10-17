@@ -1,12 +1,11 @@
-import { env } from "@sf/config";
 import { HealthResponseSchema } from "@sf/contracts";
-import { closeDb, createDb } from "@sf/db";
+import { closeDb } from "@sf/db";
 import type { Redis } from "ioredis";
 import { afterEach, describe, expect, it } from "vitest";
 import { type AppInstance, buildApp } from "../src/app.js";
 import { createHealthProbes } from "../src/lib/health.js";
 import { createRedis } from "../src/lib/redis.js";
-import { openTestRedis } from "./helpers.int.js";
+import { openTestDb, openTestRedis } from "./helpers.int.js";
 import {
   EMPTY_QUEUES,
   IDLE_BUDGET,
@@ -20,11 +19,11 @@ import {
  * database, it only proves that the probes speak to live services and that a
  * dead one is reported quickly instead of hanging.
  *
- * The live client comes from `helpers.int.ts` rather than from `createRedis`
- * here, which is what puts this file behind `assertApiTestStack` too: a
- * `.env.test` naming a development stack is refused before this file opens
- * anything, and the next integration file of the api - written by copying this
- * one - inherits the guard instead of a way around it.
+ * The live clients come from `helpers.int.ts` rather than from `createDb`
+ * and `createRedis` here: the run is already behind the entry check of the
+ * preset, and `openTestDb`/`openTestRedis` check their URL once more, so the
+ * next integration file of the api - written by copying this one - inherits
+ * the guard instead of a way around it.
  */
 
 /** Nothing listens here - a refused connection, not a slow one. */
@@ -61,7 +60,7 @@ function startApp(redis: Redis): {
   redis: Redis;
   errors: Error[];
 } {
-  const db = createDb(env.DATABASE_URL);
+  const db = openTestDb();
   const errors: Error[] = [];
   redis.on("error", (err: Error) => errors.push(err));
 
