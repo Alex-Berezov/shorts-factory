@@ -1632,8 +1632,11 @@
       "E0-13"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-10"
+    "status": "done",
+    "added_at": "2026-10-10",
+    "started_at": "2026-10-17",
+    "done_at": "2026-10-17",
+    "note": "общий пресет vitest и тонкие конфиги, корневой тестовый проект, test-support @sf/db со стражем стека по разбору драйвера и входной проверкой int-прогонов; чистка и репо-тесты вынесены в E0-12E/E0-12F"
   },
   {
     "id": "E0-12B",
@@ -1706,5 +1709,33 @@
     "started_at": "2026-10-17",
     "done_at": "2026-10-17",
     "note": "worker: строгий штамп пульса, допуск часов, сброс чужого штампа при старте, healthcheck функцией, форс-выход по второму Ctrl+C"
+  },
+  {
+    "id": "E0-12E",
+    "epic": "E0",
+    "title": "Чистка тестов по строкам дисциплины: config/contracts/api-client, int-наборы @sf/db, apps/api (п.3 E0-12A + поздние строки чистки)",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-13",
+      "E0-12A"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-17"
+  },
+  {
+    "id": "E0-12F",
+    "epic": "E0",
+    "title": "Корневой vitest-проект scripts/**: переезд репо-тестов из apps/worker, JSDoc-типы scripts, входы turbo с пробой cache miss, кэш .turbo в CI",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-13",
+      "E0-12A"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-17"
   }
 ]
