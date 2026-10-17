@@ -1701,8 +1701,10 @@
       "E0-13"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-11",
-    "started_at": "2026-10-17"
+    "started_at": "2026-10-17",
+    "done_at": "2026-10-17",
+    "note": "worker: строгий штамп пульса, допуск часов, сброс чужого штампа при старте, healthcheck функцией, форс-выход по второму Ctrl+C"
   }
 ]
