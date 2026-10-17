@@ -139,7 +139,11 @@ export type DlqStatus = z.infer<typeof DlqStatusSchema>;
  * Liveness of the worker as the api sees it: the stamp it left and whether
  * that stamp is old enough to mean the worker is gone. A missing stamp is
  * `null` with `stale: true` - the key expires on its own, so "nobody wrote it"
- * and "the worker is down" are the same answer.
+ * and "the worker is down" are the same answer. The shape is `HeartbeatReading`
+ * of `@sf/core`; the two are locked together by a type assertion in
+ * `packages/contracts/test/system.test.ts`. The form of `heartbeatAt` is not
+ * checked here: its only producer is `readHeartbeat`, which lets nothing but
+ * its own canonical stamp through, and the type lock keeps the api on it.
  */
 export const WorkerStatusSchema = z
   .object({

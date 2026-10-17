@@ -1,6 +1,7 @@
 import { pino } from "pino";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bootstrap } from "../src/bootstrap.js";
+import { SIGINT_REPEAT_WINDOW_MS } from "../src/lib/shutdown.js";
 import type { WorkerRuntime } from "../src/runtime.js";
 
 /**
@@ -56,6 +57,14 @@ function connections(closed: string[]) {
 }
 
 describe("bootstrap", () => {
+  // The clock is the test's: waits below are steps of it, not real sleeps.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("listens for signals before the runtime takes its first job", async () => {
     // A `Worker` takes jobs from the moment it is constructed, and the start
     // waits on Redis and Postgres. A signal inside that window used to reach
@@ -94,10 +103,79 @@ describe("bootstrap", () => {
       exit: (code) => codes.push(code),
     });
     handler("SIGINT");
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(10);
 
     expect(closed).toEqual(["workers", "queues", "redis", "db"]);
     expect(codes).toEqual([0]);
+  });
+
+  it("leaves at once with 130 on a second Ctrl+C", async () => {
+    // Through the subscriber, the way production delivers it: the handler
+    // passes the signal on, and the second SIGINT is not swallowed on the way.
+    const codes: number[] = [];
+    let handler: (signal: string) => void = () => {};
+    const runtime = fakeRuntime([]);
+
+    await bootstrap({
+      log,
+      start: async () => ({
+        ...runtime,
+        // A drain that never ends: only the second Ctrl+C ends the process.
+        closeWorkers: () => new Promise<void>(() => {}),
+      }),
+      connections: connections([]),
+      subscribe: (fn) => {
+        handler = fn;
+      },
+      exit: (code) => codes.push(code),
+      timeoutMs: 60_000,
+    });
+    handler("SIGINT");
+    await vi.advanceTimersByTimeAsync(SIGINT_REPEAT_WINDOW_MS);
+    handler("SIGINT");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(codes).toEqual([130]);
+  });
+
+  it("keeps the failure code when Ctrl+C comes during a stop the start began", async () => {
+    // The start failed on its own and the process is closing its connections;
+    // an operator who presses Ctrl+C now has no drain to cut short, and 130
+    // would hide the failure behind "stopped by hand".
+    const codes: number[] = [];
+    let handler: (signal: string) => void = () => {};
+    let releaseRedis = (): void => {};
+
+    const booting = bootstrap({
+      log,
+      start: async () => {
+        throw new Error("the queue switches are not seeded");
+      },
+      connections: [
+        {
+          name: "redis",
+          close: () =>
+            new Promise<void>((resolve) => {
+              releaseRedis = resolve;
+            }),
+        },
+      ],
+      subscribe: (fn) => {
+        handler = fn;
+      },
+      exit: (code) => codes.push(code),
+      timeoutMs: 60_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(SIGINT_REPEAT_WINDOW_MS);
+    handler("SIGINT");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(codes).toEqual([]);
+
+    releaseRedis();
+    await booting;
+
+    expect(codes).toEqual([1]);
   });
 
   it("still drains a runtime that was signalled while it was starting", async () => {
@@ -125,12 +203,12 @@ describe("bootstrap", () => {
     });
 
     handler("SIGTERM");
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(10);
     expect(closed).toEqual([]);
 
     finishStart();
     await booting;
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(10);
 
     expect(closed).toEqual(["workers", "queues", "redis", "db"]);
     expect(codes).toEqual([0]);
@@ -164,12 +242,12 @@ describe("bootstrap", () => {
     });
 
     handler("SIGTERM");
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(10);
     expect(codes).toEqual([]);
 
     failStart(new Error("the queue switches are not seeded"));
     await booting;
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(10);
 
     // Nothing to drain - the runtime never existed - and a code that says so.
     expect(closed).toEqual(["redis", "db"]);

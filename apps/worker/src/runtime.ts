@@ -5,6 +5,7 @@ import { Worker } from "bullmq";
 import type { Redis } from "ioredis";
 import type { Logger } from "pino";
 import { JOB_PROCESSORS } from "./jobs/index.js";
+import { clearHeartbeat } from "./jobs/system-heartbeat.js";
 import { createWorkerBudgetGuard } from "./lib/budget.js";
 import type { QueueProcessor } from "./lib/define-job.js";
 import { type DlqWriter, createDlqWriter } from "./lib/dlq.js";
@@ -148,6 +149,23 @@ export async function startWorkerRuntime(
     // Before anything is started: a database with no switches means a database
     // that was never seeded, and the worker says so instead of guessing.
     await applyQueueSwitches({ db: deps.db, log: deps.log, getQueue, warned });
+
+    // Right after the switches, before the switch resync, the schedules and
+    // any worker: the stamp in Redis may be one the previous process left in
+    // the `redisdata` volume, and with a TTL of three ticks it would make this
+    // process healthy for up to 3 min before it has done anything. Not before
+    // the switches: a database that was never seeded has to be the first error
+    // the operator sees. Nothing before this point runs a job, so the stamp
+    // cleared here cannot be one this process has written. Without it the
+    // healthcheck answers "no stamp" until the first tick, which comes within
+    // 60 s - inside the `start_period: 90s` of the compose healthcheck. A
+    // rejected `DEL` fails the start like any other step here; a Redis that is
+    // down makes it wait, as it does them (the connection is BullMQ's, with no
+    // request retry limit). The price: a second worker started next to a live
+    // one (dev on the host and the container) clears its neighbour's stamp,
+    // which reads stale on `/system` until the next tick of either.
+    await clearHeartbeat(deps.redis);
+
     stopSwitchSync = startQueueSwitchSync({
       db: deps.db,
       log: deps.log,

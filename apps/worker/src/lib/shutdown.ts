@@ -55,6 +55,22 @@ export interface ShutdownRequest {
 const SHUTDOWN_TIMEOUT_MS = 25_000;
 
 /**
+ * How long a SIGINT after the first one still counts as the same keypress.
+ *
+ * One Ctrl+C under `pnpm dev` on Linux or macOS reaches this process more than
+ * once: the terminal signals the whole process group, and pnpm (and turbo,
+ * when it runs the task) forwards the signal it got on top of that. The copies
+ * arrive within milliseconds of each other; an operator who presses Ctrl+C
+ * again because the drain is too slow does it after a pause a person can
+ * notice. A second it is.
+ */
+export const SIGINT_REPEAT_WINDOW_MS = 1_000;
+
+/** What the operator is told on the first Ctrl+C, while the drain runs. */
+const SIGINT_HINT =
+  "press Ctrl+C again to exit now; unfinished jobs will be retried";
+
+/**
  * Signal handler that closes the worker's resources in order and exits.
  *
  * A copy of the api handler in shape (importing across apps is forbidden by §6
@@ -63,9 +79,22 @@ const SHUTDOWN_TIMEOUT_MS = 25_000;
  *
  * - **order**: the stages above, workers first, because `worker.close()` is
  *   what waits for the job in flight;
- * - **idempotence**: an operator presses Ctrl+C twice, and a container gets
- *   SIGTERM followed by SIGINT. A second pass would call `close()` on a worker
- *   that is already closing and turn a clean stop into an error;
+ * - **one pass, and a way out of it**: a second pass would call `close()` on
+ *   a worker that is already closing and turn a clean stop into an error, so
+ *   the stages run once. A repeated SIGTERM (or any other repeated call) is
+ *   only logged. A SIGINT that comes later than `SIGINT_REPEAT_WINDOW_MS`
+ *   after a stop a signal began is an operator pressing Ctrl+C again because
+ *   they do not want to wait for the drain - up to the deadline below: the
+ *   process leaves at once with 130 (128 + SIGINT) and the jobs it was running
+ *   come back to the queue as stalled, which is safe because every job is
+ *   idempotent. The first SIGINT says so in its line. The same holds for a
+ *   SIGINT after a SIGTERM; Compose only ever sends SIGTERM, so the graceful
+ *   stop of a container is not affected. A SIGINT inside the window is a copy
+ *   of the first keypress and is only logged at debug. A stop the process
+ *   began itself, because its start failed, has no keypress to repeat and
+ *   nothing stalled to warn about: a SIGINT there is only logged, and the exit
+ *   code stays the failure's. A start that fails while a signal's stop is
+ *   already running still lets a later Ctrl+C force the exit, with 1, not 130;
  * - **a deadline**: with `maxRetriesPerRequest: null` a command to a Redis
  *   that is down waits forever, so without a live timer the process would hang
  *   there instead of exiting. The timer is not `unref`ed on purpose - an
@@ -90,6 +119,12 @@ export function createShutdownHandler(
    * closes, and the exit code is read from here when the sequence ends.
    */
   let failed = false;
+  /** Out here so that a forced exit can take the deadline down with it. */
+  let forceTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The stop was asked for by a signal, not by the process itself. */
+  let startedBySignal = false;
+  /** Set once the window has passed: a SIGINT from then on is a new keypress. */
+  let repeatArmed = false;
 
   /** The process leaves once, with the verdict that was reached first. */
   const exitOnce = (code: number): void => {
@@ -108,13 +143,38 @@ export function createShutdownHandler(
       failed = true;
     }
     if (started) {
+      if (signal === "SIGINT" && startedBySignal) {
+        if (!repeatArmed) {
+          options.log.debug(
+            { signal },
+            "repeated SIGINT within the window, same keypress",
+          );
+          return;
+        }
+        options.log.error(
+          { signal, failed },
+          "forced exit, active jobs return as stalled",
+        );
+        clearTimeout(forceTimer);
+        exitOnce(failed ? 1 : 130);
+        return;
+      }
       options.log.info({ signal, failed }, "shutdown already in progress");
       return;
     }
     started = true;
-    options.log.info({ signal }, "shutdown started, draining active jobs");
+    startedBySignal = signal === "SIGINT" || signal === "SIGTERM";
+    // Not holding the loop open: the window only matters while something
+    // else - the drain, the deadline - keeps the process alive.
+    setTimeout(() => {
+      repeatArmed = true;
+    }, SIGINT_REPEAT_WINDOW_MS).unref();
+    options.log.info(
+      signal === "SIGINT" ? { signal, hint: SIGINT_HINT } : { signal },
+      "shutdown started, draining active jobs",
+    );
 
-    const forceTimer = setTimeout(() => {
+    forceTimer = setTimeout(() => {
       options.log.error({ signal, timeoutMs }, "shutdown timed out, exiting");
       exitOnce(1);
     }, timeoutMs);

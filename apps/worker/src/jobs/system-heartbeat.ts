@@ -4,6 +4,7 @@ import {
   intervalSlot,
   jobIds,
 } from "@sf/core";
+import type { Redis } from "ioredis";
 import { z } from "zod";
 import { type JobDefinition, defineJob } from "../lib/define-job.js";
 
@@ -54,3 +55,16 @@ export function createSystemHeartbeatJob(
 }
 
 export const systemHeartbeatJob = createSystemHeartbeatJob();
+
+/**
+ * Removes the stamp a previous process of the worker left behind. Called once
+ * at start, after the queue switches are applied and before the heartbeat
+ * scheduler and any `Worker` (`runtime.ts`): the key lives in the
+ * `redisdata` volume with a TTL of three ticks, so a restarted worker would
+ * otherwise be called healthy on its predecessor's stamp before it ever wrote
+ * one. A failure is not swallowed - a worker that cannot clear its own key
+ * cannot be trusted to be judged by it.
+ */
+export async function clearHeartbeat(redis: Pick<Redis, "del">): Promise<void> {
+  await redis.del(WORKER_HEARTBEAT_KEY);
+}

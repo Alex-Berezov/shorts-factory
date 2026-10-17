@@ -2,14 +2,17 @@ import {
   BUDGET_MEASURES,
   BUDGET_PERIODS,
   BUDGET_SCOPE_KEYS,
+  type HeartbeatReading,
   QUEUE_NAMES,
 } from "@sf/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   BudgetStatusSchema,
   DependencyCheckSchema,
   QueueStatusSchema,
   SystemStatusResponseSchema,
+  type WorkerStatus,
+  WorkerStatusSchema,
 } from "../src/system.js";
 
 /** The answer when everything is reachable, spelled out once. */
@@ -181,5 +184,39 @@ describe("DependencyCheckSchema", () => {
       DependencyCheckSchema.safeParse({ status: "down", reason: "timeout" })
         .success,
     ).toBe(true);
+  });
+});
+
+describe("WorkerStatusSchema", () => {
+  /**
+   * The api builds this section from `readHeartbeat` in `@sf/core`. The
+   * schema stays in this package (ADR-0007: contracts takes only registries
+   * from core), so the two declarations of "stamp + stale" are locked here:
+   * a field added on one side and not the other fails typecheck instead of
+   * being cut off on the wire by `.strict()`.
+   */
+  it("has the shape of the domain reading", () => {
+    expectTypeOf<WorkerStatus>().toEqualTypeOf<HeartbeatReading>();
+  });
+
+  // Readings spelled out rather than produced by `readHeartbeat`: this
+  // package takes types and registries from core, not its functions
+  // (ADR-0007); the type lock above is what ties the two together.
+  it.each<HeartbeatReading>([
+    { heartbeatAt: "2026-10-10T11:59:30.000Z", stale: false },
+    { heartbeatAt: "2026-10-10T11:50:00.000Z", stale: true },
+    { heartbeatAt: null, stale: true },
+  ])("accepts the reading %o", (reading) => {
+    expect(WorkerStatusSchema.parse(reading)).toEqual(reading);
+  });
+
+  it("refuses a field the domain reading does not have", () => {
+    expect(
+      WorkerStatusSchema.safeParse({
+        heartbeatAt: "2026-10-10T11:59:30.000Z",
+        stale: false,
+        pid: 1,
+      }).success,
+    ).toBe(false);
   });
 });

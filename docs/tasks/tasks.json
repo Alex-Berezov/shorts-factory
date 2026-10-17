@@ -1701,7 +1701,8 @@
       "E0-13"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-11"
+    "status": "in_progress",
+    "added_at": "2026-10-11",
+    "started_at": "2026-10-17"
   }
 ]

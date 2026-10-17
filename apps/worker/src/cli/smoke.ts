@@ -5,7 +5,8 @@ import { systemSmokeJob } from "../jobs/system-smoke.js";
 import { buildWorkerLoggerOptions } from "../lib/logger.js";
 import { createQueueFactory } from "../lib/queues.js";
 import { closeRedis, createRedis } from "../lib/redis.js";
-import { runSmoke, settleWithin } from "./smoke-run.js";
+import { settleWithin } from "../lib/settle-within.js";
+import { runSmoke } from "./smoke-run.js";
 
 /**
  * `pnpm --filter @sf/worker smoke`: puts one `system.smoke` job on the queue

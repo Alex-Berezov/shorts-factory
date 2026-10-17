@@ -48,26 +48,60 @@ export function createRedis(
   url: string,
   options: WorkerRedisOptions = {},
 ): Redis {
-  const client = new Redis(url, {
-    connectTimeout: CONNECT_TIMEOUT_MS,
-    // Required by BullMQ: see the comment above before changing either line.
-    maxRetriesPerRequest: null,
-    enableOfflineQueue: true,
-    retryStrategy: (attempt: number) =>
-      Math.min(attempt * 200, MAX_RECONNECT_DELAY_MS),
-  });
+  return withListeners(
+    new Redis(url, {
+      connectTimeout: CONNECT_TIMEOUT_MS,
+      // Required by BullMQ: see the comment above before changing either line.
+      maxRetriesPerRequest: null,
+      enableOfflineQueue: true,
+      retryStrategy: (attempt: number) =>
+        Math.min(attempt * 200, MAX_RECONNECT_DELAY_MS),
+    }),
+    options.log,
+  );
+}
 
+export interface FailFastRedisOptions {
+  /** How long a connect attempt gets; below the deadline of the caller. */
+  connectTimeoutMs: number;
+}
+
+/**
+ * Redis client for a short-lived process that checks Redis and exits - the
+ * container healthcheck. It has to fail fast: one connect attempt and no
+ * reconnect, one try per command, so that a Redis that is down is an answer
+ * rather than a wait.
+ *
+ * That is exactly the policy BullMQ forbids, which is why it is a function of
+ * its own and not options of `createRedis`: a client for the queues cannot be
+ * built from here by passing the wrong object, and the factory above has no
+ * parameter that weakens its connection.
+ */
+export function createFailFastRedis(
+  url: string,
+  options: FailFastRedisOptions,
+): Redis {
+  return withListeners(
+    new Redis(url, {
+      connectTimeout: options.connectTimeoutMs,
+      maxRetriesPerRequest: 1,
+      retryStrategy: () => null,
+    }),
+    // No log: the caller reads the failure from the rejected command.
+    undefined,
+  );
+}
+
+/** The `error` listener every client gets, and the health report with a log. */
+function withListeners(client: Redis, log: Logger | undefined): Redis {
   const health =
-    options.log === undefined
-      ? undefined
-      : createRedisHealthListeners(options.log);
+    log === undefined ? undefined : createRedisHealthListeners(log);
   client.on("error", (err: Error) => {
     health?.onError(err);
   });
   if (health !== undefined) {
     client.on("ready", health.onReady);
   }
-
   return client;
 }
 

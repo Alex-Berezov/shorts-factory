@@ -43,7 +43,7 @@ export class BudgetCacheTimeoutError extends Error {
  *
  * One of five copies of "a promise under a deadline" across the two apps
  * (`apps/api/src/lib/deadline.ts` and the `drain` of `lib/queue-stats.ts`,
- * `cli/smoke-run.ts`, `lib/shutdown.ts`), and they have already drifted on
+ * `lib/settle-within.ts`, `lib/shutdown.ts`), and they have already drifted on
  * `unref`. Merging them is a change to both processes at once, so it is a line
  * in docs/TECH_DEBT.md (13.09.2026, E0-12) rather than a merge attempted from
  * whichever of the five a task happens to touch.

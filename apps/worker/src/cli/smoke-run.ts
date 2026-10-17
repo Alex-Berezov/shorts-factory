@@ -1,4 +1,5 @@
 import type { Logger } from "pino";
+import { settleWithin } from "../lib/settle-within.js";
 
 /**
  * What `pnpm --filter @sf/worker smoke` actually does, without the process
@@ -56,32 +57,6 @@ export interface SmokeRunOptions {
 
 /** What the queue answered when it was asked whether it is switched off. */
 export type SmokeQueueState = boolean | "unreachable";
-
-/**
- * Runs `work`, but gives up on it after `timeoutMs` and answers `fallback`.
- *
- * Every promise this command holds can be one that never settles: the
- * connection underneath has no request retry limit and an offline queue
- * (BullMQ's requirement, `lib/redis.ts`), so a command issued while Redis is
- * down waits for a socket instead of failing. `Promise.race` with a real timer
- * is the only thing between that and a command with no output and no exit
- * code.
- */
-export async function settleWithin<T, F>(
-  work: Promise<T>,
-  timeoutMs: number,
-  fallback: F,
-): Promise<T | F> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const expiry = new Promise<F>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), timeoutMs);
-  });
-  try {
-    return await Promise.race([work, expiry]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 /**
  * Whether the queue is switched off, when the answer is allowed to be "no

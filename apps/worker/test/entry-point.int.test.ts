@@ -3,10 +3,19 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { closeDb } from "@sf/db";
 import { Queue } from "bullmq";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from "vitest";
 import { z } from "zod";
 import { systemSmokeJob } from "../src/jobs/system-smoke.js";
 import { closeRedis } from "../src/lib/redis.js";
+import { SIGINT_REPEAT_WINDOW_MS } from "../src/lib/shutdown.js";
 import { DEV_COMMAND } from "./dev-command.js";
 import {
   deleteSmokeUsage,
@@ -44,6 +53,12 @@ const MANIFEST = fileURLToPath(new URL("../package.json", import.meta.url));
 const ManifestSchema = z.object({ scripts: z.object({ dev: z.string() }) });
 /** Enough jobs that the worker is busy when the signal arrives. */
 const JOB_COUNT = 30;
+/**
+ * The longest the usage table stays locked, whatever happens to the case:
+ * under the 30 s test timeout, so that a case that fails or hangs never takes
+ * the lock into the next case or the next file.
+ */
+const HOLD_MAX_MS = 25_000;
 
 const db = openTestDb();
 const redis = openTestRedis();
@@ -55,8 +70,13 @@ interface Run {
   stdout: string;
 }
 
-/** Starts the worker, waits until it is up, signals it and waits for the end. */
-async function runUnderSignal(): Promise<Run> {
+/**
+ * Starts the worker, waits until it is up, signals it and waits for the end.
+ * `twice` sends the signal a second time once the first one has started the
+ * stop and the repeat window has passed - an operator pressing Ctrl+C again
+ * rather than waiting for the drain, not a copy of the first keypress.
+ */
+async function runUnderSignal(options: { twice?: boolean } = {}): Promise<Run> {
   const child = fork(ENTRY, [], {
     execArgv: ["--import", "tsx"],
     stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -98,12 +118,91 @@ async function runUnderSignal(): Promise<Run> {
   );
 
   child.send("signal");
+  if (options.twice === true) {
+    await waitFor(
+      async () =>
+        stdout.includes("shutdown started, draining active jobs")
+          ? true
+          : undefined,
+      { what: "the first signal to start the stop", intervalMs: 20 },
+    );
+    await new Promise((resolve) =>
+      setTimeout(resolve, SIGINT_REPEAT_WINDOW_MS + 100),
+    );
+    child.send("signal");
+  }
   return await ended;
+}
+
+/**
+ * Keeps every smoke job that reaches its usage row waiting, so that the drain
+ * the first signal starts cannot finish before the second signal arrives: the
+ * row goes into `api_usage_log`, and an exclusive lock held here blocks writes
+ * to it (reads, which the start of the worker may need, still pass). Without
+ * it the drain of a job this short races the second message over IPC.
+ * The returned function lets the writes through and ends the transaction; a
+ * timer lets them through anyway after `HOLD_MAX_MS`, so the lock cannot
+ * outlive the case. A transaction that fails before it holds the lock fails
+ * the wait for it, rather than leaving the case waiting on nothing.
+ */
+async function holdUsageWrites(): Promise<() => Promise<void>> {
+  let release = (): void => undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const backstop = setTimeout(() => release(), HOLD_MAX_MS);
+  let locked = (): void => undefined;
+  let refused = (_err: unknown): void => undefined;
+  const isLocked = new Promise<void>((resolve, reject) => {
+    locked = resolve;
+    refused = reject;
+  });
+  const transaction = db.$client.begin(async (tx) => {
+    await tx`lock table api_usage_log in exclusive mode`;
+    locked();
+    await released;
+  });
+  transaction.catch((err: unknown) => {
+    clearTimeout(backstop);
+    refused(err);
+  });
+  await isLocked;
+  return async () => {
+    clearTimeout(backstop);
+    release();
+    await transaction;
+  };
 }
 
 beforeAll(async () => {
   await obliterateQueues(redis, QUEUES);
   await seedQueueSwitches(db);
+  await deleteSmokeUsage(db);
+});
+
+/** How many usage rows smoke runs have left in the table. */
+async function countSmokeUsage(): Promise<number> {
+  const rows = await db.$client<{ count: number }[]>`
+    select count(*)::int as count from api_usage_log
+    where provider = 'system' and operation = 'smoke'
+  `;
+  return rows[0]?.count ?? 0;
+}
+
+// Every case starts from a table with no smoke rows: a row the previous case
+// left behind - a write of its child that landed after that case's delete -
+// fails here by name instead of passing for the wrong reason further on.
+beforeEach(async () => {
+  expect(
+    await countSmokeUsage(),
+    "smoke usage rows left by the previous case",
+  ).toBe(0);
+});
+
+// Each case leaves what its child process could not finish: jobs it was
+// holding come back as stalled, and its usage rows stay in the table.
+afterEach(async () => {
+  await obliterateQueues(redis, QUEUES);
   await deleteSmokeUsage(db);
 });
 
@@ -135,6 +234,27 @@ describe("worker entry point under a signal", () => {
     // a graceful stop exists to avoid.
     expect(await smoke.getActiveCount()).toBe(0);
     expect(await smoke.getCompletedCount()).toBeGreaterThan(0);
+  });
+
+  it("leaves at once with 130 when the signal comes a second time", async () => {
+    let releaseUsage: (() => Promise<void>) | undefined;
+    let run: Run;
+    try {
+      releaseUsage = await holdUsageWrites();
+      run = await runUnderSignal({ twice: true });
+    } catch (err) {
+      // This failure is the one that explains the red case; a release that
+      // fails on top of it must not replace it.
+      await releaseUsage?.().catch(() => undefined);
+      throw err;
+    }
+    await releaseUsage();
+
+    // The process chose the code itself; nothing outside killed it.
+    expect(run.signal).toBeNull();
+    expect(run.code).toBe(130);
+    expect(run.stdout).toContain("shutdown started, draining active jobs");
+    expect(run.stdout).toContain("forced exit, active jobs return as stalled");
   });
 
   it("is started by `pnpm dev` exactly the way this test starts it", () => {

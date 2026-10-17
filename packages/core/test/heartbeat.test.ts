@@ -35,10 +35,29 @@ describe("readHeartbeat", () => {
     });
   });
 
-  it("normalises a stamp written in another valid date format", () => {
-    expect(readHeartbeat("2026-10-10T11:59:30Z", NOW)).toEqual({
-      heartbeatAt: "2026-10-10T11:59:30.000Z",
-      stale: false,
+  /**
+   * The writer only ever produces `toISOString()`; any other form means
+   * something else wrote under the key, and a lenient parse would read junk
+   * like "99999" as a worker alive until the year 99999.
+   */
+  it.each([
+    "99999",
+    "2026-10-10",
+    "Sat Oct 10 2026 12:00:00 GMT+0000",
+    "2026-10-10T11:59:30Z",
+    "2026-02-30T00:00:00.000Z",
+    // `toISOString()` writes these for years outside 0000-9999; the writer
+    // never does, and both round-trip, so only the form keeps them out.
+    "+275760-09-13T00:00:00.000Z",
+    "-000001-01-01T00:00:00.000Z",
+    // Parsed by `Date.parse`, but not what `toISOString()` writes.
+    "2026-10-10t11:59:30.000z",
+    "2026-10-10t11:59:30.000Z",
+    "2026-10-09T24:00:00.000Z",
+  ])("refuses a stamp not in the writer's ISO form: %s", (stamp) => {
+    expect(readHeartbeat(stamp, NOW)).toEqual({
+      heartbeatAt: null,
+      stale: true,
     });
   });
 
@@ -58,11 +77,10 @@ describe("readHeartbeat", () => {
   });
 
   /**
-   * The status page never judged a stamp by how far ahead it is, and the api
-   * on the host reads a worker in a container whose clock may drift: a live
-   * worker must not turn stale because its clock runs a few minutes fast.
+   * The api on the host reads a worker in a container whose clock may drift:
+   * drift within the TTL is alive, a stamp further ahead is a jumped clock.
    */
-  it.each([5, 6, 600])(
+  it.each([5, 6, WORKER_HEARTBEAT_TTL_SEC])(
     "calls a stamp %i s ahead of the clock alive and keeps its time",
     (aheadSec) => {
       const stamp = stampAgo(-aheadSec);
@@ -70,6 +88,18 @@ describe("readHeartbeat", () => {
       expect(readHeartbeat(stamp, NOW)).toEqual({
         heartbeatAt: stamp,
         stale: false,
+      });
+    },
+  );
+
+  it.each([WORKER_HEARTBEAT_TTL_SEC + 1, 600])(
+    "calls a stamp %i s ahead of the clock stale but keeps its time",
+    (aheadSec) => {
+      const stamp = stampAgo(-aheadSec);
+
+      expect(readHeartbeat(stamp, NOW)).toEqual({
+        heartbeatAt: stamp,
+        stale: true,
       });
     },
   );

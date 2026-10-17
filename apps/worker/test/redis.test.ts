@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   type ClosableRedis,
+  type FailFastRedisOptions,
+  type WorkerRedisOptions,
   closeRedis,
+  createFailFastRedis,
+  createRedis,
   createRedisErrorReporter,
   createRedisHealthListeners,
   redisErrorLevel,
@@ -125,5 +129,54 @@ describe("closeRedis", () => {
 
     await expect(closeRedis(client)).resolves.toBeUndefined();
     expect(client.calls).toEqual(["quit", "disconnect"]);
+  });
+});
+
+describe("createRedis", () => {
+  /** Nothing listens on port 1: the client is torn down before it matters. */
+  const REDIS_URL = "redis://127.0.0.1:1";
+
+  it("keeps the options BullMQ needs", () => {
+    const client = createRedis(REDIS_URL);
+    try {
+      expect(client.options.maxRetriesPerRequest).toBeNull();
+      expect(client.options.enableOfflineQueue).toBe(true);
+      expect(client.options.connectTimeout).toBe(5_000);
+      // Backoff grows with the attempt and stops at its cap.
+      expect(client.options.retryStrategy?.(1)).toBe(200);
+      expect(client.options.retryStrategy?.(10)).toBe(2_000);
+      expect(client.options.retryStrategy?.(100)).toBe(5_000);
+    } finally {
+      client.disconnect();
+    }
+  });
+
+  it("has no way to loosen the connection BullMQ uses", () => {
+    // Only a logger: a retry limit or a reconnect policy passed to this
+    // factory would reach the queues' connection without a word.
+    expectTypeOf<keyof WorkerRedisOptions>().toEqualTypeOf<"log">();
+  });
+});
+
+describe("createFailFastRedis", () => {
+  const REDIS_URL = "redis://127.0.0.1:1";
+
+  it("gives up at once instead of waiting for Redis", () => {
+    const client = createFailFastRedis(REDIS_URL, { connectTimeoutMs: 3_000 });
+    try {
+      expect(client.options.connectTimeout).toBe(3_000);
+      expect(client.options.maxRetriesPerRequest).toBe(1);
+      expect(client.options.retryStrategy?.(1)).toBeNull();
+    } finally {
+      client.disconnect();
+    }
+  });
+
+  it("takes nothing but the connect timeout", () => {
+    // The healthcheck reads its verdict from the rejection of `get`; an option
+    // nobody passes is a branch nobody runs.
+    expectTypeOf<
+      keyof FailFastRedisOptions
+    >().toEqualTypeOf<"connectTimeoutMs">();
   });
 });

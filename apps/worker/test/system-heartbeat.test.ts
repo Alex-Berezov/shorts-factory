@@ -5,6 +5,7 @@ import { pino } from "pino";
 import { type MockInstance, afterAll, describe, expect, it, vi } from "vitest";
 import {
   HEARTBEAT_INTERVAL_MIN,
+  clearHeartbeat,
   createSystemHeartbeatJob,
   systemHeartbeatJob,
 } from "../src/jobs/system-heartbeat.js";
@@ -187,5 +188,30 @@ describe("system.heartbeat", () => {
     redis.disconnect();
 
     expect(set).not.toHaveBeenCalled();
+  });
+});
+
+describe("clearHeartbeat", () => {
+  it("deletes the shared key, once", async () => {
+    // The key comes from `@sf/core`: clearing a key the readers do not look
+    // at would leave the previous process's stamp in place.
+    const redis = new Redis({ lazyConnect: true });
+    const del = vi.spyOn(redis, "del").mockResolvedValue(1);
+
+    await clearHeartbeat(redis);
+    redis.disconnect();
+
+    expect(del).toHaveBeenCalledTimes(1);
+    expect(del).toHaveBeenCalledWith(WORKER_HEARTBEAT_KEY);
+  });
+
+  it("lets a refused delete fail the caller", async () => {
+    // The start treats this as a failure of its own (`runtime.ts`); a stamp
+    // that could not be cleared is a worker the healthcheck may misjudge.
+    const redis = new Redis({ lazyConnect: true });
+    vi.spyOn(redis, "del").mockRejectedValue(new Error("READONLY"));
+
+    await expect(clearHeartbeat(redis)).rejects.toThrow("READONLY");
+    redis.disconnect();
   });
 });
