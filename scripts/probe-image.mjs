@@ -18,10 +18,9 @@
  * matrix element, so all four images are probed the same way.
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { repoRoot } from "./lib/paths.mjs";
+import { isEntry, repoRoot } from "./lib/paths.mjs";
 
 /**
  * One check inside an image: `file` must exist, or `pkg` must resolve from
@@ -276,25 +275,6 @@ export function main(argv, deps = {}) {
   }
   out(`probe-image: ${tag} ok (${checks.length} checks, control red)`);
   return 0;
-}
-
-/**
- * Whether this module is the script node was started with. Node resolves
- * symlinks in `import.meta.url` but leaves `argv[1]` as written, so both sides
- * go through realpath; a path that cannot be resolved is not the entry.
- *
- * @param {string} metaUrl `import.meta.url` of the module
- * @param {string | undefined} entry `process.argv[1]`
- * @param {(path: string) => string} [resolve]
- * @returns {boolean}
- */
-export function isEntry(metaUrl, entry, resolve = realpathSync) {
-  if (entry === undefined || entry === "") return false;
-  try {
-    return resolve(fileURLToPath(metaUrl)) === resolve(entry);
-  } catch {
-    return false;
-  }
 }
 
 if (isEntry(import.meta.url, process.argv[1])) {

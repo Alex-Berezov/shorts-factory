@@ -191,9 +191,9 @@ PowerShell unless two variants are shown. All of them run from the repository ro
 
 The full stack in containers (`docker compose up --build` from the root) is described in
 `infra/README.md`. `pnpm check:compose` checks its invariants (only web published, api port,
-`NODE_ENV`, healthchecks, restart policies, the root `.env` mounted read-only at `/repo/.env`, `.env` masks in the `.dockerignore` of every built image, ...) through
-`docker compose config` (the `.dockerignore` masks are read from disk by `checkBuildIgnores`, `scripts/compose-rules.mjs`): it needs the Docker CLI, not a running daemon, and never reads `.env`.
-Tested with Docker Compose v5.5.1 (Docker Desktop); no minimum version has been established.
+`NODE_ENV`, healthchecks, restart policies, the root `.env` mounted read-only at `/repo/.env`, `.env` masks in the `.dockerignore` of every built image, the test stack ports of `.env.test`, ...) through
+`docker compose config` (rule 11 reads the `.dockerignore` of every build and rule 12 the root `.env.test` from disk, `scripts/compose-rules.mjs`): it needs the Docker CLI, not a running daemon, and never reads `.env`.
+It needs Docker Compose 5.x (CI pins 5.5.1); Compose 2.x is red on purpose, see `infra/README.md`.
 
 Postgres and Redis run with `restart: unless-stopped`: once started, they come back with Docker
 Desktop and keep ports 5442 and 6389 until `docker compose -f infra/docker-compose.yml stop`.

@@ -39,9 +39,12 @@ services:
     volumes: [redisdata:/data]
     command: ["redis-server", "--appendonly", "yes"]
     # Lets the full stack wait for a Redis that answers, not for a container
-    # that merely started (`depends_on: condition: service_healthy`).
+    # that merely started (`depends_on: condition: service_healthy`). The
+    # answer must be PONG: redis-cli exits 0 on an error reply too, and a
+    # Redis replaying its append-only file answers LOADING
+    # (scripts/compose-rules.mjs, rule 4).
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli ping | grep -qx PONG"]
       interval: 5s
       retries: 10
       # Replaying the append-only file after a restart.

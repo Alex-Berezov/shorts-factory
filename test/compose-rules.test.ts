@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   RENDERING_PROBE,
   RENDERING_PROBE_SOURCE,
-  checkBuildIgnores,
+  RULE_IDS,
+  TEST_STACK_BINDS,
   checkCompose,
   checkDockerignore,
   checkRendering,
@@ -12,6 +13,15 @@ import {
   durationSec,
 } from "../scripts/compose-rules.mjs";
 import { repoRoot } from "../scripts/lib/paths.mjs";
+import {
+  CLEAN_IGNORE,
+  CLEAN_TEST_ENV,
+  type Service,
+  buildAt,
+  cleanFilesAt,
+  cleanStack,
+} from "./compose-fixture.js";
+import { readRepoFile } from "./repo-files.js";
 
 /**
  * The rules `pnpm check:compose` holds the full stack to, each fed a
@@ -21,103 +31,72 @@ import { repoRoot } from "../scripts/lib/paths.mjs";
  * repository are started.
  */
 
-type Service = Record<string, unknown>;
-
 /** The project's `.env`, absolute, as Compose resolves `../.env` of a bind. */
 const PROJECT_ENV = "/srv/shorts-factory/.env";
+/** The build context of every image: the root of the project. */
+const CONTEXT = join("/srv", "shorts-factory");
+/** The root `.env.test` of the project. */
+const TEST_ENV_FILE = join(CONTEXT, ".env.test");
+/** A reader of the files in `files` (path -> contents), null for others. */
+function reader(files: Record<string, string>) {
+  return (path: string): string | null => files[path] ?? null;
+}
 
-/** `checkCompose` for a project whose `.env` is `PROJECT_ENV`. */
-function check(config: { services?: Record<string, unknown> }): string[] {
-  return checkCompose(config, { envFile: PROJECT_ENV });
+/** The files the rules read of a clean project. */
+function cleanFiles(): Record<string, string> {
+  return cleanFilesAt(CONTEXT);
+}
+
+/** The project of `check`: its `.env`, its `.env.test` and `read`. */
+function projectWith(read: (path: string) => string | null) {
+  return {
+    envFile: PROJECT_ENV,
+    testEnvFile: TEST_ENV_FILE,
+    read,
+  };
+}
+
+/**
+ * `checkCompose` for a project whose `.env` is `PROJECT_ENV`, with the files
+ * of `cleanFiles` changed by `files` (a null removes one).
+ */
+function check(
+  config: unknown,
+  files: Record<string, string | null> = {},
+): string[] {
+  const present = Object.fromEntries(
+    Object.entries({ ...cleanFiles(), ...files }).filter(
+      (entry): entry is [string, string] => entry[1] !== null,
+    ),
+  );
+  return checkCompose(config, projectWith(reader(present)));
+}
+
+/** Rule 11 alone, the way test/container.test.ts runs it, with `read`. */
+function buildIgnores(
+  config: unknown,
+  read: (path: string) => string | null,
+): string[] {
+  return checkCompose(config, projectWith(read), ["build-ignores"]);
+}
+
+/** The build of a service's image, as Compose prints it. */
+function buildOf(name: string): Service {
+  return buildAt(CONTEXT, name);
 }
 
 /** The resolved configuration of a correct stack, as Compose prints it. */
 function cleanConfig(): { services: Record<string, Service> } {
-  const afterMigrate = {
-    migrate: { condition: "service_completed_successfully", required: true },
-    postgres: { condition: "service_healthy", required: true },
-    redis: { condition: "service_healthy", required: true },
-  };
-  const envMount = () => ({
-    type: "bind",
-    source: PROJECT_ENV,
-    target: "/repo/.env",
-    read_only: true,
-    bind: { create_host_path: false },
-  });
-  const media = () => [
-    envMount(),
-    { type: "volume", source: "media", target: "/data/media" },
-  ];
+  return cleanStack({ context: CONTEXT, envFile: PROJECT_ENV });
+}
+
+/** A clean configuration without the service `name`. */
+function without(name: string): { services: Record<string, Service> } {
+  const { services } = cleanConfig();
   return {
-    services: {
-      postgres: {
-        ports: [{ host_ip: "127.0.0.1", target: 5432, published: "5442" }],
-        healthcheck: {
-          test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "sf"],
-          start_period: "1m0s",
-        },
-        restart: "unless-stopped",
-      },
-      redis: {
-        ports: [{ host_ip: "127.0.0.1", target: 6379, published: "6389" }],
-        healthcheck: {
-          test: ["CMD", "redis-cli", "ping"],
-          start_period: "10s",
-        },
-        restart: "unless-stopped",
-      },
-      migrate: {
-        volumes: [envMount()],
-        environment: { NODE_ENV: "production" },
-        depends_on: { postgres: { condition: "service_healthy" } },
-        restart: "no",
-      },
-      api: {
-        environment: {
-          NODE_ENV: "production",
-          MEDIA_DIR: "/data/media",
-          API_PORT: "3001",
-        },
-        depends_on: afterMigrate,
-        healthcheck: {
-          test: [
-            "CMD",
-            "wget",
-            "-q",
-            "-O",
-            "/dev/null",
-            "http://127.0.0.1:3001/health",
-          ],
-        },
-        volumes: media(),
-        stop_grace_period: "15s",
-        restart: "unless-stopped",
-      },
-      worker: {
-        environment: { NODE_ENV: "production", MEDIA_DIR: "/data/media" },
-        depends_on: afterMigrate,
-        healthcheck: {
-          test: ["CMD", "node", "--import", "tsx", "src/cli/healthcheck.ts"],
-        },
-        volumes: media(),
-        stop_grace_period: "30s",
-        restart: "unless-stopped",
-      },
-      web: {
-        volumes: [envMount()],
-        ports: [{ target: 3000, published: "3000" }],
-        environment: {
-          NODE_ENV: "production",
-          API_INTERNAL_URL: "http://api:3001",
-        },
-        depends_on: {
-          api: { condition: "service_healthy" },
-          migrate: { condition: "service_completed_successfully" },
-        },
-        restart: "unless-stopped",
-      },
-    },
+    services: Object.fromEntries(
+      Object.entries(services).filter(([other]) => other !== name),
+    ),
   };
 }
 
@@ -141,6 +120,14 @@ function environmentOf(service: Service): Record<string, unknown> {
     throw new Error("service has no environment in the fixture");
   }
   return environment as Record<string, unknown>;
+}
+
+function dependsOnOf(service: Service): Record<string, unknown> {
+  const dependsOn = service.depends_on;
+  if (typeof dependsOn !== "object" || dependsOn === null) {
+    throw new Error("service has no depends_on in the fixture");
+  }
+  return dependsOn as Record<string, unknown>;
 }
 
 function volumesOf(service: Service): Record<string, unknown>[] {
@@ -191,8 +178,10 @@ describe("checkCompose", () => {
         service.ports = [{ target: 5432, published: "5442" }];
       });
 
+      // Rule 12 too: the integration tests reach the port on loopback.
       expect(check(config)).toEqual([
         "postgres: publishes 5442 beyond loopback, only web may",
+        "postgres: publishes no port 5442 on 127.0.0.1 - DATABASE_URL of .env.test points there (localhost)",
       ]);
     });
 
@@ -285,6 +274,75 @@ describe("checkCompose", () => {
       expect(check(config)).toEqual(["worker: has no healthcheck"]);
     });
 
+    it("refuses a redis healthcheck disabled around the right command", () => {
+      // The command passes `runsInShell` on its own: only the switch-off
+      // check of `hasHealthcheck` can refuse this one.
+      const config = broken("redis", (service) => {
+        healthcheckOf(service).disable = true;
+        healthcheckOf(service).test = [
+          "CMD-SHELL",
+          "redis-cli ping | grep -qx PONG",
+        ];
+      });
+
+      expect(check(config)).toEqual([
+        "redis: healthcheck is not redis-cli ping | grep -qx PONG",
+      ]);
+    });
+
+    it.each(["api", "worker"])(
+      "refuses %s healthcheck switched off by a bare [NONE]",
+      (name) => {
+        const config = broken(name, (service) => {
+          healthcheckOf(service).test = ["NONE"];
+        });
+
+        // api's port rule also fires on an empty command; only the first line
+        // is the subject here.
+        expect(check(config)).toContain(`${name}: has no healthcheck`);
+      },
+    );
+
+    it.each([
+      ["api", ["NONE", "curl", "-f", "http://localhost:3001/health/live"]],
+      ["worker", ["NONE", "node", "--import", "tsx", "src/cli/healthcheck.ts"]],
+    ])("refuses %s healthcheck switched off by %j", (name, test) => {
+      // Compose ignores what follows NONE: the service never reports healthy,
+      // whatever port the words after it name (rule 7).
+      const config = broken(name, (service) => {
+        healthcheckOf(service).test = test;
+      });
+
+      expect(check(config)).toEqual([`${name}: has no healthcheck`]);
+    });
+
+    it.each([[["NONE"]], [["NONE", "redis-cli", "ping"]]])(
+      "refuses a redis healthcheck switched off by %j",
+      (test) => {
+        const config = broken("redis", (service) => {
+          healthcheckOf(service).test = test;
+        });
+
+        expect(check(config)).toEqual([
+          "redis: healthcheck is not redis-cli ping | grep -qx PONG",
+        ]);
+      },
+    );
+
+    it.each([
+      [["NONE"]],
+      [["NONE", "pg_isready", "-h", "127.0.0.1", "-U", "sf"]],
+    ])("refuses a postgres healthcheck switched off by %j", (test) => {
+      const config = broken("postgres", (service) => {
+        healthcheckOf(service).test = test;
+      });
+
+      expect(check(config)).toEqual([
+        "postgres: has no healthcheck",
+        "postgres: healthcheck is not pg_isready over TCP to its own loopback on port 5432 (-h 127.0.0.1|localhost|::1, -p 5432 or none) - the local socket answers during init",
+      ]);
+    });
+
     it.each([
       [["CMD", "true"]],
       [["CMD-SHELL", "exit 0"]],
@@ -346,14 +404,45 @@ describe("checkCompose", () => {
         "that only mentions it",
         { test: ["CMD-SHELL", "true # redis-cli ping"], start_period: "10s" },
       ],
+      // redis-cli exits 0 on an error reply: LOADING would pass these two.
+      [
+        "that ignores the answer",
+        { test: ["CMD", "redis-cli", "ping"], start_period: "10s" },
+      ],
+      [
+        "that ignores the answer in the shell form",
+        { test: ["CMD-SHELL", "redis-cli ping"], start_period: "10s" },
+      ],
+      [
+        "in the exec form, where | is a word",
+        {
+          test: ["CMD", "redis-cli", "ping", "|", "grep", "-qx", "PONG"],
+          start_period: "10s",
+        },
+      ],
+      [
+        "whose comparison is swallowed",
+        {
+          test: ["CMD-SHELL", "redis-cli ping | grep -qx PONG || exit 0"],
+          start_period: "10s",
+        },
+      ],
     ])("refuses redis %s", (_case, healthcheck) => {
       const config = broken("redis", (service) => {
         service.healthcheck = healthcheck;
       });
 
       expect(check(config)).toContain(
-        "redis: healthcheck is not redis-cli ping",
+        "redis: healthcheck is not redis-cli ping | grep -qx PONG",
       );
+    });
+
+    it("accepts the Redis healthcheck as a string", () => {
+      const config = broken("redis", (service) => {
+        healthcheckOf(service).test = "redis-cli ping | grep -qx PONG";
+      });
+
+      expect(check(config)).toEqual([]);
     });
 
     it.each([
@@ -397,12 +486,40 @@ describe("checkCompose", () => {
         const config = broken(name, (service) => {
           service.depends_on = {
             migrate: { condition: "service_completed_successfully" },
+            postgres: { condition: "service_healthy" },
             ...(condition === undefined ? {} : { redis: { condition } }),
           };
         });
 
         expect(check(config)).toEqual([
           `${name}: does not wait for a healthy redis (condition service_healthy)`,
+        ]);
+      },
+    );
+
+    it.each([
+      ["migrate", undefined],
+      ["migrate", "service_started"],
+      ["api", undefined],
+      ["api", "service_started"],
+      ["worker", undefined],
+      ["worker", "service_started"],
+    ])(
+      "refuses %s that does not wait for a healthy postgres (%s)",
+      (name, condition) => {
+        const config = broken(name, (service) => {
+          const others = Object.entries(dependsOnOf(service)).filter(
+            ([dependency]) => dependency !== "postgres",
+          );
+          service.depends_on = Object.fromEntries(
+            condition === undefined
+              ? others
+              : [...others, ["postgres", { condition }]],
+          );
+        });
+
+        expect(check(config)).toEqual([
+          `${name}: does not wait for a healthy postgres (condition service_healthy)`,
         ]);
       },
     );
@@ -488,14 +605,79 @@ describe("checkCompose", () => {
       ["CMD", "pg_isready", "--host=/var/run/postgresql", "-U", "sf"],
       ["CMD", "pg_isready", "-h/var/run/postgresql", "-U", "sf"],
       ["CMD", "pg_isready", "-h=/var/run/postgresql", "-U", "sf"],
+      ["CMD", "pg_isready", '-h"/var/run/postgresql"', "-U", "sf"],
+      ["CMD", "pg_isready", "-h", "'/var/run/postgresql'", "-U", "sf"],
+      ["CMD", "pg_isready", '--host="/var/run/postgresql"', "-U", "sf"],
+      ["CMD-SHELL", "pg_isready -h '/var/run/postgresql' -U sf"],
+      // The shell fills these in, and PGHOST may name the socket.
+      ["CMD-SHELL", 'pg_isready -h "$PGHOST" -U sf'],
+      ["CMD-SHELL", "pg_isready -h $PGHOST -U sf"],
+      ["CMD-SHELL", "pg_isready --host=$(hostname -i) -U sf"],
+      ["CMD-SHELL", "pg_isready -h `hostname -i` -U sf"],
+      // Every -h names a host, whichever one pg_isready ends up taking.
+      ["CMD-SHELL", "pg_isready -h 127.0.0.1 -h /var/run/postgresql -U sf"],
+      ["CMD", "pg_isready", "-h", "-U", "sf"],
       ["CMD", "true"],
+      // The command is compared whole: nothing around pg_isready, no second
+      // command, no -h of another program, no conninfo in -d.
+      ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U sf || exit 0"],
+      ["CMD-SHELL", "echo -h localhost; pg_isready -U sf"],
+      ["CMD-SHELL", "pg_isready -U sf | grep -h accepting"],
+      ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U sf && pg_isready -U sf"],
+      ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -d "host=/var/run/postgresql"'],
+      [
+        "CMD",
+        "pg_isready",
+        "-h",
+        "127.0.0.1",
+        "-d",
+        "host=/var/run/postgresql",
+      ],
+      [
+        "CMD",
+        "pg_isready",
+        "-h",
+        "127.0.0.1",
+        "-d",
+        "postgresql:///sf?host=/var/run/postgresql",
+      ],
+      ["CMD", "sh", "-c", "pg_isready -h 127.0.0.1"],
+      ["CMD", "pg_isready", "-h", "127.0.0.1", "--no-such-option"],
+      ["CMD", "pg_isready", "-h", "127.0.0.1", "-U"],
+      ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U sf # ready"],
+      // The exec form passes its words as they are: the quotes reach
+      // pg_isready, which reads a host named with them.
+      ["CMD", "pg_isready", '-h"127.0.0.1"', "-U", "sf"],
+      ["CMD", "pg_isready", "-h", "'127.0.0.1'", "-U", "sf"],
+      // The shell form takes plain words only.
+      ["CMD-SHELL", "pg_isready -h '127.0.0.1' -U sf"],
+      // The healthcheck asks its own server: the loopback, on 5432.
+      ["CMD", "pg_isready", "-h", "some-other-host", "-U", "sf"],
+      ["CMD", "pg_isready", "--host=db.example.com", "-U", "sf"],
+      ["CMD-SHELL", "pg_isready -h 10.0.0.5 -U sf"],
+      ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "1", "-U", "sf"],
+      ["CMD", "pg_isready", "-h", "127.0.0.1", "--port=5442", "-U", "sf"],
+      ["CMD-SHELL", "pg_isready -h localhost -p5433 -U sf"],
     ])("refuses %j", (...test) => {
       const config = broken("postgres", (service) => {
         healthcheckOf(service).test = test;
       });
 
       expect(check(config)).toEqual([
-        "postgres: healthcheck is not pg_isready over TCP (-h) - the local socket answers during init",
+        "postgres: healthcheck is not pg_isready over TCP to its own loopback on port 5432 (-h 127.0.0.1|localhost|::1, -p 5432 or none) - the local socket answers during init",
+      ]);
+    });
+
+    it("refuses a pg_isready over TCP that is switched off", () => {
+      // `service_healthy` of migrate, api and worker would wait for a status
+      // a disabled healthcheck never reports.
+      const config = broken("postgres", (service) => {
+        healthcheckOf(service).disable = true;
+      });
+
+      expect(check(config)).toEqual([
+        "postgres: has no healthcheck",
+        "postgres: healthcheck is not pg_isready over TCP to its own loopback on port 5432 (-h 127.0.0.1|localhost|::1, -p 5432 or none) - the local socket answers during init",
       ]);
     });
 
@@ -504,6 +686,8 @@ describe("checkCompose", () => {
       ["--host", "127.0.0.1"],
       ["-h127.0.0.1"],
       ["-h", "127.0.0.1"],
+      ["-h", "localhost", "-p", "5432", "-d", "shorts_factory", "-q"],
+      ["-h", "::1", "--port=5432"],
     ])("accepts a host given as %j", (...host) => {
       const config = broken("postgres", (service) => {
         healthcheckOf(service).test = [
@@ -513,6 +697,17 @@ describe("checkCompose", () => {
           "-U",
           "sf",
         ];
+      });
+
+      expect(check(config)).toEqual([]);
+    });
+
+    it.each([
+      [["CMD-SHELL", "pg_isready -h 127.0.0.1 -U sf -d shorts_factory"]],
+      ["pg_isready -h 127.0.0.1 -U sf"],
+    ])("accepts the shell form %j", (test) => {
+      const config = broken("postgres", (service) => {
+        healthcheckOf(service).test = test;
       });
 
       expect(check(config)).toEqual([]);
@@ -627,6 +822,483 @@ describe("checkCompose", () => {
       ]);
     });
   });
+
+  describe("0. every service of the stack is there", () => {
+    it.each(["postgres", "redis", "migrate", "api", "worker", "web"])(
+      "refuses a stack without %s",
+      (name) => {
+        const config = without(name);
+
+        expect(check(config)).toEqual([`${name}: service is missing`]);
+      },
+    );
+  });
+
+  describe("11. builds bring in nothing the rule does not check", () => {
+    it.each([
+      ["additional_contexts", { extra: "/srv/other" }],
+      ["dockerfile_inline", "FROM node:22-alpine\nCOPY . .\n"],
+    ])("refuses a build with %s", (field, value) => {
+      const config = broken("api", (service) => {
+        service.build = { ...buildOf("api"), [field]: value };
+      });
+
+      expect(check(config)).toEqual([
+        `api: build.${field} - the .env masks are checked for build.context only, and the stack has no ${field}`,
+      ]);
+    });
+
+    it("refuses a stack whose context has no .dockerignore", () => {
+      expect(
+        check(cleanConfig(), { [join(CONTEXT, ".dockerignore")]: null }),
+      ).toEqual(
+        ["migrate", "api", "worker", "web"].map(
+          (name) =>
+            `${name}: no ${join(CONTEXT, ".dockerignore")} - every .env would enter the image`,
+        ),
+      );
+    });
+  });
+
+  describe("12. the test stack publishes the ports of .env.test", () => {
+    it("takes the hosts the stack guard takes, no more and no fewer", () => {
+      // The hosts of `TEST_STACK` read as text: the root project imports no
+      // package (ADR-0011), as turbo-env.test.ts reads the config schema.
+      const guard = readRepoFile("packages/db/test-support/stack-guard.ts");
+      const declared = /\bhosts: \[([^\]]*)\]/.exec(guard)?.[1];
+      const hosts = [...(declared ?? "").matchAll(/"([^"]+)"/g)].map(
+        (match) => match[1],
+      );
+
+      expect(hosts.length).toBeGreaterThan(0);
+      expect([...TEST_STACK_BINDS.keys()].sort()).toEqual(hosts.sort());
+    });
+
+    it("refuses a project without .env.test", () => {
+      expect(check(cleanConfig(), { [TEST_ENV_FILE]: null })).toEqual([
+        `${TEST_ENV_FILE}: missing - the ports the integration tests reach cannot be checked against postgres and redis`,
+      ]);
+    });
+
+    it.each([
+      ["postgres", "5443", "5442", "DATABASE_URL"],
+      ["redis", "6390", "6389", "REDIS_URL"],
+    ])(
+      "refuses %s published on %s while .env.test points at %s",
+      (name, published, expected, key) => {
+        const config = broken(name, (service) => {
+          service.ports = [{ host_ip: "127.0.0.1", target: 1, published }];
+        });
+
+        expect(check(config)).toEqual([
+          `${name}: publishes no port ${expected} on 127.0.0.1 - ${key} of .env.test points there (localhost)`,
+        ]);
+      },
+    );
+
+    it.each([
+      ["postgres", "5442", "DATABASE_URL"],
+      ["redis", "6389", "REDIS_URL"],
+    ])("refuses %s publishing %s over UDP only", (name, published, key) => {
+      // The drivers dial TCP: a /udp port of the same number answers nothing.
+      const target = name === "postgres" ? 5432 : 6379;
+      const config = broken(name, (service) => {
+        service.ports = [
+          { host_ip: "127.0.0.1", target, published, protocol: "udp" },
+        ];
+      });
+
+      expect(check(config)).toEqual([
+        `${name}: publishes no port ${published} on 127.0.0.1 - ${key} of .env.test points there (localhost)`,
+      ]);
+    });
+
+    it.each(["tcp", "TCP", "Tcp"])(
+      "takes a port Compose prints with protocol %s",
+      (protocol) => {
+        const config = broken("postgres", (service) => {
+          service.ports = [
+            {
+              host_ip: "127.0.0.1",
+              target: 5432,
+              published: "5442",
+              protocol,
+            },
+          ];
+        });
+
+        expect(check(config)).toEqual([]);
+      },
+    );
+
+    it.each([null, "sctp", 6])(
+      "refuses a port whose protocol is %j, not TCP",
+      (protocol) => {
+        const config = broken("postgres", (service) => {
+          service.ports = [
+            {
+              host_ip: "127.0.0.1",
+              target: 5432,
+              published: "5442",
+              protocol,
+            },
+          ];
+        });
+
+        expect(check(config)).toEqual([
+          "postgres: publishes no port 5442 on 127.0.0.1 - DATABASE_URL of .env.test points there (localhost)",
+        ]);
+      },
+    );
+
+    it("refuses an address without a port", () => {
+      const text = CLEAN_TEST_ENV.replace("localhost:6389", "localhost");
+
+      expect(check(cleanConfig(), { [TEST_ENV_FILE]: text })).toEqual([
+        `${TEST_ENV_FILE}: REDIS_URL names no port - write it out, the port redis publishes cannot be checked against a default`,
+      ]);
+    });
+
+    it("tells a missing key from a value that is not a URL", () => {
+      const missing = CLEAN_TEST_ENV.replace(/^REDIS_URL=.*$/m, "");
+      const garbled = CLEAN_TEST_ENV.replace(
+        /^DATABASE_URL=.*$/m,
+        "DATABASE_URL=not a url",
+      );
+
+      expect(check(cleanConfig(), { [TEST_ENV_FILE]: missing })).toEqual([
+        `${TEST_ENV_FILE}: no REDIS_URL - the port redis publishes cannot be checked`,
+      ]);
+      expect(check(cleanConfig(), { [TEST_ENV_FILE]: garbled })).toEqual([
+        `${TEST_ENV_FILE}: DATABASE_URL is not a URL - the port postgres publishes cannot be checked`,
+      ]);
+    });
+
+    it.each([
+      ["127.0.0.1", "::1", "127.0.0.1", "127.0.0.1"],
+      ["localhost", "::1", "127.0.0.1", "localhost"],
+      ["[::1]", "127.0.0.1", "::1", "::1"],
+    ])(
+      "refuses a URL on %s with the port published on %s",
+      (host, published, bind, named) => {
+        const text = CLEAN_TEST_ENV.replace("localhost:5442", `${host}:5442`);
+        const config = broken("postgres", (service) => {
+          service.ports = [
+            { host_ip: published, target: 5432, published: "5442" },
+          ];
+        });
+
+        expect(check(config, { [TEST_ENV_FILE]: text })).toEqual([
+          `postgres: publishes no port 5442 on ${bind} - DATABASE_URL of .env.test points there (${named})`,
+        ]);
+      },
+    );
+
+    it("accepts [::1] with the port published on ::1", () => {
+      const text = CLEAN_TEST_ENV.replaceAll("localhost", "[::1]");
+      const config = cleanConfig();
+      for (const name of ["postgres", "redis"]) {
+        const service = config.services[name];
+        if (service === undefined) throw new Error(`no ${name} in the fixture`);
+        service.ports = [
+          {
+            host_ip: "::1",
+            target: name === "postgres" ? 5432 : 6379,
+            published: name === "postgres" ? "5442" : "6389",
+          },
+        ];
+      }
+
+      expect(check(config, { [TEST_ENV_FILE]: text })).toEqual([]);
+    });
+
+    it.each([
+      ["postgres", 6379, "5442", "5432", "DATABASE_URL"],
+      ["redis", 5432, "6389", "6379", "REDIS_URL"],
+    ])(
+      "refuses %s publishing the port of .env.test to %s",
+      (name, target, published, listens, key) => {
+        const config = broken(name, (service) => {
+          service.ports = [{ host_ip: "127.0.0.1", target, published }];
+        });
+
+        expect(check(config)).toEqual([
+          `${name}: publishes port ${published} on 127.0.0.1 to ${target}, not to ${listens} it listens on - ${key} of .env.test would reach nothing`,
+        ]);
+      },
+    );
+
+    it.each([
+      ["DATABASE_URL", "localhost:5442", "db.example.com:5442"],
+      ["REDIS_URL", "localhost:6389", "10.0.0.5:6389"],
+    ])("refuses a %s beyond loopback", (key, local, remote) => {
+      const text = CLEAN_TEST_ENV.replace(local, remote);
+      const host = remote.split(":")[0];
+
+      expect(check(cleanConfig(), { [TEST_ENV_FILE]: text })).toEqual([
+        `${TEST_ENV_FILE}: ${key} points at ${host}, not at localhost, 127.0.0.1 or [::1] - the test stack is the one Compose publishes on loopback`,
+      ]);
+    });
+
+    it("accepts 127.0.0.1 for localhost", () => {
+      const text = CLEAN_TEST_ENV.replaceAll("localhost", "127.0.0.1");
+
+      expect(check(cleanConfig(), { [TEST_ENV_FILE]: text })).toEqual([]);
+    });
+
+    // The grammar of `parseEnv` (node:util), the one @sf/config and the
+    // stack guard read the file with: what it reads, the gate reads.
+    it.each([
+      [
+        "quoted values",
+        [
+          'DATABASE_URL="postgresql://sf:sf@localhost:5442/shorts_factory_test"',
+          "REDIS_URL='redis://localhost:6389/1'",
+        ],
+      ],
+      [
+        "an export in front",
+        [
+          "export DATABASE_URL=postgresql://sf:sf@localhost:5442/shorts_factory_test",
+          "export REDIS_URL=redis://localhost:6389/1",
+        ],
+      ],
+      [
+        "a comment after the value",
+        [
+          "DATABASE_URL=postgresql://sf:sf@localhost:5442/shorts_factory_test # test db",
+          "REDIS_URL=redis://localhost:6389/1 # test redis",
+        ],
+      ],
+    ])("reads .env.test with %s", (_case, lines) => {
+      const text = `${lines.join("\n")}\n`;
+
+      expect(check(cleanConfig(), { [TEST_ENV_FILE]: text })).toEqual([]);
+    });
+  });
+
+  /**
+   * One corruption per rule of the table, each turning exactly that rule
+   * red: a rule added without a case here, or one that stopped firing,
+   * fails this block.
+   */
+  describe("each rule turns red on its own corruption", () => {
+    const CORRUPTIONS: Record<
+      string,
+      {
+        config: () => unknown;
+        files?: Record<string, string | null>;
+        expected: string;
+      }
+    > = {
+      services: {
+        config: () => without("redis"),
+        expected: "redis: service is missing",
+      },
+      ports: {
+        config: () =>
+          broken("api", (service) => {
+            service.ports = [{ host_ip: "127.0.0.1", target: 3001 }];
+          }),
+        expected: "api: publishes ports, it must stay inside the network",
+      },
+      production: {
+        config: () =>
+          broken("worker", (service) => {
+            environmentOf(service).NODE_ENV = "development";
+          }),
+        expected: 'worker: environment.NODE_ENV is not "production"',
+      },
+      grace: {
+        config: () =>
+          broken("worker", (service) => {
+            service.stop_grace_period = "10s";
+          }),
+        expected: "worker: stop_grace_period 10s is below 30s",
+      },
+      healthchecks: {
+        config: () =>
+          broken("worker", (service) => {
+            service.healthcheck = undefined;
+          }),
+        expected: "worker: has no healthcheck",
+      },
+      "start-order": {
+        config: () =>
+          broken("web", (service) => {
+            service.depends_on = {
+              migrate: { condition: "service_completed_successfully" },
+            };
+          }),
+        expected:
+          "web: does not wait for a healthy api (condition service_healthy)",
+      },
+      media: {
+        config: () =>
+          broken("worker", (service) => {
+            service.volumes = volumesOf(service).filter(
+              (volume) => volume.source !== "media",
+            );
+          }),
+        expected:
+          "worker: volume media is not mounted at its MEDIA_DIR (/data/media)",
+      },
+      "api-port": {
+        config: () =>
+          broken("web", (service) => {
+            environmentOf(service).API_INTERNAL_URL = "http://localhost:3001";
+          }),
+        expected:
+          "web: API_INTERNAL_URL http://localhost:3001 is not http://api:3001",
+      },
+      "postgres-tcp": {
+        config: () =>
+          broken("postgres", (service) => {
+            healthcheckOf(service).test = ["CMD", "true"];
+          }),
+        expected:
+          "postgres: healthcheck is not pg_isready over TCP to its own loopback on port 5432 (-h 127.0.0.1|localhost|::1, -p 5432 or none) - the local socket answers during init",
+      },
+      restart: {
+        config: () =>
+          broken("redis", (service) => {
+            service.restart = undefined;
+          }),
+        expected:
+          'redis: restart is not "unless-stopped" - it would stay down after a reboot',
+      },
+      "env-mount": {
+        config: () =>
+          broken("web", (service) => {
+            envMountOf(service).read_only = undefined;
+          }),
+        expected: "web: .env at /repo/.env is not read_only",
+      },
+      "build-ignores": {
+        config: () =>
+          broken("api", (service) => {
+            service.build = { ...buildOf("api"), dockerfile_inline: "FROM x" };
+          }),
+        expected:
+          "api: build.dockerfile_inline - the .env masks are checked for build.context only, and the stack has no dockerfile_inline",
+      },
+      "test-stack-ports": {
+        config: () => cleanConfig(),
+        files: {
+          [TEST_ENV_FILE]: CLEAN_TEST_ENV.replace(":6389/", ":6390/"),
+        },
+        expected:
+          "redis: publishes no port 6390 on 127.0.0.1 - REDIS_URL of .env.test points there (localhost)",
+      },
+    };
+
+    it("has a corruption for every rule, in the order of the table", () => {
+      expect(Object.keys(CORRUPTIONS)).toEqual(RULE_IDS);
+    });
+
+    it.each(RULE_IDS)("turns %s red and nothing else", (id) => {
+      const corruption = CORRUPTIONS[id];
+      if (corruption === undefined) throw new Error(`no corruption for ${id}`);
+
+      expect(check(corruption.config(), corruption.files)).toEqual([
+        corruption.expected,
+      ]);
+    });
+  });
+});
+
+/**
+ * A configuration the rules cannot read is refused with the path of the
+ * field, not with a `TypeError` of whichever rule reads it first.
+ */
+describe("the shape of the configuration", () => {
+  const SHAPE = "unexpected shape of docker compose config:";
+
+  it.each([
+    ["the top level", () => [], "(top level)"],
+    ["services", () => ({ services: [] }), "services"],
+    ["a service", () => ({ services: { api: "x" } }), "services.api"],
+    [
+      "ports",
+      () =>
+        broken("api", (service) => {
+          service.ports = {};
+        }),
+      "services.api.ports",
+    ],
+    [
+      "a port",
+      () =>
+        broken("postgres", (service) => {
+          service.ports = ["127.0.0.1:5442:5432"];
+        }),
+      "services.postgres.ports[0]",
+    ],
+    [
+      "volumes",
+      () =>
+        broken("worker", (service) => {
+          service.volumes = "media:/data/media";
+        }),
+      "services.worker.volumes",
+    ],
+    [
+      "the bind of a mount",
+      () =>
+        broken("web", (service) => {
+          envMountOf(service).bind = "create_host_path=false";
+        }),
+      "services.web.volumes[0].bind",
+    ],
+    [
+      "environment",
+      () =>
+        broken("api", (service) => {
+          service.environment = ["NODE_ENV=production"];
+        }),
+      "services.api.environment",
+    ],
+    [
+      "depends_on",
+      () =>
+        broken("api", (service) => {
+          service.depends_on = ["migrate"];
+        }),
+      "services.api.depends_on",
+    ],
+    [
+      "an entry of depends_on",
+      () =>
+        broken("api", (service) => {
+          service.depends_on = { migrate: "service_completed_successfully" };
+        }),
+      "services.api.depends_on.migrate",
+    ],
+    [
+      "healthcheck",
+      () =>
+        broken("redis", (service) => {
+          service.healthcheck = "redis-cli ping";
+        }),
+      "services.redis.healthcheck",
+    ],
+    [
+      "build",
+      () =>
+        broken("api", (service) => {
+          service.build = ".";
+        }),
+      "services.api.build",
+    ],
+  ])("refuses %s in another shape", (_case, config, path) => {
+    const value = config();
+
+    expect(check(value)).toEqual([`${SHAPE} ${path}`]);
+    expect(buildIgnores(value, reader(cleanFiles()))).toEqual([
+      `${SHAPE} ${path}`,
+    ]);
+    expect(checkRendering(value)).toEqual([`${SHAPE} ${path}`]);
+  });
 });
 
 /**
@@ -727,6 +1399,35 @@ describe("checkDockerignore", () => {
     },
   );
 
+  it.each([[["**/.env*"]], [[".env*", "**/.env", "**/.env.*"]]])(
+    "passes the masks written as %j",
+    (lines) => {
+      expect(checkDockerignore(ignore(...lines), FILE)).toEqual([]);
+    },
+  );
+
+  it("counts .env* at the root for the two root masks only", () => {
+    expect(checkDockerignore(ignore(".env*"), FILE)).toEqual([
+      `${FILE}: lacks **/.env - that .env file would enter the image`,
+      `${FILE}: lacks **/.env.* - that .env file would enter the image`,
+    ]);
+  });
+
+  it("counts a spelling outside its list for nothing", () => {
+    expect(checkDockerignore(ignore("*.env", "**/*.env*"), FILE)).toEqual(
+      MASKS.map(
+        (mask) =>
+          `${FILE}: lacks ${mask} - that .env file would enter the image`,
+      ),
+    );
+  });
+
+  it("refuses a negation after a mask in another spelling", () => {
+    expect(checkDockerignore(ignore("**/.env*", "!keep"), FILE)).toEqual([
+      `${FILE}: !keep follows the .env masks - the last matching line wins, and it may let a .env back in`,
+    ]);
+  });
+
   it("refuses a negation between the masks", () => {
     expect(
       checkDockerignore(ignore(".env", "!**", ...MASKS.slice(1)), FILE),
@@ -736,15 +1437,17 @@ describe("checkDockerignore", () => {
   });
 });
 
-describe("checkBuildIgnores", () => {
-  const CONTEXT = join("/srv", "shorts-factory");
+describe("rule 11 alone (checkCompose, build-ignores)", () => {
   const ROOT_IGNORE = join(CONTEXT, ".dockerignore");
-  const CLEAN_IGNORE = ".env\n.env.*\n**/.env\n**/.env.*\n";
 
+  /** Every service of the stack, from an image; `names` built. */
   function built(...names: string[]): { services: Record<string, Service> } {
-    const services: Record<string, Service> = {
-      postgres: { image: "postgres:16" },
-    };
+    const services: Record<string, Service> = Object.fromEntries(
+      Object.keys(cleanConfig().services).map((name) => [
+        name,
+        { image: `${name}:test` },
+      ]),
+    );
     for (const name of names) {
       services[name] = {
         build: {
@@ -757,13 +1460,37 @@ describe("checkBuildIgnores", () => {
     return { services };
   }
 
-  function reader(files: Record<string, string>) {
-    return (path: string): string | null => files[path] ?? null;
-  }
+  it("runs that rule only, and refuses an id the table does not have", () => {
+    const read = reader({ [ROOT_IGNORE]: CLEAN_IGNORE });
+
+    expect(check(built("api"))).not.toEqual([]);
+    expect(buildIgnores(built("api"), read)).toEqual([]);
+    expect(() =>
+      checkCompose(built("api"), projectWith(read), ["build-ignore"]),
+    ).toThrow("checkCompose: no rule build-ignore");
+  });
+
+  it("reports a service the stack lost, whichever rules are chosen", () => {
+    // Rule 11 passes over a service that is not there: without rule 0 a
+    // part of the stack that lost an image would answer clean.
+    const { services } = built("api", "worker");
+    const { worker: _lost, ...rest } = services;
+    const read = reader({ [ROOT_IGNORE]: CLEAN_IGNORE });
+
+    expect(buildIgnores({ services: rest }, read)).toEqual([
+      "worker: service is missing",
+    ]);
+  });
+
+  it("refuses an empty choice of rules, which would check nothing", () => {
+    expect(() =>
+      checkCompose(built("api"), projectWith(reader({})), []),
+    ).toThrow("checkCompose: no rule chosen");
+  });
 
   it("passes a context whose .dockerignore masks every .env", () => {
     expect(
-      checkBuildIgnores(
+      buildIgnores(
         built("api", "worker"),
         reader({ [ROOT_IGNORE]: CLEAN_IGNORE }),
       ),
@@ -772,7 +1499,7 @@ describe("checkBuildIgnores", () => {
 
   it("reports a shared .dockerignore once", () => {
     expect(
-      checkBuildIgnores(
+      buildIgnores(
         built("api", "worker", "web"),
         reader({ [ROOT_IGNORE]: `${CLEAN_IGNORE}!**\n` }),
       ),
@@ -782,7 +1509,7 @@ describe("checkBuildIgnores", () => {
   });
 
   it("refuses a context without a .dockerignore", () => {
-    expect(checkBuildIgnores(built("api"), reader({}))).toEqual([
+    expect(buildIgnores(built("api"), reader({}))).toEqual([
       `api: no ${ROOT_IGNORE} - every .env would enter the image`,
     ]);
   });
@@ -791,7 +1518,7 @@ describe("checkBuildIgnores", () => {
     const own = join(CONTEXT, "infra/docker/worker.Dockerfile.dockerignore");
 
     expect(
-      checkBuildIgnores(
+      buildIgnores(
         built("api", "worker"),
         reader({ [ROOT_IGNORE]: CLEAN_IGNORE, [own]: CLEAN_IGNORE }),
       ),
@@ -802,14 +1529,11 @@ describe("checkBuildIgnores", () => {
 
   it("finds the .dockerignore of a Dockerfile given by an absolute path", () => {
     const dockerfile = join("/opt", "images", "Dockerfile");
-    const config = {
-      services: {
-        api: { build: { context: CONTEXT, dockerfile } },
-      },
-    };
+    const config = built();
+    config.services.api = { build: { context: CONTEXT, dockerfile } };
 
     expect(
-      checkBuildIgnores(
+      buildIgnores(
         config,
         reader({
           [ROOT_IGNORE]: CLEAN_IGNORE,

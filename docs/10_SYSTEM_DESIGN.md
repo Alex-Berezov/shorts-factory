@@ -185,7 +185,7 @@ shorts-factory/
 │       └── tts/      # интерфейс TtsProvider + адаптеры провайдеров
 ├── infra/          # docker-compose.yml (postgres+redis, dev), docker-compose.app.yml (migrate/api/worker/web), docker/*.Dockerfile, scripts/backup.sh
 ├── scripts/        # гейты репозитория: check-no-search-list, check-compose (+ compose-rules), probe-image (проба образа в job `docker-build`), трекер задач; типы - JSDoc под `checkJs`
-│   └── lib/        # `paths.mjs` - корень репозитория для скриптов и корневых тестов (пакеты берут `@sf/config/paths`); `files.mjs` - `isGone` (путь исчез = `ENOENT`) и `readIfFile` для гейтов и корневых тестов
+│   └── lib/        # `paths.mjs` - корень репозитория для скриптов и корневых тестов (пакеты берут `@sf/config/paths`), `canonical` - нативный realpath, которым гейт Compose и `isEntry` сравнивают пути, и `isEntry` - страж точки входа скрипта, который ещё и модуль своих тестов; `files.mjs` - `isGone` (путь исчез = `ENOENT`), `codeOf` (код системного сбоя, его читают `isGone` и `isFileAt`) и `readIfFile` для гейтов и корневых тестов
 ├── test/           # корневой vitest-проект: тесты репозитория вне пакетов - CI, образы, Compose, скрипты, входы turbo (`pnpm test:repo`, ADR-0011)
 ├── vitest.preset.ts        # общий пресет vitest: каждый `vitest*.config.ts` пакета - тонкий вызов в него (ADR-0011)
 ├── vitest.repo.config.mts  # конфиг корневого проекта `test/`

@@ -256,7 +256,6 @@ checkGateSelection('compose', {
     'compose.yaml',
     'infra/docker-compose.yml',
     'infra/docker-compose.app.yml',
-    'infra/docker/api.Dockerfile',
     'scripts/check-compose.mjs',
     'scripts/compose-rules.mjs',
     // The gate finds compose.yaml through the root of scripts/lib and reads
@@ -265,12 +264,64 @@ checkGateSelection('compose', {
     'scripts/lib/files.mjs',
     '.dockerignore',
     'infra/docker/worker.Dockerfile.dockerignore',
+    // Rule 12 reads the ports of the test stack from the root .env.test
+    // (E0-12C).
+    '.env.test',
+    // A Compose file added next to the others selects it from its first
+    // change (E0-12C, Q15).
+    'infra/docker-compose.prod.yml',
+    // The Compose files are taken by a wide mask: compose*.{yml,yaml} and
+    // docker-compose*.{yml,yaml} at the root - the four override names
+    // Compose merges without -f among them - and all of infra/ (E0-12C,
+    // decision D; narrowing to the include/override graph - E0-12K).
+    'compose.override.yaml',
+    'compose.override.yml',
+    'infra/compose.yaml',
+    'infra/deploy/extra.yaml',
+    'docker-compose.override.yml',
+    'docker-compose.override.yaml',
+    'docker-compose.yml',
+    'docker-compose.prod.yaml',
+    // wide mask by decision D, narrowing - E0-12K: the gate does not read
+    // these, infra/** chooses it on them anyway.
+    'infra/docker/api.Dockerfile',
+    'infra/README.md',
+    'infra/scripts/backup.sh',
+    'infra/postgres/init/01-test-db.sql',
+    'infra/docker-compose.yml.bak',
   ],
   // Манифесты приложений check-compose не читает: выбор на них обещал бы
   // проверку, которой нет (E0-11, круг 7-2).
-  // scripts/lib/** - каталог, а не префикс имени: ни scripts/lib.mjs, ни чужой
-  // scripts/lib в пакете гейт не выбирают.
-  mustSkip: ['apps/web/src/app/page.tsx', 'apps/api/package.json', 'apps/worker/package.json', 'apps/web/package.json', 'apps/api/src/package.json', 'x.dockerignore', 'docs/30_E0_TASKS.md', 'README.md', 'scripts/tasks.mjs', 'xinfra/a.yml', 'scripts/lib.mjs', 'scripts/library/a.mjs', 'apps/web/scripts/lib/a.mjs'],
+  // Outside infra/ the when is exactly the files the gate reads (E0-12C): of
+  // scripts/lib only files.mjs and paths.mjs; only the root .env.test.
+  mustSkip: [
+    'apps/web/src/app/page.tsx',
+    'apps/api/package.json',
+    'apps/worker/package.json',
+    'apps/web/package.json',
+    'apps/api/src/package.json',
+    'x.dockerignore',
+    'docs/30_E0_TASKS.md',
+    'README.md',
+    'scripts/tasks.mjs',
+    'xinfra/a.yml',
+    'scripts/lib.mjs',
+    'scripts/library/a.mjs',
+    'apps/web/scripts/lib/a.mjs',
+    'scripts/lib/manifest.mjs',
+    'apps/api/.env.test',
+    '.env.example',
+    // Root scripts and helpers the gate does not import (E0-12C, Q16).
+    'scripts/probe-image.mjs',
+    'scripts/check-no-search-list.mjs',
+    'scripts/lib/tasks.mjs',
+    'scripts/lib/index.mjs',
+    // Not a Compose file by its name, or not under the mask.
+    'deploy/compose.yaml',
+    'deploy/docker-compose.yml',
+    'docker-compose.yml.bak',
+    'apps/api/docker-compose.override.yml',
+  ],
   extra: [
     {
       name: 'его скрипт на месте',

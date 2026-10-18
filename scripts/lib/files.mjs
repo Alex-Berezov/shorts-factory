@@ -9,12 +9,14 @@ import { readFileSync, statSync } from "node:fs";
 
 /**
  * The `code` of a failed system call (`ENOENT`, ...), undefined for any other
- * value.
+ * value. The one reading of it for the root scripts: `isGone` below and
+ * `isFileAt` (`scripts/lib/paths.mjs`, the step of `isEntry`) take it from
+ * here.
  *
  * @param {unknown} error
  * @returns {string | undefined}
  */
-function codeOf(error) {
+export function codeOf(error) {
   return error instanceof Error &&
     "code" in error &&
     typeof error.code === "string"
@@ -37,9 +39,15 @@ export function isGone(error) {
 
 /**
  * Contents of a file, null if there is no file at `path` (nothing there, or a
- * directory); any other failure to read is thrown. The reader the compose
- * gate and the tests of the root project give `checkBuildIgnores`
- * (`scripts/compose-rules.mjs`).
+ * directory); any other failure to read is thrown, a path with a file where a
+ * directory should be (ENOTDIR) included: a broken path to a file the gate
+ * must read is a fault of the checkout, not an absent file. `isEntry` answers
+ * the other way for its `argv[1]`, since there a path through a file names
+ * no script.
+ *
+ * It is the `read` the compose gate and the tests of the root project give
+ * `checkCompose` (`scripts/compose-rules.mjs`): the `.dockerignore` of each
+ * build (rule 11) and the root `.env.test` (rule 12).
  *
  * @param {string} path
  * @returns {string | null}

@@ -153,18 +153,61 @@ api, worker and web start only after it exited with 0. If it failed:
 - `docker compose down -v` - **also deletes the volumes**: the database, Redis
   and media are gone. The development stack uses the same volumes.
 
-`pnpm check:compose` checks the invariants of these files (only web
-published, api's port, production mode, the worker's grace period,
-healthchecks (the worker's runs `src/cli/healthcheck.ts`, Redis's asks
-`redis-cli ping`; Postgres and Redis have a `start_period`), start after
-`migrate` (api and worker after a healthy Redis, web after a healthy api),
-the media volume, Postgres ready over TCP, `restart: unless-stopped` on every service but `migrate`, no
-`env_file` and the read-only `.env` mount in every app service, and the
-`.dockerignore` of every build context: it masks `.env`, `.env.*`,
-`**/.env`, `**/.env.*`, no `!` line follows the first mask, and no
-`<Dockerfile>.dockerignore` replaces it; `scripts/compose-rules.mjs`). It
-needs the Docker CLI, not a running daemon, and reads no `.env`; the gates
-run it when a Compose file or `.dockerignore` changes.
+`pnpm check:compose` checks the invariants of these files, one rule each
+(`scripts/compose-rules.mjs`):
+
+- all six services are there: postgres, redis, migrate, api, worker, web;
+- only web is published; Postgres and Redis bind loopback only;
+- production mode of api, worker and web;
+- the grace periods of the worker and api;
+- healthchecks:
+  - api, worker, Postgres and Redis have one that is switched on (neither
+    `disable: true` nor a `test` of `["NONE", ...]`) - `service_healthy` of the start order waits on it;
+  - the worker's runs `src/cli/healthcheck.ts`;
+  - Redis's runs `redis-cli ping | grep -qx PONG` - `redis-cli` exits 0 on
+    an error reply too, so `LOADING` while Redis replays its append-only
+    file would pass a bare `ping`;
+  - Postgres and Redis have a `start_period`;
+- start order:
+  - migrate, api and worker after a healthy Postgres;
+  - api, worker and web after `migrate`;
+  - api and worker after a healthy Redis;
+  - web after a healthy api;
+- the media volume;
+- api's port;
+- Postgres ready over TCP: the command is compared whole - `pg_isready` with
+  its options alone, one `-h` with the loopback written out (`127.0.0.1`,
+  `localhost`, `::1`), no `-p` or `-p 5432`, `-d` a database name (no
+  conninfo), and a healthcheck that is switched on; nothing around it (`||`,
+  `;`, `|`, `&&`), no `$PGHOST` or shell substitution, no quotes in the shell
+  form;
+- `restart: unless-stopped` on every service but `migrate`;
+- no `env_file`, and the read-only `.env` mount in every app service;
+- the `.dockerignore` of every build context:
+  - it masks `.env`, `.env.*`, `**/.env`, `**/.env.*` (or an equivalent
+    line of the rule's closed list);
+  - no `!` line follows the first mask;
+  - no `<Dockerfile>.dockerignore` replaces it;
+  - no build has `additional_contexts` or `dockerfile_inline`;
+- `DATABASE_URL` and `REDIS_URL` of the root `.env.test` (read by `parseEnv`
+  of `node:util`, as @sf/config reads it) point at a host the stack guard
+  takes (`localhost`, `127.0.0.1`, `[::1]`), and Postgres and Redis publish
+  those ports over TCP (no `protocol`, or `tcp` in any case) on the address
+  of the same family (`127.0.0.1` for the first two, `::1` for `[::1]`) to
+  5432 and 6379 of their containers.
+
+The JSON of `docker compose config` is checked for its shape first: a field
+in another form is a violation with its path. The gate needs the Docker CLI,
+not a running daemon, reads no `.env` (it reads `.env.test`: local addresses,
+no secrets) and takes only a Compose file at the root of the repository
+(the root `compose.yaml` by default) - for a file in `infra/` Compose would
+take `infra/` as the project directory. The gates run it when
+a file it reads changes.
+
+It needs Docker Compose 5.x (CI pins 5.5.1). Compose 2.x is red on purpose:
+2.38 prints `create_host_path: false` of a bind mount as `bind: {}`, the
+same as a mount without the option, so rule 10 cannot tell them apart and
+the gate stops on its rendering probe and names the version.
 
 ## Development
 

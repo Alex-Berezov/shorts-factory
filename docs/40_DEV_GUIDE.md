@@ -193,8 +193,10 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
 - `node .claude/hooks/gates.js` (выбор - `selectGates` в `.claude/hooks/gates.js`, правила - `.claude/hooks/rules.sf.json`):
   - всегда идут lint, typecheck и no-search-list (`when: always`);
   - compose, tracker и harness-selftest идут только при совпадении `when: glob:` с изменёнными
-    файлами: compose - `compose.yaml`, `infra/**`, `scripts/check-compose.mjs`,
-    `scripts/compose-rules.mjs`, `scripts/lib/**`, `.dockerignore`; tracker - `docs/tasks/**`,
+    файлами: compose - то, что гейт читает: `.dockerignore`, корневой `.env.test`, `scripts/check-compose.mjs`,
+    `scripts/compose-rules.mjs`, `scripts/lib/paths.mjs`, `scripts/lib/files.mjs`, а Compose-файлы - широкой маской
+    `compose*.{yml,yaml}` и `docker-compose*.{yml,yaml}` в корне и весь `infra/**` (сужение - E0-12K; Docker Compose 5.x,
+    `infra/README.md`); tracker - `docs/tasks/**`,
     `docs/00_STATUS.md`, `scripts/tasks.mjs`, `scripts/lib/**`; harness-selftest - `.claude/**`,
     файлы, названные в `note` гейтов compose и tracker, но не выбирающие сам этот гейт (его
     `when`/`cmd`; сегодня - `test/compose-rules.test.ts`, `test/container.test.ts`), и файлы проекта, которые читают пробы

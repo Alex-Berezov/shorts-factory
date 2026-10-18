@@ -4,12 +4,10 @@ import {
   mkdtempSync,
   rmSync,
   symlinkSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { repoRoot } from "../scripts/lib/paths.mjs";
 import {
@@ -21,11 +19,11 @@ import {
   WORKSPACE_OF,
   checksOf,
   dockerArgs,
-  isEntry,
   main,
   workspaceChecks,
 } from "../scripts/probe-image.mjs";
 import { imagesOf } from "./dockerfile.js";
+import { dropLink } from "./drop-link.js";
 
 /**
  * The probe the `docker-build` job runs on every image
@@ -38,12 +36,9 @@ const scratch = mkdtempSync(join(tmpdir(), "sf-probe-image-"));
 const scriptsLink = join(scratch, "scripts-link");
 afterAll(() => {
   // The link goes first on its own: a recursive remove must never walk through
-  // it into the real scripts/ directory.
-  try {
-    unlinkSync(scriptsLink);
-  } catch {
-    // never created when the entry-guard case did not run
-  }
+  // it into the real scripts/ directory. A failure to take it off throws here
+  // and the remove below does not run.
+  dropLink(scriptsLink);
   rmSync(scratch, { recursive: true, force: true });
 });
 
@@ -323,29 +318,5 @@ describe("image probe entry guard", () => {
 
     expect(result.stderr).toContain('unknown image "no-such-image"');
     expect(result.status).toBe(2);
-  });
-
-  it("is the entry when both paths lead to the same file, however written", () => {
-    const real = (path: string) =>
-      /[\\/]a\.mjs$/.test(path) ? "target" : path;
-
-    expect(
-      isEntry(pathToFileURL("/real/a.mjs").href, "/link/a.mjs", real),
-    ).toBe(true);
-    expect(
-      isEntry(pathToFileURL("/real/a.mjs").href, "/link/b.mjs", real),
-    ).toBe(false);
-  });
-
-  it("is not the entry without a script, or when a path cannot be resolved", () => {
-    const url = pathToFileURL(script).href;
-    const broken = () => {
-      throw new Error("ENOENT");
-    };
-
-    expect(isEntry(url, undefined)).toBe(false);
-    expect(isEntry(url, "")).toBe(false);
-    expect(isEntry(url, script, broken)).toBe(false);
-    expect(isEntry(url, script)).toBe(true);
   });
 });

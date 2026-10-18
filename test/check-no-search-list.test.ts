@@ -177,7 +177,7 @@ describe("check-no-search-list", () => {
     expect(result.stderr).toContain("ENOTDIR");
   });
 
-  it.each(["scripts", "test"])(
+  it.each(["apps", "packages", "scripts", "test"])(
     "refuses a tree without the scanned directory %s",
     (missing) => {
       const files = Object.fromEntries(

@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, posix, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
-  checkBuildIgnores,
+  ENV_TARGET,
+  checkCompose,
   checkDockerignore,
 } from "../scripts/compose-rules.mjs";
 import { readIfFile } from "../scripts/lib/files.mjs";
@@ -269,18 +270,71 @@ describe(".dockerignore", () => {
   it("is not replaced by a .dockerignore of a Dockerfile", () => {
     // The images of infra/docker, not the parsed Compose: the compose gate
     // (scripts/check-compose.mjs) takes them from `docker compose config`.
-    const services = Object.fromEntries(
-      IMAGES.map((image) => [
-        image,
-        {
-          build: {
-            context: repoRoot,
-            dockerfile: relative(repoRoot, dockerfilePath(image)),
+    // Postgres and Redis run from images; every other service of the stack
+    // must have a Dockerfile here, or rule 0 reports it missing.
+    const services = {
+      postgres: { image: "postgres:16" },
+      redis: { image: "redis:7" },
+      ...Object.fromEntries(
+        IMAGES.map((image) => [
+          image,
+          {
+            build: {
+              context: repoRoot,
+              dockerfile: relative(repoRoot, dockerfilePath(image)),
+            },
           },
-        },
-      ]),
-    );
+        ]),
+      ),
+    };
 
-    expect(checkBuildIgnores({ services }, readIfFile)).toEqual([]);
+    const project = {
+      envFile: join(repoRoot, ".env"),
+      testEnvFile: join(repoRoot, ".env.test"),
+      read: readIfFile,
+    };
+
+    expect(checkCompose({ services }, project, ["build-ignores"])).toEqual([]);
+  });
+});
+
+/**
+ * Rule 10 of the compose gate holds every app service to a bind mount of the
+ * project's `.env` at `ENV_TARGET`. The constant stays in the gate (a root
+ * script imports no package), so this ties it to both ends it stands for:
+ * the root of the layout the tsx images run in (`WORKDIR /repo/<package>`),
+ * and the root `rootEnvFilePath` of @sf/config is built from. Moving either
+ * without the gate turns these red, not only a container that no longer
+ * sees its `.env`.
+ */
+describe("the .env the images read", () => {
+  it("is mounted where the gate expects it", () => {
+    expect(ENV_TARGET).toBe("/repo/.env");
+  });
+
+  it.each(Object.entries(WORKSPACE_OF))(
+    "lies at the root of the %s image's layout",
+    (image, dir) => {
+      const workdirs = stageInstructions(image, RUNTIME_STAGE).filter((line) =>
+        /^WORKDIR\s/i.test(line),
+      );
+
+      expect(workdirs.at(-1)).toBe(
+        `WORKDIR ${posix.join(posix.dirname(ENV_TARGET), dir)}`,
+      );
+    },
+  );
+
+  it("is the file @sf/config reads at the root of the repository", () => {
+    // Read as text, as the manifests above: the root project imports no
+    // package. packages/config/src is three levels below the root.
+    const paths = readRepoFile("packages/config/src/paths.ts");
+
+    expect(paths).toMatch(
+      /export const repoRoot = resolve\(\s*dirname\(fileURLToPath\(import\.meta\.url\)\),\s*"\.\.\/\.\.\/\.\.",?\s*\);/,
+    );
+    expect(paths).toContain(
+      'export const rootEnvFilePath = join(repoRoot, ".env");',
+    );
   });
 });
