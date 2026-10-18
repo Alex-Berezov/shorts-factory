@@ -50,3 +50,5 @@ _Добавляется автоматически командами `node scri
 - 2026-10-17 ➕ **E0-12G** api/worker: журнал запросов, разбор ошибок, причины healthcheck (добавлена в трекер)
 - 2026-10-17 ➕ **E0-12H** Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout }) (добавлена в трекер)
 - 2026-10-18 ✅ **E0-12B** Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов — Общий пакет @sf/runtime: логгер с белым списком, Redis-фабрики, фабрика очередей, общая остановка и дедлайн; копии в api/worker удалены, экспорты почищены
+- 2026-10-18 ⛔ **E0-12C** blocked — dependency E0-12F not done (techlead R1 E0-12A, 17.10.2026); tracker deps lack E0-12F
+- 2026-10-18 ✅ **E0-12F** Корневой vitest-проект scripts/**: переезд репо-тестов из apps/worker, JSDoc-типы scripts, входы turbo с пробой cache miss, кэш .turbo в CI — repo tests moved to root vitest project, scripts/lib helpers, JSDoc-typed scripts, per-reader turbo inputs with locks, weekly .turbo cache in CI

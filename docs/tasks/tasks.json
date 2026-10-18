@@ -1666,7 +1666,8 @@
     ],
     "doc": "TECH_DEBT.md",
     "status": "todo",
-    "added_at": "2026-10-10"
+    "added_at": "2026-10-10",
+    "started_at": "2026-10-18"
   },
   {
     "id": "E0-12D",
@@ -1738,8 +1739,11 @@
       "E0-12A"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-17"
+    "status": "done",
+    "added_at": "2026-10-17",
+    "started_at": "2026-10-18",
+    "done_at": "2026-10-18",
+    "note": "repo tests moved to root vitest project, scripts/lib helpers, JSDoc-typed scripts, per-reader turbo inputs with locks, weekly .turbo cache in CI"
   },
   {
     "id": "E0-12G",
