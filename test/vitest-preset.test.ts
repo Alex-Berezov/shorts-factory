@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join, relative } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import { repoRoot } from "../scripts/lib/paths.mjs";
 import {
   type EntryCheck,
   type IntTestOptions,
@@ -10,6 +11,12 @@ import {
   intTestConfig,
   unitTestConfig,
 } from "../vitest.preset.js";
+import {
+  readRepoFile,
+  readRepoJson,
+  repoFilesUnder,
+  workspacePackageDirs,
+} from "./repo-files.js";
 
 /**
  * The preset is the one place the test policy of the workspace is written
@@ -17,10 +24,7 @@ import {
  * guards is that it stays the one place: a package config that sets its own
  * `include` or forgets the preset is a copy again, and the integration runs
  * are only safe while their files run one at a time.
- */
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-/**
+ *
  * Keys only the preset may set: who runs what, where, how many at once, and
  * what checks the stack before the first file.
  */
@@ -36,6 +40,19 @@ const PRESET_IMPORT = /from\s+"(?:\.\.\/)+vitest\.preset\.js"/;
 
 /** Every name vitest loads a config under: `.ts`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`. */
 const CONFIG_FILE = /^vitest.*\.config\.[cm]?[jt]s$/;
+
+/**
+ * The vitest configs at the top of the package at `dir` (absolute), as paths
+ * from the root, among the files the hash covers (`repoFilesUnder`): an
+ * ignored one is in no hash, and what it holds must not change a result.
+ */
+function configsOf(dir: string): string[] {
+  const from = relative(repoRoot, dir).replaceAll("\\", "/");
+  return repoFilesUnder(from).filter((path) => {
+    const name = path.slice(from.length + 1);
+    return !name.includes("/") && CONFIG_FILE.test(name);
+  });
+}
 
 const ENTRY_CHECKS: readonly EntryCheck[] = ["postgres", "migrated-stack"];
 
@@ -60,10 +77,6 @@ function setsKey(source: string, key: string): boolean {
   );
 }
 
-function readRootJson(file: string): unknown {
-  return JSON.parse(readFileSync(join(ROOT, file), "utf8"));
-}
-
 /** A property of a value of unknown shape; `undefined` when it has none. */
 function fieldOf(value: unknown, key: string): unknown {
   return typeof value === "object" && value !== null
@@ -84,31 +97,6 @@ function scriptsOf(manifest: unknown): Record<string, string> {
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
-}
-
-/**
- * Package directories of the workspace, from the globs of
- * `pnpm-workspace.yaml` (only the `dir/*` form it uses is understood; any
- * other form fails the test instead of being skipped).
- */
-function workspacePackageDirs(): string[] {
-  const yaml = readFileSync(join(ROOT, "pnpm-workspace.yaml"), "utf8");
-  const globs = Array.from(yaml.matchAll(/^\s*-\s*["']?([^"'\s]+)["']?\s*$/gm))
-    .map((match) => match[1])
-    .filter((glob): glob is string => glob !== undefined);
-  expect(globs.length).toBeGreaterThan(0);
-  const dirs: string[] = [];
-  for (const glob of globs) {
-    expect(glob, `workspace glob "${glob}"`).toMatch(/^[\w/-]+\/\*$/);
-    const parent = join(ROOT, glob.slice(0, -2));
-    for (const entry of readdirSync(parent, { withFileTypes: true })) {
-      const dir = join(parent, entry.name);
-      if (entry.isDirectory() && existsSync(join(dir, "package.json"))) {
-        dirs.push(dir);
-      }
-    }
-  }
-  return dirs;
 }
 
 /** The config file a `vitest run` script reads (`--config <file>` or the default). */
@@ -159,10 +147,12 @@ describe("intTestConfig", () => {
     // vitest resolves a `globalSetup` specifier from the root of the package
     // that runs; one it cannot resolve would be a path that does not exist.
     for (const dir of Object.keys(ENTRY_CHECK_OF)) {
-      const resolve = createRequire(join(ROOT, dir, "package.json")).resolve;
+      const resolve = createRequire(
+        join(repoRoot, dir, "package.json"),
+      ).resolve;
       for (const check of ENTRY_CHECKS) {
         const file = resolve(entryCheckModule(check));
-        expect(relative(ROOT, file).replaceAll("\\", "/"), dir).toBe(
+        expect(relative(repoRoot, file).replaceAll("\\", "/"), dir).toBe(
           `packages/db/test-support/entry-check/${check}.ts`,
         );
       }
@@ -211,7 +201,7 @@ describe("unitTestConfig", () => {
 });
 
 describe("package vitest configs", () => {
-  const dirs = workspacePackageDirs();
+  const dirs = workspacePackageDirs().map((dir) => join(repoRoot, dir));
 
   it("finds the packages of the workspace", () => {
     expect(dirs.length).toBeGreaterThanOrEqual(9);
@@ -221,19 +211,19 @@ describe("package vitest configs", () => {
     const missing: string[] = [];
     for (const dir of dirs) {
       const scripts = scriptsOf(
-        readRootJson(relative(ROOT, join(dir, "package.json"))),
+        readRepoJson(relative(repoRoot, join(dir, "package.json"))),
       );
       for (const name of ["test", "test:int"]) {
         const script = scripts[name];
         if (script === undefined) {
           continue;
         }
-        expect(script, `${relative(ROOT, dir)} ${name}`).toMatch(
+        expect(script, `${relative(repoRoot, dir)} ${name}`).toMatch(
           /^vitest run\b/,
         );
         const config = join(dir, configOfScript(script));
         if (!existsSync(config)) {
-          missing.push(relative(ROOT, config));
+          missing.push(relative(repoRoot, config));
         }
       }
     }
@@ -242,16 +232,14 @@ describe("package vitest configs", () => {
 
   it("every vitest config is a thin call into the preset", () => {
     const configs = dirs.flatMap((dir) =>
-      readdirSync(dir)
-        .filter((file) => CONFIG_FILE.test(file))
-        .map((file) => join(dir, file)),
+      configsOf(dir).map((name) => join(repoRoot, name)),
     );
     expect(configs.length).toBeGreaterThanOrEqual(12);
 
     const copies: string[] = [];
     for (const config of configs) {
-      const source = readFileSync(config, "utf8");
-      const name = relative(ROOT, config).replaceAll("\\", "/");
+      const name = relative(repoRoot, config).replaceAll("\\", "/");
+      const source = readRepoFile(name);
       if (!PRESET_IMPORT.test(source)) {
         copies.push(`${name}: does not import vitest.preset`);
       }
@@ -269,10 +257,9 @@ describe("package vitest configs", () => {
     // and without the entry check.
     const wrong: string[] = [];
     for (const dir of dirs) {
-      for (const file of readdirSync(dir).filter((f) => CONFIG_FILE.test(f))) {
-        const source = readFileSync(join(dir, file), "utf8");
-        const name = relative(ROOT, join(dir, file)).replaceAll("\\", "/");
-        const [want, not] = /\.int\.config\./.test(file)
+      for (const name of configsOf(dir)) {
+        const source = readRepoFile(name);
+        const [want, not] = /\.int\.config\./.test(name)
           ? ["intTestConfig(", "unitTestConfig("]
           : ["unitTestConfig(", "intTestConfig("];
         if (!source.includes(want) || source.includes(not)) {
@@ -288,12 +275,12 @@ describe("package vitest configs", () => {
     const runs: string[] = [];
     for (const dir of dirs) {
       const script = scriptsOf(
-        readRootJson(relative(ROOT, join(dir, "package.json"))),
+        readRepoJson(relative(repoRoot, join(dir, "package.json"))),
       )["test:int"];
       if (script === undefined) {
         continue;
       }
-      const name = relative(ROOT, dir).replaceAll("\\", "/");
+      const name = relative(repoRoot, dir).replaceAll("\\", "/");
       runs.push(name);
       const check = ENTRY_CHECK_OF[name];
       expect(check, `${name} has no entry check of its own`).toBeDefined();
@@ -356,7 +343,7 @@ describe("root test:int script", () => {
   it("runs the integration packages one at a time", () => {
     // Files of one package are serialised by the preset; packages share the
     // same test database and Redis, and this flag is what serialises them.
-    const script = scriptsOf(readRootJson("package.json"))["test:int"];
+    const script = scriptsOf(readRepoJson("package.json"))["test:int"];
     expect(script).toMatch(/^turbo run test:int\b/);
     expect(script).toMatch(/(?:^|\s)--concurrency=1(?:\s|$)/);
   });

@@ -1,37 +1,40 @@
-import { readFileSync, statSync } from "node:fs";
-import { relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   checkBuildIgnores,
   checkDockerignore,
-} from "../../../scripts/compose-rules.mjs";
-import { WORKSPACE_OF } from "../../../scripts/probe-image.mjs";
-import { DEV_COMMAND } from "./dev-command.js";
-import { ROOT, dockerfilePath, imagesOf, stagesOfImage } from "./dockerfile.js";
+} from "../scripts/compose-rules.mjs";
+import { readIfFile } from "../scripts/lib/files.mjs";
+import { repoRoot } from "../scripts/lib/paths.mjs";
+import { WORKSPACE_OF } from "../scripts/probe-image.mjs";
+import { dockerfilePath, imagesOf, stagesOfImage } from "./dockerfile.js";
+import { readManifest, readRepoFile } from "./repo-files.js";
 
 /**
- * The container starts the worker exactly the way `pnpm dev` does, and the
- * signal test (`entry-point.int.test.ts`) proves the drain for that command.
- * Anything in front of node - a package manager, the `tsx` CLI, a shell from
- * the shell form of `CMD` - receives `docker stop`'s SIGTERM itself, and the
- * worker is killed after the grace period with its jobs in flight.
+ * How the images of `infra/docker` start their service, a test of the root
+ * project. The container starts the worker exactly the way `pnpm dev` does
+ * (`scripts.dev` of `apps/worker/package.json`), and that script is held to
+ * the command the signal test (`apps/worker/test/entry-point.int.test.ts`)
+ * proves the drain for by `apps/worker/test/dev-command.test.ts` - the chain
+ * image = dev = signal test in two links. Anything in front of node - a
+ * package manager, the `tsx` CLI, a shell from the shell form of `CMD` -
+ * receives `docker stop`'s SIGTERM itself, and the worker is killed after the
+ * grace period with its jobs in flight.
  */
-const MANIFEST = fileURLToPath(new URL("../package.json", import.meta.url));
-const ManifestSchema = z.object({ scripts: z.object({ dev: z.string() }) });
 const ExecFormSchema = z.array(z.string()).min(1);
 const IMAGES = imagesOf();
-const PackageNameSchema = z.object({ name: z.string() });
 
-/** Contents of a file, null if there is no file at `path`. */
-function readIfFile(path: string): string | null {
-  try {
-    return statSync(path).isFile() ? readFileSync(path, "utf8") : null;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
+/**
+ * The command `pnpm dev` runs in a package directory, from its manifest. Read
+ * as a file, not imported: the root project imports no package.
+ */
+function devScriptOf(dir: string): string {
+  const dev = readManifest(dir).scripts?.dev;
+  if (dev === undefined)
+    throw new Error(`${dir}/package.json has no dev script`);
+  return dev;
 }
 
 /** The stage every service is built from (`target:` in Compose). */
@@ -83,12 +86,9 @@ describe("worker image", () => {
   });
 
   it("runs the command `pnpm dev` runs", () => {
-    const manifest = ManifestSchema.parse(
-      JSON.parse(readFileSync(MANIFEST, "utf8")),
+    expect(finalCommand(instructions)?.join(" ")).toBe(
+      devScriptOf("apps/worker"),
     );
-
-    expect(finalCommand(instructions)?.join(" ")).toBe(DEV_COMMAND);
-    expect(manifest.scripts.dev).toBe(DEV_COMMAND);
   });
 
   it("puts no entry point in front of the command", () => {
@@ -96,16 +96,9 @@ describe("worker image", () => {
   });
 });
 
-/**
- * The command `pnpm dev` runs the api with, read from its manifest as an
- * argv. Read as a file, not imported: one app does not import another, and
- * the manifest is among the inputs of this test (`apps/worker/turbo.json`).
- */
+/** The command `pnpm dev` runs the api with, as an argv. */
 function apiDevCommand(): string[] {
-  const manifest = ManifestSchema.parse(
-    JSON.parse(readFileSync(`${ROOT}apps/api/package.json`, "utf8")),
-  );
-  return manifest.scripts.dev.split(/\s+/);
+  return devScriptOf("apps/api").split(/\s+/);
 }
 
 /**
@@ -128,6 +121,47 @@ describe.each([
 
   it("puts no entry point in front of the command", () => {
     expect(entryPoints(instructions)).toEqual([]);
+  });
+});
+
+/**
+ * The Compose `migrate` service runs the image's command: both entry points
+ * of `@sf/db`, the seed only after the migrations succeeded - the worker
+ * refuses to start without the queue switches the seed writes. A one-shot
+ * process, so the shell form of its `CMD` is read as it is: the steps between
+ * `&&`, in order.
+ */
+describe("migrate image", () => {
+  const instructions = stageInstructions("migrate", RUNTIME_STAGE);
+  const commands = [...stagesOf("migrate").values()]
+    .flat()
+    .filter((line) => /^CMD\s/i.test(line));
+
+  it("runs the migrations, then the seed", () => {
+    expect(commands).toHaveLength(1);
+    const command = instructions.filter((line) => /^CMD\s/i.test(line));
+    expect(command).toEqual(commands);
+    const steps = (command[0] ?? "")
+      .replace(/^CMD\s+/i, "")
+      .split("&&")
+      .map((step) => step.trim());
+
+    expect(steps).toEqual([
+      "node --import tsx src/cli/migrate.ts",
+      "node --import tsx src/cli/seed.ts",
+    ]);
+  });
+
+  it("runs from the package whose entry points those are", () => {
+    // The image's working directory is the package (`WORKSPACE_OF`), and the
+    // steps name its scripts relative to it.
+    const dir = WORKSPACE_OF.migrate;
+    expect(dir).toBe("packages/db");
+    if (dir === undefined) throw new Error("migrate runs from no package");
+    expect(readManifest(dir).name).toBe("@sf/db");
+    for (const script of ["src/cli/migrate.ts", "src/cli/seed.ts"]) {
+      expect(existsSync(join(repoRoot, dir, script)), script).toBe(true);
+    }
   });
 });
 
@@ -171,9 +205,7 @@ describe.each(Object.entries(WORKSPACE_OF))(
     const everything = [...stagesOf(image).values()].flat();
     // The package the image runs, named by the manifest of its directory: the
     // map of scripts/probe-image.mjs is the one place that ties them.
-    const pkg = PackageNameSchema.parse(
-      JSON.parse(readFileSync(`${ROOT}${dir}/package.json`, "utf8")),
-    ).name;
+    const pkg = readManifest(dir).name;
 
     it("never uses pnpm deploy", () => {
       expect(
@@ -229,9 +261,9 @@ describe.each(Object.entries(WORKSPACE_OF))(
  */
 describe(".dockerignore", () => {
   it("masks every .env and lets none back in", () => {
-    const file = `${ROOT}.dockerignore`;
+    const file = join(repoRoot, ".dockerignore");
 
-    expect(checkDockerignore(readFileSync(file, "utf8"), file)).toEqual([]);
+    expect(checkDockerignore(readRepoFile(".dockerignore"), file)).toEqual([]);
   });
 
   it("is not replaced by a .dockerignore of a Dockerfile", () => {
@@ -242,8 +274,8 @@ describe(".dockerignore", () => {
         image,
         {
           build: {
-            context: ROOT,
-            dockerfile: relative(ROOT, dockerfilePath(image)),
+            context: repoRoot,
+            dockerfile: relative(repoRoot, dockerfilePath(image)),
           },
         },
       ]),

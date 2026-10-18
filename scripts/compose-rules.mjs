@@ -2,7 +2,7 @@
  * The invariants of the full Compose stack, as a pure function over the JSON
  * `docker compose config --format json` prints - so every rule is testable
  * with a hand-written configuration and no Docker at all
- * (apps/worker/test/compose-rules.test.ts). `check-compose.mjs` feeds it the
+ * (test/compose-rules.test.ts). `check-compose.mjs` feeds it the
  * real configuration.
  *
  * 1. Only `web` publishes a port to every interface; api, worker and migrate
@@ -64,8 +64,61 @@
  *    lies next to a Dockerfile of the stack: BuildKit reads that file instead
  *    of the context's one, and the checked masks would not apply.
  */
-import { dirname, isAbsolute, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isAbsolute, join } from "node:path";
+import { repoRoot } from "./lib/paths.mjs";
+
+/**
+ * What the rules read of a published port, as Compose prints it.
+ *
+ * @typedef {object} ComposePort
+ * @property {string} [host_ip]
+ * @property {string | number} [published]
+ * @property {number} [target]
+ */
+
+/**
+ * What the rules read of a mount.
+ *
+ * @typedef {object} ComposeVolume
+ * @property {string} [type]
+ * @property {string} [source]
+ * @property {string} [target]
+ * @property {boolean} [read_only]
+ * @property {{ create_host_path?: boolean }} [bind]
+ */
+
+/**
+ * What the rules read of a healthcheck; `test` and `start_period` come in
+ * more than one form and are told apart where they are read.
+ *
+ * @typedef {object} ComposeHealthcheck
+ * @property {boolean} [disable]
+ * @property {unknown} [test]
+ * @property {unknown} [start_period]
+ */
+
+/**
+ * What the rules read of a service. Values whose form the rules check
+ * themselves stay `unknown`.
+ *
+ * @typedef {object} ComposeService
+ * @property {ComposePort[]} [ports]
+ * @property {Record<string, unknown>} [environment]
+ * @property {Record<string, { condition?: string }>} [depends_on]
+ * @property {ComposeHealthcheck} [healthcheck]
+ * @property {ComposeVolume[]} [volumes]
+ * @property {unknown} [stop_grace_period]
+ * @property {unknown} [restart]
+ * @property {unknown} [env_file]
+ * @property {{ context?: unknown, dockerfile?: unknown }} [build]
+ */
+
+/**
+ * A configuration as `docker compose config --format json` prints it; the
+ * services are what the rules read of them.
+ *
+ * @typedef {{ services?: Record<string, unknown> }} ComposeConfig
+ */
 
 const APP_SERVICES = ["api", "worker", "web"];
 /** Published on every interface: the only way in. */
@@ -132,15 +185,27 @@ export const RENDERING_PROBE = `services:
 `;
 
 /**
+ * The services of a configuration in the shape the rules read. The one place
+ * the JSON of `docker compose config` is taken for that shape: every field is
+ * optional, and each rule reads a field it needs as missing when it is.
+ *
+ * @param {ComposeConfig} config
+ * @returns {Record<string, ComposeService>}
+ */
+function servicesOf(config) {
+  return /** @type {Record<string, ComposeService>} */ (config.services ?? {});
+}
+
+/**
  * Violations of the rendering `RENDERING_PROBE` must survive: the
  * configuration Compose printed for it carries `create_host_path: false`.
  * Empty when it does.
  *
- * @param {{ services?: Record<string, unknown> }} config
+ * @param {ComposeConfig} config
  * @returns {string[]}
  */
 export function checkRendering(config) {
-  const mount = config.services?.probe?.volumes?.[0];
+  const mount = servicesOf(config).probe?.volumes?.[0];
   if (mount?.bind?.create_host_path === false) return [];
   return [
     `this docker compose prints the probe's create_host_path: false as ${JSON.stringify(mount?.bind ?? null)} - rule 10 cannot tell the option from its absence; run the Compose CI pins (.github/workflows/ci.yml)`,
@@ -148,16 +213,12 @@ export function checkRendering(config) {
 }
 
 /**
- * `compose.yaml` of the repository the script at `scriptUrl` lives in. Through
- * `fileURLToPath`: a URL's pathname keeps `%20` for a space and the percent
- * escapes of every non-ASCII letter, so a checkout under such a path would
- * point Docker at a file that does not exist.
+ * `compose.yaml` at the root of this repository (`scripts/lib/paths.mjs`).
  *
- * @param {string} scriptUrl `import.meta.url` of a module in `scripts/`
  * @returns {string}
  */
-export function defaultComposeFile(scriptUrl) {
-  return join(dirname(dirname(fileURLToPath(scriptUrl))), "compose.yaml");
+export function defaultComposeFile() {
+  return join(repoRoot, "compose.yaml");
 }
 
 /**
@@ -169,14 +230,16 @@ export function defaultComposeFile(scriptUrl) {
 export function durationSec(value) {
   if (typeof value === "number") return value / 1e9; // nanoseconds in JSON
   if (typeof value !== "string") return Number.NaN;
+  /** @type {Record<string, number>} */
   const units = { h: 3600, m: 60, s: 1, ms: 0.001, us: 1e-6, ns: 1e-9 };
   let total = 0;
   let rest = value.trim();
   if (rest === "") return Number.NaN;
   while (rest !== "") {
     const part = /^(\d+(?:\.\d+)?)(h|ms|m|s|us|ns)/.exec(rest);
-    if (part === null) return Number.NaN;
-    total += Number(part[1]) * units[part[2]];
+    const unit = part === null ? undefined : units[part[2] ?? ""];
+    if (part === null || unit === undefined) return Number.NaN;
+    total += Number(part[1]) * unit;
     rest = rest.slice(part[0].length);
   }
   return total;
@@ -219,7 +282,7 @@ function runsExactly(test, argv) {
 /**
  * Whether a service carries a healthcheck that is not switched off.
  *
- * @param {{ healthcheck?: { disable?: boolean, test?: unknown } } | undefined} service
+ * @param {ComposeService | undefined} service
  * @returns {boolean}
  */
 function hasHealthcheck(service) {
@@ -234,7 +297,7 @@ function hasHealthcheck(service) {
 /**
  * Whether `service` waits for `dependency` to reach `condition`.
  *
- * @param {{ depends_on?: Record<string, { condition?: string }> }} service
+ * @param {ComposeService} service
  * @param {string} dependency
  * @param {string} condition
  * @returns {boolean}
@@ -246,13 +309,14 @@ function waitsFor(service, dependency, condition) {
 /**
  * Every violation of the rules above, one line each; empty when clean.
  *
- * @param {{ services?: Record<string, unknown> }} config
+ * @param {ComposeConfig} config
  * @param {{ envFile: string }} project `envFile`: absolute path of the
  *   project's `.env`, as Compose resolves a bind source
  * @returns {string[]}
  */
 export function checkCompose(config, project) {
-  const services = config.services ?? {};
+  const services = servicesOf(config);
+  /** @type {string[]} */
   const problems = [];
 
   // 1. ports
@@ -266,7 +330,7 @@ export function checkCompose(config, project) {
       continue;
     }
     for (const port of ports) {
-      if (!LOOPBACK.has(port.host_ip)) {
+      if (!LOOPBACK.has(port.host_ip ?? "")) {
         problems.push(
           `${name}: publishes ${port.published ?? port.target} beyond loopback, only web may`,
         );
@@ -315,7 +379,7 @@ export function checkCompose(config, project) {
       problems.push(`${name}: has no healthcheck`);
     } else if (
       name === "worker" &&
-      !runsExactly(service.healthcheck.test, WORKER_HEALTHCHECK)
+      !runsExactly(service.healthcheck?.test, WORKER_HEALTHCHECK)
     ) {
       problems.push(
         "worker: healthcheck does not run src/cli/healthcheck.ts - any other command says nothing about its heartbeat",
@@ -342,7 +406,7 @@ export function checkCompose(config, project) {
   if (
     redis !== undefined &&
     (!hasHealthcheck(redis) ||
-      !runsExactly(redis.healthcheck.test, REDIS_HEALTHCHECK))
+      !runsExactly(redis.healthcheck?.test, REDIS_HEALTHCHECK))
   ) {
     problems.push("redis: healthcheck is not redis-cli ping");
   }
@@ -477,6 +541,7 @@ export function checkDockerignore(text, file) {
     .filter((line) => line !== "" && !line.startsWith("#"))
     // Docker drops a leading slash: `/.env` is `.env`.
     .map((line) => line.replace(/^(!?)\/+/, "$1"));
+  /** @type {string[]} */
   const problems = [];
   for (const mask of ENV_MASKS) {
     if (!lines.includes(mask)) {
@@ -503,14 +568,15 @@ export function checkDockerignore(text, file) {
  * empty when clean. Reads files through `read`, so the rule is testable
  * without a disk.
  *
- * @param {{ services?: Record<string, unknown> }} config
+ * @param {ComposeConfig} config
  * @param {(path: string) => string | null} read contents of a file, null if
  *   there is none
  * @returns {string[]}
  */
 export function checkBuildIgnores(config, read) {
+  /** @type {Set<string>} */
   const problems = new Set();
-  for (const [name, service] of Object.entries(config.services ?? {})) {
+  for (const [name, service] of Object.entries(servicesOf(config))) {
     const build = service.build;
     if (build === undefined) continue;
     const context = String(build.context ?? ".");

@@ -13,6 +13,7 @@
  *   node scripts/tasks.mjs show <id>           task details
  *   node scripts/tasks.mjs list [epic]         table of tasks
  *   node scripts/tasks.mjs render              regenerate docs/00_STATUS.md only
+ *   node scripts/tasks.mjs add <id> "<title>"  new task [--epic E?] [--est "1 д"] [--deps a,b] [--doc f.md]
  */
 import {
   appendFileSync,
@@ -20,13 +21,12 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import { repoRoot } from "./lib/paths.mjs";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const TASKS_PATH = resolve(ROOT, "docs/tasks/tasks.json");
-const STATUS_PATH = resolve(ROOT, "docs/00_STATUS.md");
-const WORKLOG_PATH = resolve(ROOT, "docs/90_WORKLOG.md");
+const TASKS_PATH = resolve(repoRoot, "docs/tasks/tasks.json");
+const STATUS_PATH = resolve(repoRoot, "docs/00_STATUS.md");
+const WORKLOG_PATH = resolve(repoRoot, "docs/90_WORKLOG.md");
 
 /** Implementation order of epics (from docs/20_TZ_HIGH_LEVEL.md, "Сводка декомпозиции"). */
 const EPIC_ORDER = [
@@ -45,6 +45,7 @@ const EPIC_ORDER = [
   "E11",
   "E13",
 ];
+/** @type {Record<string, string>} */
 const EPIC_NAMES = {
   E0: "Каркас проекта и инфраструктура",
   E1: "Source Radar",
@@ -61,53 +62,110 @@ const EPIC_NAMES = {
   E12: "Импорт ручной фазы (Phase 0)",
   E13: "Dashboard shell и /system",
 };
+/**
+ * @typedef {"todo" | "in_progress" | "blocked" | "done"} Status
+ */
+/**
+ * One task of docs/tasks/tasks.json. The optional fields a command clears
+ * are set to `undefined`, which `JSON.stringify` leaves out.
+ *
+ * @typedef {object} Task
+ * @property {string} id
+ * @property {string} epic
+ * @property {string} title
+ * @property {string} estimate
+ * @property {number | null} [estimate_days]
+ * @property {string[]} deps
+ * @property {string} doc
+ * @property {Status} status
+ * @property {string | undefined} [started_at]
+ * @property {string | undefined} [done_at]
+ * @property {string | undefined} [blocked_reason]
+ * @property {string} [note]
+ * @property {string} [added_at]
+ */
+/** @type {Record<Status, string>} */
 const ICON = { todo: "⬜", in_progress: "🔄", blocked: "⛔", done: "✅" };
 const STATUSES = Object.keys(ICON);
+/** Every command of the `switch` below, in the order of the usage above. */
+const COMMANDS = [
+  "next",
+  "start",
+  "done",
+  "block",
+  "unblock",
+  "todo",
+  "show",
+  "list",
+  "render",
+  "add",
+];
 
 // ---------- io ----------
+/** @returns {Task[]} */
 const load = () => JSON.parse(readFileSync(TASKS_PATH, "utf8"));
+/** @param {Task[]} tasks */
 const save = (tasks) =>
   writeFileSync(TASKS_PATH, `${JSON.stringify(tasks, null, 2)}\n`, "utf8");
 const today = () => new Date().toISOString().slice(0, 10);
+/** @type {(msg: string) => never} */
 const die = (msg) => {
   console.error(`error: ${msg}`);
   process.exit(1);
 };
+/** @param {string} e */
 const epicIdx = (e) => {
   const i = EPIC_ORDER.indexOf(e);
   return i === -1 ? 99 : i;
 };
+/** @type {(a: Task, b: Task) => number} */
 const byOrder = (a, b) =>
   epicIdx(a.epic) - epicIdx(b.epic) ||
   a.id.localeCompare(b.id, "en", { numeric: true });
 
 // ---------- queries ----------
+/** @type {(tasks: Task[], id: string) => Task} */
 const find = (tasks, id) =>
   tasks.find((t) => t.id === id.toUpperCase()) ?? die(`unknown task ${id}`);
+/** @type {(tasks: Task[], t: Task) => boolean} */
 const depsDone = (tasks, t) =>
   t.deps.every((d) => tasks.find((x) => x.id === d)?.status === "done");
+/** @type {(tasks: Task[]) => Task[]} */
 const available = (tasks) =>
   tasks.filter((t) => t.status === "todo" && depsDone(tasks, t)).sort(byOrder);
+/** @type {(tasks: Task[], t: Task) => string[]} */
 const pendingDeps = (tasks, t) =>
   t.deps.filter((d) => tasks.find((x) => x.id === d)?.status !== "done");
 
 // ---------- markdown helpers ----------
+/** @type {(id: string, title: string) => string} */
 const slug = (id, title) =>
   `${id}-${title}`
     .toLowerCase()
     .replace(/[`*_(),.:;/\\«»"'“”’!?+=<>|@#$%&]/g, "")
     .trim()
     .replace(/\s+/g, "-");
+/** @type {(t: Task) => string} */
 const link = (t) => `[${t.id}](${t.doc}#${slug(t.id, t.title)})`;
+/** @type {(done: number, total: number, width?: number) => string} */
 const bar = (done, total, width = 20) => {
   const filled = total ? Math.round((done / total) * width) : 0;
   return `\`${"█".repeat(filled)}${"░".repeat(width - filled)}\` ${done}/${total}`;
 };
+/** @type {(list: Task[]) => number} */
 const days = (list) => list.reduce((s, t) => s + (t.estimate_days ?? 0), 0);
+/** @type {(n: number) => string} */
 const fmtDays = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+/** @type {(s: unknown) => string} */
 const cell = (s) => String(s ?? "").replace(/\|/g, "\\|");
 
 // ---------- render ----------
+/**
+ * Writes docs/00_STATUS.md from the tasks; with `check`, only compares.
+ *
+ * @param {Task[]} tasks
+ * @param {{ check?: boolean }} [opts]
+ */
 function render(tasks, opts = {}) {
   const doneT = tasks.filter((t) => t.status === "done");
   const inProg = tasks.filter((t) => t.status === "in_progress").sort(byOrder);
@@ -153,7 +211,8 @@ function render(tasks, opts = {}) {
   L.push("");
   L.push("## Следующие (зависимости выполнены, в порядке приоритета)");
   L.push("");
-  if (next.length) {
+  const [first] = next;
+  if (first !== undefined) {
     L.push("| Задача | Название | Оценка | Эпик |");
     L.push("|---|---|---|---|");
     for (const t of next)
@@ -161,7 +220,7 @@ function render(tasks, opts = {}) {
         `| ${link(t)} | ${cell(t.title)} | ${cell(t.estimate)} | ${t.epic} |`,
       );
     L.push("");
-    L.push(`Взять в работу: \`node scripts/tasks.mjs start ${next[0].id}\``);
+    L.push(`Взять в работу: \`node scripts/tasks.mjs start ${first.id}\``);
   } else
     L.push("_Нет доступных задач: всё либо сделано, либо ждёт зависимостей._");
   L.push("");
@@ -181,6 +240,8 @@ function render(tasks, opts = {}) {
   for (const e of epics) {
     const all = tasks.filter((t) => t.epic === e);
     const d = all.filter((t) => t.status === "done");
+    // Every epic listed has a task, so `doc` is that of its first one.
+    const doc = all[0]?.doc ?? "";
     const st =
       d.length === all.length
         ? "✅"
@@ -188,7 +249,7 @@ function render(tasks, opts = {}) {
           ? "🔄"
           : "⬜";
     L.push(
-      `| ${st} | **${e}** ${EPIC_NAMES[e]} | ${bar(d.length, all.length, 12)} | ${fmtDays(days(d))} / ${fmtDays(days(all))} | [${all[0].doc}](${all[0].doc}) |`,
+      `| ${st} | **${e}** ${EPIC_NAMES[e]} | ${bar(d.length, all.length, 12)} | ${fmtDays(days(d))} / ${fmtDays(days(all))} | [${doc}](${doc}) |`,
     );
   }
   L.push("");
@@ -236,6 +297,7 @@ function render(tasks, opts = {}) {
   const out = `${L.join("\n")}\n`;
   if (opts.check) {
     // --check: is docs/00_STATUS.md in sync with tasks.json? The generation-date line is ignored.
+    /** @type {(t: string) => string} */
     const strip = (t) =>
       t
         .split("\n")
@@ -259,6 +321,7 @@ function render(tasks, opts = {}) {
   writeFileSync(STATUS_PATH, out, "utf8");
 }
 
+/** @param {string} line */
 function worklog(line) {
   if (!existsSync(WORKLOG_PATH))
     writeFileSync(
@@ -375,6 +438,7 @@ switch (cmd) {
     const id = (args[0] ?? die("task id required")).toUpperCase();
     const title = args[1] ?? die("title required");
     if (tasks.some((t) => t.id === id)) die(`${id} already exists`);
+    /** @type {(name: string) => string | undefined} */
     const opt = (name) => {
       const i = args.indexOf(name);
       return i !== -1 ? args[i + 1] : undefined;
@@ -422,6 +486,6 @@ switch (cmd) {
 
   default:
     die(
-      `unknown command ${cmd}. Valid: ${["next", "start", "done", "block", "unblock", "todo", "show", "list", "render"].join(", ")}; statuses: ${STATUSES.join(", ")}`,
+      `unknown command ${cmd}. Valid: ${COMMANDS.join(", ")}; statuses: ${STATUSES.join(", ")}`,
     );
 }

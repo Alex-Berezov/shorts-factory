@@ -36,7 +36,7 @@ _Реализация: ✅ 2026-10-11 (E0-13), приёмка - `30_E0_TASKS.md`
 - apps/api: Fastify-скелет, healthcheck, error-handler, pino, отдача OpenAPI.
 - apps/worker: BullMQ-скелет, регистрация очередей, DLQ, graceful shutdown.
 - apps/web: Next.js-скелет, layout, basic auth, страница `/system` (заглушка).
-- GitHub Actions: lint → typecheck → test → build. Фактический состав с E0-12 (`.github/workflows/ci.yml`): job `ci` на services Postgres 16 / Redis 7 — `pnpm install --frozen-lockfile` → lint → typecheck → test → гейты репозитория (no-search-list, compose, tracker, harness-selftest) → миграция тестовой базы → test:int → build; job `docker-build` — сборка образов api, worker, migrate, web и проба установленных зависимостей.
+- GitHub Actions: lint → typecheck → test → build. Фактический состав шагов — `.github/workflows/ci.yml`.
 
 **AC:** `docker compose up` поднимает всё; `pnpm dev` работает; тестовый job проходит через очередь и пишет запись в Postgres; CI зелёный.
 

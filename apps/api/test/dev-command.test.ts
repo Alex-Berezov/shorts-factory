@@ -1,11 +1,10 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
-import { DEV_COMMAND, devCommandParts } from "./dev-command.js";
-
-const MANIFEST = fileURLToPath(new URL("../package.json", import.meta.url));
-const ManifestSchema = z.object({ scripts: z.record(z.string()) });
+import {
+  DEV_COMMAND,
+  devCommandParts,
+  isWatcherCommand,
+  manifestScripts,
+} from "./dev-command.js";
 
 /**
  * `pnpm dev` starts the api the way the container does: node itself owns
@@ -13,16 +12,14 @@ const ManifestSchema = z.object({ scripts: z.record(z.string()) });
  * `tsx watch` the signal went to a parent that kills the child after five
  * seconds - on Windows at once - and requests in flight were cut off with no
  * `shutdown complete` in the log. The image side of the same command is
- * checked by `apps/worker/test/container.test.ts`, which has
- * `infra/docker/**` among its inputs.
+ * checked by `test/container.test.ts` of the root project, whose hash
+ * (`//#test:repo`) covers every tracked file of the repository.
  */
 describe("api dev command", () => {
-  const manifest = ManifestSchema.parse(
-    JSON.parse(readFileSync(MANIFEST, "utf8")),
-  );
+  const scripts = manifestScripts();
 
   it("is node with tsx as a loader", () => {
-    expect(manifest.scripts.dev).toBe(DEV_COMMAND);
+    expect(scripts.dev).toBe(DEV_COMMAND);
   });
 
   it("is taken apart for a test into the flags of node and the script", () => {
@@ -34,8 +31,38 @@ describe("api dev command", () => {
     });
   });
 
-  it("has no watcher variant to reach for instead", () => {
-    expect(Object.keys(manifest.scripts)).not.toContain("dev:watch");
-    expect(Object.values(manifest.scripts).join(" ")).not.toContain("watch");
+  it("starts nothing under a watcher, in any script", () => {
+    expect(Object.keys(scripts)).not.toContain("dev:watch");
+    expect(watcherScripts(scripts)).toEqual([]);
+  });
+
+  it("refuses a watcher in a script other than dev", () => {
+    expect(
+      watcherScripts({ ...scripts, start: "tsx watch src/server.ts" }),
+    ).toEqual(["start"]);
+  });
+
+  it.each([
+    ["tsx watch src/index.ts", true],
+    ["tsx --watch src/index.ts", true],
+    ["node --watch src/index.ts", true],
+    ["node --import tsx --watch-path=src src/index.ts", true],
+    ["turbo watch dev", true],
+    ["bun --watch src/index.ts", true],
+    ["watchexec -- node src/index.ts", true],
+    ["tsx --flag watch src/index.ts", true],
+    ["TSX WATCH src/index.ts", true],
+    ["vitest --watch", true],
+    ["tsx src/cli/watchlist.ts", true],
+    ["node --import tsx src/index.ts", false],
+  ])("takes %j for a watcher: %s", (script, watcher) => {
+    expect(isWatcherCommand(script)).toBe(watcher);
   });
 });
+
+/** The names of the scripts that start a process under a watcher. */
+function watcherScripts(scripts: Record<string, string>): string[] {
+  return Object.entries(scripts)
+    .filter(([, script]) => isWatcherCommand(script))
+    .map(([name]) => name);
+}

@@ -34,5 +34,5 @@ USER node
 # of packages/runtime/src/shutdown.ts with the 25 s deadline
 # (SHUTDOWN_TIMEOUT_MS in apps/worker/src/bootstrap.ts). No
 # package manager, no `tsx` CLI and no shell in front of it - each of them
-# takes the signal for itself (apps/worker/test/container.test.ts).
+# takes the signal for itself (test/container.test.ts).
 CMD ["node", "--import", "tsx", "src/index.ts"]

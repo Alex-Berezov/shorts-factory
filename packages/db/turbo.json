@@ -5,7 +5,8 @@
     "test": {
       "inputs": [
         "$TURBO_EXTENDS$",
-        "$TURBO_ROOT$/infra/docker/migrate.Dockerfile"
+        "$TURBO_ROOT$/.env.test",
+        "$TURBO_ROOT$/apps/worker/package.json"
       ]
     }
   }

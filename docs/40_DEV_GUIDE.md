@@ -163,6 +163,26 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
   без инфраструктуры (ADR-0010). Конфиги vitest пакетов - тонкие вызовы корневого
   `vitest.preset.ts` (`unitTestConfig`/`intTestConfig`, ADR-0011); новый пакет с тестами заводит
   такой же, копию политики ловит `test/vitest-preset.test.ts`.
+- Корневой проект `test/` держит тесты репозитория, которые не принадлежат ни одному пакету: CI
+  (`ci-config`), образы и Compose (`container`, `dockerfile`, `compose-rules`, `probe-image`),
+  корневые скрипты (`check-no-search-list`, `tasks-cli`, `paths`), входы turbo (`turbo-inputs`).
+  Корень репозитория скрипты и корневые тесты берут из `scripts/lib/paths.mjs` (`repoRoot`),
+  пакеты - из `@sf/config/paths`; перекрёстных импортов нет. Файлы репозитория корневые тесты
+  читают через `test/repo-files.ts` - только те, что входят в хеш: отслеживаемые git и
+  неотслеживаемые, но не игнорируемые (`git ls-files --cached --others --exclude-standard`,
+  `repoFilesUnder`); перечисляют - тоже через него, а не `readdirSync` (пока исключение -
+  `workspacePackageDirs`: пакеты по `pnpm-workspace.yaml` через `readdirSync`, долг E0-12D
+  в `docs/TECH_DEBT.md`). Игнорируемый файл
+  (`coverage/`, сборка) в хеш `//#test:repo` не попадает, и чтение его переиграло бы старый
+  результат из кэша. Ответ «путь исчез» у корневых скриптов один - `isGone` из
+  `scripts/lib/files.mjs` (только `ENOENT`; там же `readIfFile`).
+- Типы `scripts/*.mjs` - JSDoc под `checkJs` корневого `tsconfig.json` (`pnpm typecheck:repo`),
+  без `.d.mts`; скрипты остаются запускаемыми чистым `node`.
+- Входы turbo: корневой `test.inputs` - только `$TURBO_DEFAULT$` и `vitest.preset.ts`; пакет,
+  чьи юнит-тесты читают `.env.test` (`.env.example`), добавляет его в своём `turbo.json`
+  (`extends: ["//"]`, `$TURBO_EXTENDS$`). Юнит-тест пакета, читающий файл корня (`repoRoot`,
+  относительный путь, выходящий из пакета: `"../../.."`, `resolve(here, "..", "..", "..")`), не видит его правку в своём хеше: такие читатели - закреплённый список, новый
+  краснит. Замок - `test/turbo-inputs.test.ts`.
 - `pnpm test:int` - интеграционные `apps/api`, `apps/worker`, `packages/db` по одному пакету
   (`--concurrency=1`). Нужны поднятый `infra/docker-compose.yml` и мигрированная база
   `shorts_factory_test`; без Compose прогон красный, а не пропущенный. Каждый прогон пакета до
@@ -174,8 +194,10 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
   - всегда идут lint, typecheck и no-search-list (`when: always`);
   - compose, tracker и harness-selftest идут только при совпадении `when: glob:` с изменёнными
     файлами: compose - `compose.yaml`, `infra/**`, `scripts/check-compose.mjs`,
-    `scripts/compose-rules.mjs`, `.dockerignore`; tracker - `docs/tasks/**`,
-    `docs/00_STATUS.md`; harness-selftest - `.claude/**` и файлы проекта, которые читают пробы
+    `scripts/compose-rules.mjs`, `scripts/lib/**`, `.dockerignore`; tracker - `docs/tasks/**`,
+    `docs/00_STATUS.md`, `scripts/tasks.mjs`, `scripts/lib/**`; harness-selftest - `.claude/**`,
+    файлы, названные в `note` гейтов compose и tracker, но не выбирающие сам этот гейт (его
+    `when`/`cmd`; сегодня - `test/compose-rules.test.ts`, `test/container.test.ts`), и файлы проекта, которые читают пробы
     гейтов build и test:int (манифесты, конфиги сборки и int-тестов, `.env.test`; точный glob -
     гейт `harness-selftest` в `rules.sf.json`, E0-01A, E0-02A; `turbo.json` пробы не читают, на нём
     гейт не выбирается). Нет совпадения - гейт молча пропущен,
@@ -192,8 +214,10 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
     `pnpm test:int`. `--only` снимает только `never` и сужает набор: glob-гейт test:int без изменённых
     файлов под своим шаблоном и при `--only=test:int` пропускается с exit 0, тесты при этом не идут;
   - `--list` показывает выбор и причину каждого решения, `--only=<id>,<id>` - подмножество.
-- CI (`.github/workflows/ci.yml`) гоняет `pnpm test`, `pnpm test:int`, `pnpm build` и сборку
-  образов отдельными шагами.
+- CI - `.github/workflows/ci.yml` (состав шагов - там). Локальный кэш turbo (`.turbo/cache`)
+  job `ci` сохраняет между прогонами: ключ - ISO-неделя без коммита и без `restore-keys`, архив
+  пишет первый зелёный прогон недели, остальные восстанавливают его как есть; удалённого кэша нет.
+  Замок - `test/ci-config.test.ts`.
 
 ## ADR
 

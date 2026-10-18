@@ -1,5 +1,5 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   RENDERING_PROBE,
@@ -10,13 +10,15 @@ import {
   checkRendering,
   defaultComposeFile,
   durationSec,
-} from "../../../scripts/compose-rules.mjs";
+} from "../scripts/compose-rules.mjs";
+import { repoRoot } from "../scripts/lib/paths.mjs";
 
 /**
  * The rules `pnpm check:compose` holds the full stack to, each fed a
  * configuration that breaks it - in the shape `docker compose config --format
- * json` prints, so no Docker is needed here. Next to the worker's image test:
- * both guard how the containers of this repository are started.
+ * json` prints, so no Docker is needed here. Next to the image tests of the
+ * root project (container.test.ts): both guard how the containers of this
+ * repository are started.
  */
 
 type Service = Record<string, unknown>;
@@ -830,14 +832,25 @@ describe("durationSec", () => {
   });
 });
 
-describe("defaultComposeFile", () => {
-  it.each(["checkout", "with space", "с кириллицей"])(
-    "finds compose.yaml of a checkout under a path %s",
-    (folder) => {
-      const root = join(process.cwd(), folder);
-      const script = pathToFileURL(join(root, "scripts", "check-compose.mjs"));
+/**
+ * The names `docker compose` looks for in its working directory when no
+ * `-f` is given, in its order (the Compose specification, "Compose file").
+ */
+const COMPOSE_DEFAULT_NAMES = [
+  "compose.yaml",
+  "compose.yml",
+  "docker-compose.yaml",
+  "docker-compose.yml",
+];
 
-      expect(defaultComposeFile(script.href)).toBe(join(root, "compose.yaml"));
-    },
-  );
+describe("defaultComposeFile", () => {
+  it("is the file `docker compose` takes at the root of the repository", () => {
+    // The root itself, under any path, is the case of test/paths.test.ts.
+    const present = COMPOSE_DEFAULT_NAMES.filter((name) =>
+      existsSync(join(repoRoot, name)),
+    );
+
+    expect(present).toHaveLength(1);
+    expect(defaultComposeFile()).toBe(join(repoRoot, present[0] ?? ""));
+  });
 });

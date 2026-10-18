@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
+import { repoRoot } from "../scripts/lib/paths.mjs";
 import {
   CONTAINER_SCRIPT,
   CONTROL,
@@ -23,7 +24,7 @@ import {
   isEntry,
   main,
   workspaceChecks,
-} from "../../../scripts/probe-image.mjs";
+} from "../scripts/probe-image.mjs";
 import { imagesOf } from "./dockerfile.js";
 
 /**
@@ -308,7 +309,7 @@ describe("image probe main", () => {
 });
 
 describe("image probe entry guard", () => {
-  const script = resolve(__dirname, "../../../scripts/probe-image.mjs");
+  const script = join(repoRoot, "scripts", "probe-image.mjs");
 
   it("runs main when started through a link to the script's directory", () => {
     const link = scriptsLink;

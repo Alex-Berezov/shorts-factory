@@ -184,8 +184,9 @@ shorts-factory/
 │       ├── gemini/   # VideoAnalysisClient (public URL + local file), LlmClient
 │       └── tts/      # интерфейс TtsProvider + адаптеры провайдеров
 ├── infra/          # docker-compose.yml (postgres+redis, dev), docker-compose.app.yml (migrate/api/worker/web), docker/*.Dockerfile, scripts/backup.sh
-├── scripts/        # гейты репозитория: check-no-search-list, check-compose (+ compose-rules), probe-image (проба образа в job `docker-build`), трекер задач
-├── test/           # корневой vitest-проект: тесты репозитория вне пакетов (`pnpm test:repo`, ADR-0011)
+├── scripts/        # гейты репозитория: check-no-search-list, check-compose (+ compose-rules), probe-image (проба образа в job `docker-build`), трекер задач; типы - JSDoc под `checkJs`
+│   └── lib/        # `paths.mjs` - корень репозитория для скриптов и корневых тестов (пакеты берут `@sf/config/paths`); `files.mjs` - `isGone` (путь исчез = `ENOENT`) и `readIfFile` для гейтов и корневых тестов
+├── test/           # корневой vitest-проект: тесты репозитория вне пакетов - CI, образы, Compose, скрипты, входы turbo (`pnpm test:repo`, ADR-0011)
 ├── vitest.preset.ts        # общий пресет vitest: каждый `vitest*.config.ts` пакета - тонкий вызов в него (ADR-0011)
 ├── vitest.repo.config.mts  # конфиг корневого проекта `test/`
 ├── compose.yaml    # полный стек: `docker compose up --build` из корня, include двух файлов infra/ (E0-11)

@@ -56,8 +56,18 @@
   (пробы 17.10.2026, файл дела E0-12A). `vitest.preset.ts` - во входах задач `test`, `test:int`,
   `typecheck` (`$TURBO_ROOT$/vitest.preset.ts`), а не в `globalDependencies`: правка пресета -
   miss у всех `test`/`typecheck` пакетов и корня, новый хеш `test:int`, а кэш `build` web не
-  сбрасывается (`lint` - `biome check .` вне turbo). Переезд репо-тестов из `apps/worker/test` и
-  входы turbo под них - E0-12F.
+  сбрасывается (`lint` - `biome check .` вне turbo).
+- **Переезд репо-тестов (E0-12F).** `ci-config`, `compose-rules`, `container`, `dockerfile`,
+  `probe-image` и разборщик `dockerfile.ts` переехали из `apps/worker/test` в корневой `test/`;
+  кейс образа migrate из `packages/db/test/cli-run.test.ts` - в `test/container.test.ts`
+  (Dockerfile разбирает только `test/dockerfile.ts`). В `@sf/worker` осталось звено
+  `scripts.dev == DEV_COMMAND` (`apps/worker/test/dev-command.test.ts`); образ сверяется со
+  `scripts.dev` в корне. `.env.test` ушёл из корневого `test.inputs` к пакетам-читателям (config,
+  db, runtime, api, worker; `.env.example` - только config) - их `turbo.json`; выигрыш - core,
+  contracts, api-client, остальные сбрасываются через `^test`. Замки входов - функции нарушений
+  в `test/turbo-inputs.test.ts`: точный корневой `test.inputs`, `extends`/`$TURBO_EXTENDS$` у
+  каждого `turbo.json` пакета, `.env.test` ровно у читателей (скан исходников), корневые задачи
+  без `!`-исключений, порядок `test:int` через `^test:int`.
 - **test-support `@sf/db`** - каталог `packages/db/test-support/` вне `test/` (vitest не
   собирает его как тесты), подпути `exports`:
   - `@sf/db/test-support/stack-guard` - ничего не импортирует, проверяется в `pnpm test`:

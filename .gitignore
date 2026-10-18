@@ -10,6 +10,7 @@ dist/
 /data/
 coverage/
 *.tsbuildinfo
+*.timestamp-*.mjs
 
 # agent harness: mutable state and case files
 /tasks/

@@ -31,13 +31,7 @@
  * Exit 1 with every violation listed; exit 0 when clean.
  */
 import { execFileSync } from "node:child_process";
-import {
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -48,8 +42,9 @@ import {
   checkRendering,
   defaultComposeFile,
 } from "./compose-rules.mjs";
+import { isGone, readIfFile } from "./lib/files.mjs";
 
-const file = resolve(process.argv[2] ?? defaultComposeFile(import.meta.url));
+const file = resolve(process.argv[2] ?? defaultComposeFile());
 // Compose resolves a bind source against the project directory - the
 // directory of the first compose file - and prints it absolute.
 const envFile = join(dirname(file), ".env");
@@ -62,7 +57,12 @@ const probeFile = join(scratch, "probe.yaml");
 writeFileSync(probeFile, RENDERING_PROBE);
 writeFileSync(join(scratch, RENDERING_PROBE_SOURCE), "");
 
-/** `docker compose` with `args`, its standard output. */
+/**
+ * `docker compose` with `args`, its standard output.
+ *
+ * @param {string[]} args
+ * @returns {string}
+ */
 function compose(args) {
   return execFileSync("docker", ["compose", ...args], {
     encoding: "utf8",
@@ -70,7 +70,12 @@ function compose(args) {
   });
 }
 
-/** The resolved configuration of `composeFile`, as JSON. */
+/**
+ * The resolved configuration of `composeFile`, as JSON.
+ *
+ * @param {string} composeFile
+ * @returns {import("./compose-rules.mjs").ComposeConfig}
+ */
 function render(composeFile) {
   return JSON.parse(
     compose([
@@ -86,8 +91,10 @@ function render(composeFile) {
   );
 }
 
-let config;
-let rendering;
+/** @type {import("./compose-rules.mjs").ComposeConfig} */
+let config = {};
+/** @type {string[]} */
+let rendering = [];
 try {
   rendering = checkRendering(render(probeFile));
   if (rendering.length > 0) {
@@ -98,7 +105,7 @@ try {
     config = render(file);
   }
 } catch (error) {
-  if (error.code === "ENOENT") {
+  if (isGone(error)) {
     // No Docker CLI is a missing prerequisite, not a broken Compose file.
     console.error(
       "check-compose: the docker CLI is not on PATH - install Docker (the daemon is not needed); the Compose files were not checked",
@@ -106,7 +113,14 @@ try {
     process.exit(1);
   }
   console.error(`check-compose: docker compose config failed for ${file}`);
-  console.error(String(error.stderr ?? error.message ?? error));
+  // What docker printed, else why it could not run.
+  const detail =
+    error instanceof Error
+      ? "stderr" in error && error.stderr != null
+        ? error.stderr
+        : error.message
+      : error;
+  console.error(String(detail));
   process.exit(1);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
@@ -116,16 +130,6 @@ if (rendering.length > 0) {
   console.error("check-compose: the rendering probe failed");
   for (const problem of rendering) console.error(`  ${problem}`);
   process.exit(1);
-}
-
-/** Contents of a file, null if there is no file at `path`. */
-function readIfFile(path) {
-  try {
-    return statSync(path).isFile() ? readFileSync(path, "utf8") : null;
-  } catch (error) {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  }
 }
 
 const problems = [

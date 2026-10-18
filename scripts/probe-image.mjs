@@ -19,9 +19,48 @@
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { repoRoot } from "./lib/paths.mjs";
 
-/** What each image starts from: `file` must exist, `pkg` must resolve (from `from`). */
+/**
+ * One check inside an image: `file` must exist, or `pkg` must resolve from
+ * the directory `from` (the WORKDIR when absent).
+ *
+ * @typedef {object} ImageCheck
+ * @property {string} [file]
+ * @property {string} [pkg]
+ * @property {string} [from]
+ */
+
+/**
+ * What one probe run returned, as `spawnSync` reports it.
+ *
+ * @typedef {object} ProbeRun
+ * @property {number | null} status
+ * @property {string | null} stderr
+ * @property {string | null} [signal]
+ * @property {Error} [error]
+ */
+
+/**
+ * What `main` works with; each has a default that reaches docker, the
+ * repository and the console.
+ *
+ * @typedef {object} ProbeDeps
+ * @property {(tag: string, checks: ImageCheck[]) => ProbeRun} [run] runs one
+ *   check list against an image tag; docker by default
+ * @property {(dir: string) => unknown} [read] reads the manifest of a package
+ *   directory of the repository
+ * @property {(line: string) => void} [out]
+ * @property {(line: string) => void} [err]
+ */
+
+/**
+ * What each image starts from, by image name.
+ *
+ * @type {Record<string, ImageCheck[]>}
+ */
 export const PROBES = {
   api: [{ pkg: "fastify" }, { pkg: "tsx" }],
   worker: [{ pkg: "bullmq" }, { pkg: "tsx" }],
@@ -34,13 +73,18 @@ export const PROBES = {
  * whose manifest names the workspace packages it needs. web is absent: the
  * Next standalone build bundles the workspace packages it uses.
  */
+/** @type {Record<string, string>} */
 export const WORKSPACE_OF = {
   api: "apps/api",
   worker: "apps/worker",
   migrate: "packages/db",
 };
 
-/** Missing on purpose: the control run must fail on it. */
+/**
+ * Missing on purpose: the control run must fail on it.
+ *
+ * @type {{ pkg: string }}
+ */
 export const CONTROL = { pkg: "@sf/probe-control-never-installed" };
 
 /** Printed by the program in the image when a check fails. */
@@ -70,30 +114,61 @@ if (missing.length > 0) {
  * One check per workspace dependency of a manifest: the link pnpm makes in
  * the package's `node_modules` must lead to a package. A file check, not a
  * resolve: the workspace packages export TypeScript under `import` only.
+ *
+ * @param {unknown} manifest
+ * @returns {ImageCheck[]}
  */
 export function workspaceChecks(manifest) {
-  const dependencies = manifest?.dependencies ?? {};
-  return Object.entries(dependencies)
+  const dependencies =
+    typeof manifest === "object" && manifest !== null
+      ? Reflect.get(manifest, "dependencies")
+      : undefined;
+  return Object.entries(
+    typeof dependencies === "object" && dependencies !== null
+      ? dependencies
+      : {},
+  )
     .filter(([, range]) => String(range).startsWith("workspace:"))
     .map(([name]) => ({ file: `node_modules/${name}/package.json` }))
     .sort((a, b) => a.file.localeCompare(b.file));
 }
 
-function readManifest(dir) {
-  const url = new URL(`../${dir}/package.json`, import.meta.url);
-  return JSON.parse(readFileSync(url, "utf8"));
+/**
+ * The manifest of a package directory of the repository, parsed JSON of no
+ * checked shape (`test/repo-files.ts` `readManifest` is the typed reader of
+ * the root tests).
+ *
+ * @param {string} dir relative to the repository root
+ * @returns {unknown}
+ */
+function readManifestJson(dir) {
+  return JSON.parse(readFileSync(join(repoRoot, dir, "package.json"), "utf8"));
 }
 
-/** Every check of `image`: its own table and its workspace links. */
-export function checksOf(image, read = readManifest) {
+/**
+ * Every check of `image`: its own table and its workspace links.
+ *
+ * @param {string} image
+ * @param {(dir: string) => unknown} [read]
+ * @returns {ImageCheck[]}
+ */
+export function checksOf(image, read = readManifestJson) {
   const dir = Object.hasOwn(WORKSPACE_OF, image)
     ? WORKSPACE_OF[image]
     : undefined;
+  const own = Object.hasOwn(PROBES, image) ? PROBES[image] : undefined;
+  if (own === undefined) throw new Error(`no probe for image "${image}"`);
   const workspace = dir === undefined ? [] : workspaceChecks(read(dir));
-  return [...PROBES[image], ...workspace];
+  return [...own, ...workspace];
 }
 
-/** The `docker run` arguments of one probe; --pull=never keeps the run on the image just built. */
+/**
+ * The `docker run` arguments of one probe; --pull=never keeps the run on the image just built.
+ *
+ * @param {string} tag
+ * @param {ImageCheck[]} checks
+ * @returns {string[]}
+ */
 export function dockerArgs(tag, checks) {
   return [
     "run",
@@ -108,15 +183,32 @@ export function dockerArgs(tag, checks) {
   ];
 }
 
+/**
+ * One probe run by docker.
+ *
+ * @param {string} tag
+ * @param {ImageCheck[]} checks
+ * @returns {ProbeRun}
+ */
 function dockerRun(tag, checks) {
   return spawnSync("docker", dockerArgs(tag, checks), { encoding: "utf8" });
 }
 
-/** A run that reached the program in the image and found something missing. */
+/**
+ * A run that reached the program in the image and found something missing.
+ *
+ * @param {ProbeRun} result
+ * @returns {boolean}
+ */
 const foundMissing = (result) =>
   result.status === 1 && String(result.stderr).includes(MISSING_MARKER);
 
-/** Why a run printed nothing: stderr if there is any, else error, status, signal. */
+/**
+ * Why a run printed nothing: stderr if there is any, else error, status, signal.
+ *
+ * @param {ProbeRun} result
+ * @returns {string}
+ */
 function whyFailed(result) {
   const stderr = String(result.stderr ?? "").trim();
   if (stderr !== "") return stderr;
@@ -126,12 +218,17 @@ function whyFailed(result) {
 
 /**
  * The probe; `run` is how one check list is run against a tag (docker by
- * default), `out`/`err` where the lines go. Returns the exit code.
+ * default), `out`/`err` where the lines go. Returns the exit code: 0 ok, 1
+ * the image lacks something, 2 the probe could not run.
+ *
+ * @param {string[]} argv
+ * @param {ProbeDeps} [deps]
+ * @returns {number}
  */
 export function main(argv, deps = {}) {
   const {
     run = dockerRun,
-    read = readManifest,
+    read = readManifestJson,
     out = console.log,
     err = console.error,
   } = deps;
@@ -145,6 +242,7 @@ export function main(argv, deps = {}) {
     err(`probe-image: "${tag}" is not an image tag`);
     return 2;
   }
+  /** @type {ImageCheck[]} */
   let checks;
   try {
     checks = checksOf(image, read);
@@ -184,6 +282,11 @@ export function main(argv, deps = {}) {
  * Whether this module is the script node was started with. Node resolves
  * symlinks in `import.meta.url` but leaves `argv[1]` as written, so both sides
  * go through realpath; a path that cannot be resolved is not the entry.
+ *
+ * @param {string} metaUrl `import.meta.url` of the module
+ * @param {string | undefined} entry `process.argv[1]`
+ * @param {(path: string) => string} [resolve]
+ * @returns {boolean}
  */
 export function isEntry(metaUrl, entry, resolve = realpathSync) {
   if (entry === undefined || entry === "") return false;

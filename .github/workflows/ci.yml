@@ -55,6 +55,18 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
+      # The local cache of turbo (.turbo/cache, the default of turbo 2.10)
+      # replays a task whose inputs did not change. One archive per ISO week:
+      # the first green run of the week saves it, later runs restore it as
+      # it is - the cache action saves nothing on a key it hit. A pull
+      # request saves into the scope of its branch, main restores only from
+      # main: a fork cannot put an archive there.
+      - id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: ${{ runner.os }}-turbo-${{ steps.week.outputs.week }}
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test

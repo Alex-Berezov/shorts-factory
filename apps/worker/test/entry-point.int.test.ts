@@ -1,5 +1,4 @@
 import { fork } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { closeDb } from "@sf/db";
 import { closeRedis } from "@sf/runtime";
@@ -13,9 +12,8 @@ import {
   expect,
   it,
 } from "vitest";
-import { z } from "zod";
 import { systemSmokeJob } from "../src/jobs/system-smoke.js";
-import { DEV_COMMAND } from "./dev-command.js";
+import { DEV_COMMAND, manifestScripts } from "./dev-command.js";
 import {
   deleteSmokeUsage,
   obliterateQueues,
@@ -56,8 +54,6 @@ const QUEUES = ["system.smoke", "system.dlq", "system.heartbeat"] as const;
 const ENTRY = fileURLToPath(
   new URL("./fixtures/entry-under-signal.ts", import.meta.url),
 );
-const MANIFEST = fileURLToPath(new URL("../package.json", import.meta.url));
-const ManifestSchema = z.object({ scripts: z.object({ dev: z.string() }) });
 /** Enough jobs that the worker is busy when the signal arrives. */
 const JOB_COUNT = 30;
 /** How long the worker may take to come up and say so. */
@@ -301,10 +297,6 @@ describe("worker entry point under a signal", () => {
     // is part of the contract, not a convenience. A watcher (`tsx watch`) or
     // any other parent process would answer the signal itself and kill this
     // one: the drain above would be proven for a command nobody runs.
-    const manifest = ManifestSchema.parse(
-      JSON.parse(readFileSync(MANIFEST, "utf8")),
-    );
-
-    expect(manifest.scripts.dev).toBe(DEV_COMMAND);
+    expect(manifestScripts().dev).toBe(DEV_COMMAND);
   });
 });

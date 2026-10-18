@@ -2,8 +2,9 @@
 'use strict';
 /**
  * harness-selftest.js - самопроверка обвязки. Запускается руками, гейтом `harness-selftest`
- * (rules.sf.json: .claude/** и файлы проекта, которые читают пробы гейтов build и test:int,
- * перечень - glob гейта) и установщиком install.ps1.
+ * (rules.sf.json: .claude/**, файлы проекта, которые читают пробы гейтов build и test:int,
+ * и пути из note гейтов compose и tracker, которых нет в when и cmd самого гейта; перечень -
+ * glob гейта) и установщиком install.ps1.
  *
  * Зачем: у обвязки нет ни типов, ни тестов, а сломанный хук ничего не запрещает - его отказ
  * неотличим от разрешения. Поэтому здесь не только синтаксис и разбор правил, но и живые пробы
@@ -200,6 +201,28 @@ function gateProbe(id) {
   return res;
 }
 
+/** Пути файлов, названные в note гейта; шаблоны с * и каталоги (`scripts/lib/**`) - нет. */
+function notePaths(gate) {
+  const note = String(gate.note || '');
+  const named = note.match(/(?<![\w./*-])(?:test|scripts|apps|packages|infra|docs)\/[\w./-]*\.(?:ts|mjs|js|json|ya?ml|md)\b/g) || [];
+  return [...new Set(named)];
+}
+
+/** Гейты, чьи пути из note сверяются с диском (notePathsOnDisk). */
+const NOTE_CHECKED_GATES = ['compose', 'tracker'];
+
+/**
+ * Пути файлов, названные в note гейта (`test/x.test.ts`, `scripts/x.mjs`, ...), есть на
+ * диске: note - то, что читает человек о гейте, и опечатка в нём переживала бы
+ * selftest (L-021). Шаблоны с * и каталоги (`scripts/lib/**`) не сверяются.
+ */
+function notePathsOnDisk(gate) {
+  const files = notePaths(gate);
+  if (!files.length) return 'в note гейта ' + gate.id + ' не найдено ни одного пути файла';
+  const missing = files.filter((f) => !fs.existsSync(path.join(ROOT, f)));
+  return missing.length ? 'в note гейта ' + gate.id + ' нет на диске: ' + missing.join(', ') : { note: files.length + ' путей' };
+}
+
 /**
  * Общий каркас пробы гейта по glob (L-008): решение принимает настоящий selectGates,
  * своей копии разбора when нет. Выбор, пропуск и дополнительные проверки - отдельные
@@ -236,12 +259,18 @@ checkGateSelection('compose', {
     'infra/docker/api.Dockerfile',
     'scripts/check-compose.mjs',
     'scripts/compose-rules.mjs',
+    // The gate finds compose.yaml through the root of scripts/lib and reads
+    // through scripts/lib/files.mjs (E0-12F).
+    'scripts/lib/paths.mjs',
+    'scripts/lib/files.mjs',
     '.dockerignore',
     'infra/docker/worker.Dockerfile.dockerignore',
   ],
   // Манифесты приложений check-compose не читает: выбор на них обещал бы
   // проверку, которой нет (E0-11, круг 7-2).
-  mustSkip: ['apps/web/src/app/page.tsx', 'apps/api/package.json', 'apps/worker/package.json', 'apps/web/package.json', 'apps/api/src/package.json', 'x.dockerignore', 'docs/30_E0_TASKS.md', 'README.md', 'scripts/tasks.mjs', 'xinfra/a.yml'],
+  // scripts/lib/** - каталог, а не префикс имени: ни scripts/lib.mjs, ни чужой
+  // scripts/lib в пакете гейт не выбирают.
+  mustSkip: ['apps/web/src/app/page.tsx', 'apps/api/package.json', 'apps/worker/package.json', 'apps/web/package.json', 'apps/api/src/package.json', 'x.dockerignore', 'docs/30_E0_TASKS.md', 'README.md', 'scripts/tasks.mjs', 'xinfra/a.yml', 'scripts/lib.mjs', 'scripts/library/a.mjs', 'apps/web/scripts/lib/a.mjs'],
   extra: [
     {
       name: 'его скрипт на месте',
@@ -252,7 +281,18 @@ checkGateSelection('compose', {
         return true;
       },
     },
+    { name: 'пути файлов в его note на диске', fn: ({ gate }) => notePathsOnDisk(gate) },
   ],
+});
+
+// Скрипт трекера берёт корень из scripts/lib/paths.mjs: правка любого из них
+// может сломать render --check так же, как правка tasks.json (E0-12F).
+checkGateSelection('tracker', {
+  runWhat: 'трекере и его скрипте',
+  skipWhat: 'посторонних',
+  mustRun: ['docs/tasks/tasks.json', 'docs/00_STATUS.md', 'scripts/tasks.mjs', 'scripts/lib/paths.mjs'],
+  mustSkip: ['docs/30_E0_TASKS.md', 'scripts/check-compose.mjs', 'scripts/lib.mjs', 'apps/web/scripts/lib/a.mjs', 'tasks/2026-10-18-E0-12F.md', 'README.md'],
+  extra: [{ name: 'пути файлов в его note на диске', fn: ({ gate }) => notePathsOnDisk(gate) }],
 });
 
 /**
@@ -710,8 +750,8 @@ checkGateSelection('test:int', {
 // перечислены как есть, но сверки "каждый прочитанный файл" для build нет - долг E0-12D (docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «гейт harness-selftest не выбирается на файлах, которые читает проба графа test:int»).
 // turbo.json ни одна проба не читает - выбор на нём обещал бы сверку, которой нет.
 checkGateSelection('harness-selftest', {
-  runWhat: '.claude/** и файлах проекта, которые читают пробы build и test:int',
-  skipWhat: 'исходниках, lockfile, turbo.json и docs',
+  runWhat: '.claude/**, файлах проекта, которые читают пробы build и test:int, и путях из note вне when',
+  skipWhat: 'исходниках, lockfile, turbo.json, docs и путях из when и cmd гейтов-владельцев note',
   mustRun: [
     '.claude/hooks/gates.js',
     '.claude/hooks/rules.sf.json',
@@ -731,9 +771,15 @@ checkGateSelection('harness-selftest', {
     'packages/config/src/paths.ts',
     'packages/config/vitest/setup.ts',
     '.env.test',
+    'test/container.test.ts',
   ],
   mustSkip: [
     'turbo.json',
+    'docs/00_STATUS.md',
+    'scripts/tasks.mjs',
+    'scripts/compose-rules.mjs',
+    'scripts/lib/paths.mjs',
+    'scripts/lib/files.mjs',
     'apps/api/.env.test',
     'apps/api/vitest.config.ts',
     'packages/config/src/index.ts',
@@ -745,11 +791,28 @@ checkGateSelection('harness-selftest', {
     'apps/api/src/server.ts',
     'docs/30_E0_TASKS.md',
     'README.md',
-    'scripts/tasks.mjs',
+    'scripts/check-no-search-list.mjs',
+    'test/turbo-inputs.test.ts',
     'xapps/web/package.json',
     'docs/apps/web/package.json',
   ],
   extra: [
+    {
+      // notePathsOnDisk сверяет эти пути с диском: переименование такого файла должно
+      // выбирать самопроверку локально, а не краснеть только в CI (E0-12F). Путь из when
+      // или cmd гейта-владельца note самопроверку не выбирает (решение техлида к кругу 3).
+      name: 'его выбирает каждый путь из note гейтов ' + NOTE_CHECKED_GATES.join(' и ') + ' вне их when и cmd',
+      fn: ({ runs }) => {
+        const named = NOTE_CHECKED_GATES.flatMap((id) => {
+          const owner = gateProbe(id);
+          return notePaths(owner.gate).filter((f) => !owner.runs(f) && !String(owner.gate.cmd || '').includes(f));
+        });
+        if (!named.length) return 'в note гейтов ' + NOTE_CHECKED_GATES.join(' и ') + ' нет ни одного пути вне их when и cmd';
+        const stray = named.filter((f) => !runs(f));
+        if (stray.length) return 'пути из note вне glob harness-selftest: ' + stray.join(', ');
+        return { note: named.length + ' путей' };
+      },
+    },
     {
       // файлы берутся тем же intProbeReads, что и в пробе test:int: конфиг из --config с любым
       // именем, setup-модули, модуль testEnvFilePath, фикстура

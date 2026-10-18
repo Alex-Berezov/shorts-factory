@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CliError,
@@ -360,37 +359,5 @@ describe("entry points", () => {
     expect(closeDb).toHaveBeenCalledWith(handle);
     expect(output.out).toEqual(["app settings seeded\n"]);
     expect(process.exitCode).toBe(0);
-  });
-});
-
-/**
- * The Compose `migrate` service runs the image's command: both entry points,
- * the seed only after the migrations succeeded - the worker refuses to start
- * without the queue switches the seed writes.
- */
-describe("the migrate image", () => {
-  const dockerfile = new URL(
-    "../../../infra/docker/migrate.Dockerfile",
-    import.meta.url,
-  );
-
-  it("runs the migrations, then the seed", () => {
-    const commands = readFileSync(dockerfile, "utf8")
-      .split(/\r?\n/)
-      .filter((line) => /^CMD\s/i.test(line));
-
-    expect(commands).toHaveLength(1);
-    const steps = (commands[0] ?? "")
-      .replace(/^CMD\s+/i, "")
-      .split("&&")
-      .map((step) => step.trim());
-    expect(steps).toEqual([
-      "node --import tsx src/cli/migrate.ts",
-      "node --import tsx src/cli/seed.ts",
-    ]);
-    // The image's working directory is this package (WORKDIR /repo/packages/db).
-    for (const script of ["src/cli/migrate.ts", "src/cli/seed.ts"]) {
-      expect(existsSync(new URL(`../${script}`, import.meta.url))).toBe(true);
-    }
   });
 });

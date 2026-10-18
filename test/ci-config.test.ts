@@ -1,19 +1,27 @@
-import { readFileSync } from "node:fs";
 import { parseEnv } from "node:util";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { ROOT, imagesOf } from "./dockerfile.js";
+import { imagesOf } from "./dockerfile.js";
+import {
+  type Manifest,
+  type Turbo,
+  readManifest,
+  readRepoFile,
+  readRepoJson,
+  readTurbo,
+} from "./repo-files.js";
 
 /**
  * What the CI configuration must keep, without a run of Actions to find out:
  * the triggers and the concurrency rule, the services, the steps and their
- * order, the image matrix, the absence of any turbo cache in the workflow, and
- * what the turbo hash of a package's tests covers. Next to the other tests of
- * how the repository is built and run (container.test.ts,
- * compose-rules.test.ts); every file read here is an input of the `test` task
- * of this package (turbo.json, ./turbo.json).
+ * order, the image matrix, and the one turbo cache of the workflow - the
+ * local cache of job ci, one archive per ISO week, never a remote one. What
+ * the turbo hash of a task covers is `turbo-inputs.test.ts`. A test of the
+ * root project, next to the other tests of how the repository is built and
+ * run (container.test.ts, compose-rules.test.ts); `//#test:repo` hashes every
+ * tracked file of the repository, so each file read here is in its hash.
  */
-const read = (path: string) => readFileSync(`${ROOT}${path}`, "utf8");
+const read = readRepoFile;
 const workflow = read(".github/workflows/ci.yml").replace(/\r\n/g, "\n");
 
 /** Lines of the block under `header` (a line ending in `:`), by indentation. */
@@ -287,7 +295,7 @@ describe("ci.yml job ci", () => {
   const GateSchema = z.object({ cmd: z.string() });
   const gates = z
     .object({ gates: z.array(GateSchema) })
-    .parse(JSON.parse(read(".claude/hooks/rules.sf.json")))
+    .parse(readRepoJson(".claude/hooks/rules.sf.json"))
     .gates.map((gate) => gate.cmd)
     .filter((cmd) => !cmd.startsWith("pnpm "));
 
@@ -325,12 +333,6 @@ describe("ci.yml job ci", () => {
     );
   });
 
-  it("keeps no turbo cache in the workflow: every run computes the result", () => {
-    expect(workflow).not.toMatch(/\.turbo/);
-    expect(workflow).not.toMatch(/--force\b/);
-    expect(workflow).not.toMatch(/--cache[= ]/);
-  });
-
   it("caches the pnpm store through setup-node", () => {
     const setup = steps.find((step) =>
       step.text.includes("actions/setup-node"),
@@ -342,11 +344,7 @@ describe("ci.yml job ci", () => {
 
   it("migrates with the entry of `pnpm db:migrate` and .env.test as a dotenv file", () => {
     const step = steps.find(isMigrate);
-    const Manifest = z.object({
-      scripts: z.object({ "db:migrate": z.string() }),
-    });
-    const script = Manifest.parse(JSON.parse(read("packages/db/package.json")))
-      .scripts["db:migrate"];
+    const script = readManifest("packages/db").scripts?.["db:migrate"];
 
     expect(step?.text).toContain("working-directory: packages/db");
     expect(script).toMatch(/^tsx \S+$/);
@@ -359,6 +357,271 @@ describe("ci.yml job ci", () => {
     expect(workflow).not.toMatch(/continue-on-error/);
     expect(workflow).not.toMatch(/\|\|\s*true/);
     expect(workflow).not.toMatch(/\|\|\s*exit\s+0/);
+  });
+});
+
+/** Where turbo 2.10 keeps its local cache, from the root of the repository. */
+const TURBO_CACHE_DIR = ".turbo/cache";
+const WEEK = "${{ steps.week.outputs.week }}";
+/**
+ * Ways to reach a remote cache or to step around the local one: the flags
+ * and the variables of turbo that set the same (`TURBO_CACHE` also stands
+ * for `TURBO_CACHE_DIR`; `--no-cache`, the turbo 1 form of `--cache=`).
+ */
+const NO_REMOTE = [
+  "TURBO_TOKEN",
+  "TURBO_TEAM",
+  "TURBO_API",
+  "TURBO_REMOTE_",
+  "TURBO_FORCE",
+  "TURBO_CACHE",
+  "--cache-dir",
+  "--remote-only",
+  "--force",
+  "--no-cache",
+];
+/** Keys of turbo.json that move the local cache or add a remote one. */
+const TURBO_CACHE_KEYS = ["remoteCache", "cacheDir"] as const;
+
+/** The value of `key:` in the text of a step, unquoted. */
+function stepField(text: string, key: string): string | undefined {
+  return new RegExp(`^\\s+${key}: (.*)$`, "m")
+    .exec(text)?.[1]
+    ?.trim()
+    .replace(/^"(.*)"$/, "$1");
+}
+
+/**
+ * Every way the CI configuration could break the cache of turbo, one line
+ * each; empty when clean. The archive of `.turbo/cache` is one per ISO week,
+ * kept by the one job that runs the tasks: no commit in the key and no
+ * restore keys, so a run never saves a grown copy of the archive it
+ * restored. Nothing reaches a remote cache, and nothing makes a task skip
+ * the cache it has. `workflow` is the text of ci.yml, `turbo` and `manifest`
+ * the root turbo.json and package.json as parsed.
+ */
+function turboCacheViolations(
+  workflow: string,
+  turbo: Turbo,
+  manifest: Manifest,
+): string[] {
+  const problems: string[] = [];
+  // Every action of actions/cache counts, `cache/save` and `cache/restore`
+  // too: a second step that saves would grow the archive again.
+  const uses =
+    workflow.match(/^\s*(?:- )?uses:\s*["']?actions\/cache(?:\/[\w-]+)?@/gim) ??
+    [];
+  if (uses.length !== 1) {
+    problems.push(`ci.yml: ${uses.length} actions/cache steps, not one`);
+  }
+  const steps = stepsIn(workflow, "ci");
+  const cache = steps.findIndex((step) =>
+    /uses: actions\/cache@v\d+/.test(step.text),
+  );
+  const week = steps.findIndex((step) => /^ {6}- id: week$/m.test(step.text));
+  if (cache === -1) {
+    problems.push("ci.yml: job ci has no actions/cache step");
+  } else {
+    const text = steps[cache]?.text ?? "";
+    const path = stepField(text, "path");
+    const key = stepField(text, "key") ?? "";
+    if (path !== TURBO_CACHE_DIR) {
+      problems.push(`ci.yml: cache path ${path} is not ${TURBO_CACHE_DIR}`);
+    }
+    if (!key.includes(WEEK)) {
+      problems.push(`ci.yml: cache key ${key} has no ${WEEK}`);
+    }
+    if (key.includes("github.sha")) {
+      problems.push(`ci.yml: cache key ${key} has github.sha`);
+    }
+    if (/^\s+restore-keys:/m.test(text)) {
+      problems.push("ci.yml: the cache step has restore-keys");
+    }
+    if (week === -1 || week > cache) {
+      problems.push("ci.yml: no step `id: week` before the cache step");
+    }
+  }
+  const weekRun = week === -1 ? undefined : steps[week]?.run;
+  if (weekRun !== 'echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"') {
+    problems.push(
+      `ci.yml: the week step runs ${weekRun}, not the ISO week of date -u`,
+    );
+  }
+  if (/pull_request_target/.test(blockOf(workflow, "on:"))) {
+    problems.push(
+      "ci.yml: pull_request_target runs a fork's code with the rights of the repository",
+    );
+  }
+  const scripts = JSON.stringify(manifest.scripts ?? {});
+  for (const word of NO_REMOTE) {
+    if (workflow.includes(word)) problems.push(`ci.yml: has ${word}`);
+    if (scripts.includes(word)) problems.push(`package.json: has ${word}`);
+  }
+  if (/--cache[= ]/.test(workflow)) problems.push("ci.yml: has --cache");
+  for (const key of TURBO_CACHE_KEYS) {
+    if (key in turbo) problems.push(`turbo.json: has ${key}`);
+  }
+  return problems;
+}
+
+describe("ci.yml turbo cache", () => {
+  const turbo = readTurbo(".");
+  const manifest = readManifest(".");
+  const violations = (text: string, turboJson: Turbo = turbo) =>
+    turboCacheViolations(text, turboJson, manifest);
+  const replaced = (from: string, to: string) => {
+    expect(workflow).toContain(from);
+    return violations(workflow.replace(from, to));
+  };
+
+  const key = `key: ${"${{ runner.os }}"}-turbo-${WEEK}\n`;
+
+  it("keeps the turbo cache of job ci by week, and nothing else", () => {
+    expect(violations(workflow)).toEqual([]);
+  });
+
+  it("refuses a key without the week", () => {
+    expect(replaced(key, `key: ${"${{ runner.os }}"}-turbo\n`)).toEqual([
+      expect.stringContaining(`has no ${WEEK}`),
+    ]);
+  });
+
+  it("refuses the commit in the key", () => {
+    const commit = "${{ github.sha }}";
+    expect(replaced(key, `${key.trimEnd()}-${commit}\n`)).toEqual([
+      expect.stringContaining("has github.sha"),
+    ]);
+  });
+
+  it.each([
+    `          restore-keys: ${"${{ runner.os }}"}-turbo-${WEEK}-\n`,
+    "          restore-keys: |\n            x-\n",
+  ])("refuses restore keys: %j", (restore) => {
+    expect(replaced(key, `${key}${restore}`)).toEqual([
+      "ci.yml: the cache step has restore-keys",
+    ]);
+  });
+
+  it("refuses a cache of another directory", () => {
+    expect(replaced("path: .turbo/cache", "path: .turbo")).toEqual([
+      expect.stringContaining("cache path .turbo is not"),
+    ]);
+  });
+
+  it("refuses a week that is not the ISO week of UTC", () => {
+    expect(replaced("date -u +%G-%V", "date +%Y-%W")).toEqual([
+      expect.stringContaining("the week step runs"),
+    ]);
+  });
+
+  it("refuses a second actions/cache step", () => {
+    const second =
+      "      - uses: actions/cache@v4\n        with: { path: x, key: y }\n";
+    expect(
+      violations(
+        workflow.replace(
+          "      - run: pnpm lint\n",
+          `${second}      - run: pnpm lint\n`,
+        ),
+      ),
+    ).toEqual([expect.stringContaining("2 actions/cache steps")]);
+  });
+
+  it.each(["actions/cache/save@v4", "actions/cache/restore@v4"])(
+    "refuses a second step of %s",
+    (action) => {
+      const second = `      - uses: ${action}\n        with: { path: x, key: y }\n`;
+      expect(
+        violations(
+          workflow.replace(
+            "      - run: pnpm test\n",
+            `      - run: pnpm test\n${second}`,
+          ),
+        ),
+      ).toEqual([expect.stringContaining("2 actions/cache steps")]);
+    },
+  );
+
+  it("refuses --no-cache, in the workflow and in the scripts", () => {
+    const flag = "--no-cache";
+    const text = workflow.replace(
+      "run: pnpm test\n",
+      `run: pnpm test ${flag}\n`,
+    );
+    const scripts = {
+      ...manifest,
+      scripts: { test: `turbo run test ${flag}` },
+    };
+
+    expect(violations(text)).toContainEqual(`ci.yml: has ${flag}`);
+    expect(turboCacheViolations(workflow, turbo, scripts)).toEqual([
+      `package.json: has ${flag}`,
+    ]);
+  });
+
+  it("refuses the cache step replaced by actions/cache/restore", () => {
+    expect(
+      replaced("- uses: actions/cache@v4", "- uses: actions/cache/restore@v4"),
+    ).toEqual(["ci.yml: job ci has no actions/cache step"]);
+  });
+
+  it("refuses a cache step outside job ci", () => {
+    const text = workflow.replace(
+      /( {6}- id: week\n.*\n {6}- uses: actions\/cache@v4\n(?: {8}.*\n)+)/,
+      "",
+    );
+    const moved = `${text}      - uses: actions/cache@v4\n`;
+    expect(text).not.toContain("actions/cache");
+    expect(violations(moved)).toEqual([
+      "ci.yml: job ci has no actions/cache step",
+      expect.stringContaining("the week step runs undefined"),
+    ]);
+  });
+
+  it("refuses a week step after the cache step", () => {
+    const step =
+      '      - id: week\n        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"\n';
+    const lint = "      - run: pnpm lint\n";
+    expect(workflow).toContain(step);
+    const moved = workflow.replace(step, "").replace(lint, `${step}${lint}`);
+
+    expect(violations(moved)).toEqual([
+      "ci.yml: no step `id: week` before the cache step",
+    ]);
+  });
+
+  it("refuses pull_request_target", () => {
+    expect(replaced("  pull_request:\n", "  pull_request_target:\n")).toEqual([
+      expect.stringContaining("pull_request_target"),
+    ]);
+  });
+
+  it.each(NO_REMOTE)("refuses %s in the workflow", (word) => {
+    expect(
+      violations(
+        workflow.replace("run: pnpm test\n", `run: pnpm test ${word}\n`),
+      ),
+    ).toContainEqual(`ci.yml: has ${word}`);
+  });
+
+  it.each([
+    ["remoteCache", { enabled: true }],
+    ["cacheDir", ".cache/turbo"],
+  ])("refuses %s in turbo.json", (name, value) => {
+    const broken: Turbo = { ...turbo, [name]: value };
+    expect(violations(workflow, broken)).toEqual([`turbo.json: has ${name}`]);
+  });
+
+  it.each([
+    ["TURBO_FORCE: true", "TURBO_FORCE"],
+    ["TURBO_CACHE: local:r", "TURBO_CACHE"],
+    ["TURBO_CACHE_DIR: /tmp/t", "TURBO_CACHE"],
+  ])("refuses %s in the env of the workflow", (variable, word) => {
+    const text = workflow.replace(
+      "permissions:\n",
+      `env:\n  ${variable}\n\npermissions:\n`,
+    );
+    expect(violations(text)).toContainEqual(`ci.yml: has ${word}`);
   });
 });
 
@@ -403,120 +666,5 @@ describe("ci.yml image matrix", () => {
     expect(steps.indexOf(setup as Step)).toBeLessThan(
       steps.indexOf(build as Step),
     );
-  });
-});
-
-/**
- * The turbo hash of a package's tests (the local cache) is only as good as its
- * inputs: a file that changes the result of a task but not its hash gives a
- * green local run from the cache while the code is red
- * (docs/TECH_DEBT.md, rows closed by E0-12). CI keeps no cache of its own.
- */
-describe("turbo cache hash", () => {
-  const TaskSchema = z.object({
-    dependsOn: z.array(z.string()).optional(),
-    inputs: z.array(z.string()).optional(),
-    outputs: z.array(z.string()).optional(),
-  });
-  const TurboSchema = z.object({
-    globalDependencies: z.array(z.string()).optional(),
-    extends: z.array(z.string()).optional(),
-    tasks: z.record(TaskSchema),
-  });
-  const root = TurboSchema.parse(JSON.parse(read("turbo.json")));
-  const worker = TurboSchema.parse(JSON.parse(read("apps/worker/turbo.json")));
-
-  it("includes tsconfig.base.json, which every package's typecheck extends", () => {
-    expect(root.globalDependencies).toContain("tsconfig.base.json");
-  });
-
-  // The test of a package hashes the files of its internal dependencies
-  // through these nodes (docs/TECH_DEBT.md, the worker#test row).
-  it("makes test depend on the test of the internal dependencies", () => {
-    expect(root.tasks.test?.dependsOn).toContain("^test");
-  });
-
-  it("keeps the inherited inputs in the tests of the packages that add their own", () => {
-    for (const file of ["apps/worker/turbo.json", "packages/db/turbo.json"]) {
-      const inputs = TurboSchema.parse(JSON.parse(read(file))).tasks.test
-        ?.inputs;
-
-      expect(inputs, file).toContain("$TURBO_EXTENDS$");
-    }
-  });
-
-  it("hashes for the tests of this package every repository file they read", () => {
-    expect(worker.extends).toEqual(["//"]);
-    const inputs = [
-      ...(root.tasks.test?.inputs ?? []),
-      ...(worker.tasks.test?.inputs ?? []),
-    ];
-    for (const file of [
-      ".github/workflows/ci.yml",
-      "turbo.json",
-      "package.json",
-      ".env.test",
-      ".env.example",
-      "apps/api/package.json",
-      "packages/db/package.json",
-      "scripts/probe-image.mjs",
-      "scripts/probe-image.d.mts",
-      "scripts/compose-rules.mjs",
-      "scripts/compose-rules.d.mts",
-      ".dockerignore",
-      "infra/docker/**",
-      ".claude/hooks/rules.sf.json",
-      "packages/db/turbo.json",
-    ]) {
-      expect(inputs).toContain(`$TURBO_ROOT$/${file}`);
-    }
-  });
-
-  // What only the tests of this package read stays in ./turbo.json: in the
-  // root list it would reset the test cache of every package.
-  it("keeps the files only this package reads out of the inputs of every package", () => {
-    const allowed = [
-      "$TURBO_DEFAULT$",
-      // Read by the tests of every package: every vitest config calls it.
-      "$TURBO_ROOT$/vitest.preset.ts",
-      "$TURBO_ROOT$/.env.test",
-      "$TURBO_ROOT$/.env.example",
-    ];
-    const shared = (root.tasks.test?.inputs ?? []).filter(
-      (input) => !allowed.includes(input),
-    );
-
-    expect(shared).toEqual([]);
-  });
-
-  // api and worker integration tests share one Postgres and one Redis (db 1:
-  // the heartbeat key, system.dlq); two at a time make CI flap.
-  it("runs the integration tests of the packages one at a time", () => {
-    const Manifest = z.object({ scripts: z.record(z.string()) });
-    const script = Manifest.parse(JSON.parse(read("package.json"))).scripts[
-      "test:int"
-    ];
-
-    expect(script).toMatch(/^turbo run test:int(?: \S+)*$/);
-    expect(script?.match(/--concurrency\S*/g)).toEqual(["--concurrency=1"]);
-  });
-
-  it("stores the build without the cache of Next", () => {
-    expect(root.tasks.build?.outputs).toContain(".next/**");
-    expect(root.tasks.build?.outputs).toContain("!.next/cache/**");
-  });
-
-  it("is pinned at or above 2.10, the turbo whose hashing E0-12 checked", () => {
-    const ManifestSchema = z.object({
-      devDependencies: z.object({ turbo: z.string() }),
-    });
-    const { turbo } = ManifestSchema.parse(
-      JSON.parse(read("package.json")),
-    ).devDependencies;
-    const lower = /^[\^~]?(\d+)\.(\d+)\.(\d+)$/.exec(turbo);
-
-    expect(lower, `turbo range "${turbo}"`).not.toBeNull();
-    const [major = 0, minor = 0] = (lower ?? []).slice(1).map(Number);
-    expect(major * 1000 + minor).toBeGreaterThanOrEqual(2 * 1000 + 10);
   });
 });

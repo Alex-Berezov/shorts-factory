@@ -13,20 +13,10 @@
     },
     "test": {
       "dependsOn": ["^test"],
-      "inputs": [
-        "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/vitest.preset.ts",
-        "$TURBO_ROOT$/.env.test",
-        "$TURBO_ROOT$/.env.example"
-      ]
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/vitest.preset.ts"]
     },
     "//#typecheck:repo": {},
-    "//#test:repo": {
-      "inputs": [
-        "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/packages/config/src/schema.ts"
-      ]
-    },
+    "//#test:repo": {},
     "test:int": {
       "dependsOn": ["^test:int"],
       "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/vitest.preset.ts"],
