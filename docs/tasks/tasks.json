@@ -1665,9 +1665,11 @@
       "E0-12A"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
+    "status": "done",
     "added_at": "2026-10-10",
-    "started_at": "2026-10-18"
+    "started_at": "2026-10-18",
+    "done_at": "2026-10-18",
+    "note": "гейт compose на таблице правил 0-12 с юнитом на каждое, проверка формы JSON, порты .env.test попарно, healthcheck целиком; migrate, образы и граф Compose вынесены в E0-12I/J/K"
   },
   {
     "id": "E0-12D",
@@ -1772,5 +1774,48 @@
     "doc": "TECH_DEBT.md",
     "status": "todo",
     "added_at": "2026-10-17"
+  },
+  {
+    "id": "E0-12I",
+    "epic": "E0",
+    "title": "CLI migrate: классы ошибок, именованные шаги возврата, migrate-and-seed, drizzle-kit check в CI",
+    "estimate": "0.7 д",
+    "estimate_days": 0.7,
+    "deps": [
+      "E0-13",
+      "E0-12A",
+      "E0-12F"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-18"
+  },
+  {
+    "id": "E0-12J",
+    "epic": "E0",
+    "title": "Образы: единый app.Dockerfile с целями, exec-форма migrate, проба одним run, buildx-кэш в CI",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-12C",
+      "E0-12I"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-18"
+  },
+  {
+    "id": "E0-12K",
+    "epic": "E0",
+    "title": "Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки",
+    "estimate": "2 д",
+    "estimate_days": 2,
+    "deps": [
+      "E0-13",
+      "E0-12C"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-18"
   }
 ]
