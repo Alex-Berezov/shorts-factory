@@ -1,10 +1,11 @@
 import { env } from "@sf/config";
 import { jobIds } from "@sf/core";
 import { closeDb } from "@sf/db";
+import { closeRedis } from "@sf/runtime";
+import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { defineJob } from "../src/lib/define-job.js";
-import { closeRedis } from "../src/lib/redis.js";
 import { type WorkerRuntime, startWorkerRuntime } from "../src/runtime.js";
 import {
   obliterateQueues,
@@ -13,7 +14,6 @@ import {
   seedQueueSwitches,
   waitFor,
 } from "./helpers.int.js";
-import { silentLogger } from "./recording-logger.js";
 
 /**
  * A job that has spent its attempts ends up in `system.dlq` with everything an

@@ -89,6 +89,7 @@ function cleanConfig(): { services: Record<string, Service> } {
           ],
         },
         volumes: media(),
+        stop_grace_period: "15s",
         restart: "unless-stopped",
       },
       worker: {
@@ -217,7 +218,7 @@ describe("checkCompose", () => {
     );
   });
 
-  describe("3. the worker's grace period", () => {
+  describe("3. the grace periods", () => {
     it.each(["10s", undefined, "29s", "nonsense"])(
       "refuses stop_grace_period %s",
       (grace) => {
@@ -234,6 +235,30 @@ describe("checkCompose", () => {
 
     it("accepts a longer one in any unit", () => {
       const config = broken("worker", (service) => {
+        service.stop_grace_period = "1m";
+      });
+
+      expect(check(config)).toEqual([]);
+    });
+
+    // api: a 10 s deadline and a 1 s flush - Docker's default 10 s kills it
+    // with 137 before its own verdict.
+    it.each(["10s", undefined, "14s", "nonsense"])(
+      "refuses stop_grace_period %s for api",
+      (grace) => {
+        const config = broken("api", (service) => {
+          service.stop_grace_period = grace;
+        });
+
+        expect(check(config)).toHaveLength(1);
+        expect(check(config)[0]).toMatch(
+          /^api: stop_grace_period .* is below 15s$/,
+        );
+      },
+    );
+
+    it("accepts 15 s and more for api", () => {
+      const config = broken("api", (service) => {
         service.stop_grace_period = "1m";
       });
 

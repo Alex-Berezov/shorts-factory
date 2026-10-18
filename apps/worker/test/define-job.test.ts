@@ -1,5 +1,6 @@
 import { BudgetExceededError, ValidationError } from "@sf/core";
 import type { BudgetCheck, BudgetGuard } from "@sf/db";
+import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import { UnrecoverableError } from "bullmq";
 import { type Logger, pino } from "pino";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -10,7 +11,6 @@ import {
   defineJob,
 } from "../src/lib/define-job.js";
 import { recordingUsage, unusedBudget, unusedConnections } from "./job-deps.js";
-import { recordingLogger } from "./recording-logger.js";
 
 const PayloadSchema = z.object({ videoId: z.string().min(1) }).strict();
 

@@ -1,7 +1,7 @@
 import { HealthResponseSchema } from "@sf/contracts";
 import { closeDb, createDb, pingDb } from "@sf/db";
 import { describe, expect, it, vi } from "vitest";
-import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/deadline.js";
+import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
 import { createHealthProbes } from "../src/lib/health.js";
 import { AUTH_HEADER, buildTestApp } from "./helpers.js";
 

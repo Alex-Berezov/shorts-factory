@@ -1,6 +1,12 @@
 /**
  * Public surface of `@sf/db`: re-exports only. Importing this module has no
  * side effects - no connection, no environment parsing (D3).
+ *
+ * Only what a consumer outside the package imports. The migration runner and
+ * the seed are not here: their callers are the entry points of `src/cli/`
+ * and the test support of this package, which take them from `src/`; the
+ * first consumer outside (a migration command of the api, E13) brings the
+ * re-export back with a test of its own (E0-12B, Р5).
  */
 export {
   type BudgetCache,
@@ -13,7 +19,6 @@ export {
 } from "./budget.js";
 export { closeDb, createDb, type Db } from "./client.js";
 export { pingDb } from "./health.js";
-export { runMigrations } from "./migrate.js";
 export {
   type ApiUsageInsert,
   apiUsageLogRepo,
@@ -27,5 +32,4 @@ export {
   toUsageRow,
 } from "./usage-logger.js";
 export { appSettingRepo } from "./repos/app-setting.js";
-export { seedAppSettings } from "./seed.js";
 export * as schema from "./schema/index.js";

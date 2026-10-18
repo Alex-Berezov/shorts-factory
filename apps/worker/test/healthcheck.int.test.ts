@@ -2,8 +2,8 @@ import { fork } from "node:child_process";
 import { type Server, type Socket, createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SEC } from "@sf/core";
+import { closeRedis } from "@sf/runtime";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { closeRedis } from "../src/lib/redis.js";
 import { openTestRedis } from "./helpers.int.js";
 
 /**

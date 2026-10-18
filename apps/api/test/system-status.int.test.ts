@@ -7,13 +7,14 @@ import {
 } from "@sf/core";
 import { closeDb, createUsageLogger } from "@sf/db";
 import { TEST_REDIS_DATABASE_OF } from "@sf/db/test-support/stack-guard";
+import { closeRedis } from "@sf/runtime";
+import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type AppInstance, buildApp } from "../src/app.js";
 import { createBudgetProbe } from "../src/lib/budget.js";
 import { createHealthProbes } from "../src/lib/health.js";
 import { createWorkerProbe } from "../src/lib/heartbeat.js";
 import { type QueueStats, createQueueStats } from "../src/lib/queue-stats.js";
-import { closeRedis } from "../src/lib/redis.js";
 import { openTestDb, openTestQueue, openTestRedis } from "./helpers.int.js";
 import { AUTH_HEADER, TEST_PASSWORD } from "./helpers.js";
 
@@ -56,7 +57,7 @@ async function clean(): Promise<void> {
 
 beforeAll(async () => {
   await clean();
-  queueStats = createQueueStats({ connection: redis });
+  queueStats = createQueueStats({ connection: redis, log: silentLogger() });
   app = buildApp(
     {
       health: createHealthProbes({ db, redis }),
@@ -186,7 +187,7 @@ describe("GET /system/status against the live stack", () => {
 
     // A reader of its own: the write happens in the constructor of a `Queue`,
     // and the queues of the running app were built before this key was removed.
-    const reader = createQueueStats({ connection: redis });
+    const reader = createQueueStats({ connection: redis, log: silentLogger() });
     try {
       await reader.collect();
     } finally {

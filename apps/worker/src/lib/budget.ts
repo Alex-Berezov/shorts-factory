@@ -5,6 +5,7 @@ import {
   type Db,
   createBudgetGuard,
 } from "@sf/db";
+import { withDeadline } from "@sf/runtime";
 import type { Redis } from "ioredis";
 import type { Logger } from "pino";
 
@@ -31,42 +32,25 @@ export class BudgetCacheTimeoutError extends Error {
  * Not a refinement: it is the only thing that makes "a cache that is down is a
  * miss" true on the client this process actually has. The worker connection is
  * built for BullMQ - `maxRetriesPerRequest: null` with the offline queue on
- * (`lib/redis.ts`) - so a `GET` issued while Redis is unreachable is neither
- * answered nor refused; it waits in the offline queue for a reconnect that may
- * never come. The guard's fallback catches a rejection, so without a deadline
- * here the fallback is unreachable and `ctx.budget.assert` hangs for the whole
- * outage, holding the job it was asked about until the lock is lost and BullMQ
- * hands the job to someone else.
+ * (`createQueueRedis`, `@sf/runtime`) - so a `GET` issued while Redis is
+ * unreachable is neither answered nor refused; it waits in the offline queue
+ * for a reconnect that may never come. The guard's fallback catches a
+ * rejection, so without a deadline here the fallback is unreachable and
+ * `ctx.budget.assert` hangs for the whole outage, holding the job it was
+ * asked about until the lock is lost and BullMQ hands the job to someone else.
  *
  * The timer is unreferenced: it must not be the reason the process stays up
  * during a shutdown.
- *
- * One of five copies of "a promise under a deadline" across the two apps
- * (`apps/api/src/lib/deadline.ts` and the `drain` of `lib/queue-stats.ts`,
- * `lib/settle-within.ts`, `lib/shutdown.ts`), and they have already drifted on
- * `unref`. Merging them is a change to both processes at once, so it is a line
- * in docs/TECH_DEBT.md (13.09.2026, E0-12) rather than a merge attempted from
- * whichever of the five a task happens to touch.
  */
-async function withTimeout<T>(
+function withTimeout<T>(
   command: string,
   timeoutMs: number,
   run: () => Promise<T>,
 ): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new BudgetCacheTimeoutError(command, timeoutMs)),
-      timeoutMs,
-    );
-    timer.unref();
+  return withDeadline(run, timeoutMs, {
+    unref: true,
+    error: () => new BudgetCacheTimeoutError(command, timeoutMs),
   });
-
-  try {
-    return await Promise.race([run(), deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 export interface RedisBudgetCacheOptions {

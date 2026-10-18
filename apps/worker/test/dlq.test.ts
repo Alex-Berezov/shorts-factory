@@ -1,3 +1,9 @@
+import {
+  type LoggedLine,
+  type Recorder,
+  recordingLogger,
+  silentLogger,
+} from "@sf/runtime/test-support/recording-logger";
 import { UnrecoverableError } from "bullmq";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -7,12 +13,6 @@ import {
   isFinalFailure,
   toDlqRecord,
 } from "../src/lib/dlq.js";
-import {
-  type LoggedLine,
-  type Recorder,
-  recordingLogger,
-  silentLogger,
-} from "./recording-logger.js";
 
 function failedJob(overrides: Partial<FailedJob> = {}): FailedJob {
   return {

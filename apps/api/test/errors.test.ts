@@ -1,3 +1,4 @@
+import { loadEnv } from "@sf/config";
 import { REQUEST_ID_HEADER } from "@sf/contracts";
 import {
   AppError,
@@ -5,12 +6,13 @@ import {
   NotFoundError,
   ValidationError,
 } from "@sf/core";
+import { buildLoggerOptions } from "@sf/runtime";
+import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { AppInstance } from "../src/app.js";
 import { errorResponses } from "../src/lib/route-schemas.js";
 import { AUTH_HEADER, buildTestApp, parseErrorBody } from "./helpers.js";
-import { recordingLogger } from "./recording-logger.js";
 
 /** A url with a secret in it, the way a provider error carries one. */
 const LEAKED_URL = "https://www.googleapis.com/youtube/v3?key=super-secret-key";
@@ -802,13 +804,13 @@ describe("error log", () => {
     // a second failure line next to it is exactly what must not be there.
     const written = recorder.entries();
     expect(written).toHaveLength(1);
-    const entry = written[0] ?? {};
+    const entry: Record<string, unknown> = written[0] ?? {};
     expect(["request failed", "request rejected"]).toContain(entry.msg);
     return entry;
   }
 
-  /** pino's numeric levels, by the name the decision uses. */
-  const LEVEL = { info: 30, warn: 40, error: 50 } as const;
+  /** The levels by the name the decision uses, as the recorder writes them. */
+  const LEVEL = { info: "info", warn: "warn", error: "error" } as const;
 
   it("writes a refused password as a short info line without the error", async () => {
     // Anyone on the published port can produce this one at any rate: a warn
@@ -1042,5 +1044,82 @@ describe("a failure on the route with a status of its own", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+/**
+ * The same error log on the logger the service really runs on
+ * (`buildLoggerOptions` of `@sf/runtime`): its serializer writes a whitelist
+ * of fields and never `details` itself - only what `loggableError` handed it
+ * for the log. The cases above run on pino's own serializer, which writes
+ * every field, so they cannot tell the two apart.
+ */
+describe("error log on the logger of the service", () => {
+  const { transport: _unused, ...options } = buildLoggerOptions(
+    loadEnv({
+      NODE_ENV: "test",
+      DATABASE_URL: "postgres://sf:sf@127.0.0.1:1/shorts_factory_none",
+      REDIS_URL: "redis://127.0.0.1:1",
+      ADMIN_PASSWORD: "testtest",
+    }),
+  );
+  const recorder = recordingLogger(options);
+  let app: AppInstance;
+
+  beforeAll(async () => {
+    app = buildTestApp({
+      routes: registerFailingRoutes,
+      logger: recorder.log,
+    });
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  /** The `err` of the one failure line a request wrote. */
+  async function errOfRequest(url: string): Promise<Record<string, unknown>> {
+    recorder.clear();
+    await app.inject({
+      method: "GET",
+      url,
+      headers: { authorization: AUTH_HEADER },
+    });
+    const line = recorder
+      .entries()
+      .find(
+        (entry) =>
+          entry.msg === "request failed" || entry.msg === "request rejected",
+      );
+    const err = line?.err;
+    if (typeof err !== "object" || err === null) {
+      throw new Error(`no failure line with an error for ${url}`);
+    }
+    return { ...err };
+  }
+
+  it("writes the details a caller was shown", async () => {
+    const err = await errOfRequest("/test/budget");
+
+    expect(err).toMatchObject({
+      type: "BudgetExceededError",
+      details: { provider: "gemini", spent: 5.25, cap: 5 },
+    });
+  });
+
+  it("writes a marker for the details a caller was not shown, and not them", async () => {
+    const err = await errOfRequest("/test/leaky");
+
+    expect(err.details).toBe("[omitted]");
+    expect(recorder.raw()).not.toContain("super-secret-key");
+  });
+
+  it("keeps the chain of causes in the message and the stack", async () => {
+    const err = await errOfRequest("/test/caused");
+
+    expect(String(err.message)).toContain(ROOT_CAUSE);
+    expect(String(err.stack)).toContain(`caused by: Error: ${ROOT_CAUSE}`);
+    expect(recorder.raw()).not.toContain("super-secret-key");
   });
 });

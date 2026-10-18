@@ -44,21 +44,18 @@ importers:
       '@sf/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@sf/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       '@sf/youtube':
         specifier: workspace:*
         version: link:../../packages/integrations/youtube
-      bullmq:
-        specifier: ^5.20.0
-        version: 5.81.4
       fastify:
         specifier: ^5.0.0
         version: 5.12.3
       fastify-type-provider-zod:
         specifier: ^4.0.0
         version: 4.0.2(fastify@5.12.3)(zod@3.25.76)
-      ioredis:
-        specifier: ^5.4.0
-        version: 5.11.1
       pino:
         specifier: ^9.4.0
         version: 9.14.0
@@ -72,6 +69,12 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
+      bullmq:
+        specifier: ^5.20.0
+        version: 5.81.4
+      ioredis:
+        specifier: ^5.4.0
+        version: 5.11.1
       pino-pretty:
         specifier: ^11.2.0
         version: 11.3.0
@@ -160,6 +163,9 @@ importers:
       '@sf/gemini':
         specifier: workspace:*
         version: link:../../packages/integrations/gemini
+      '@sf/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       '@sf/tts':
         specifier: workspace:*
         version: link:../../packages/integrations/tts
@@ -169,9 +175,6 @@ importers:
       bullmq:
         specifier: ^5.20.0
         version: 5.81.4
-      ioredis:
-        specifier: ^5.4.0
-        version: 5.11.1
       pino:
         specifier: ^9.4.0
         version: 9.14.0
@@ -185,6 +188,9 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
+      ioredis:
+        specifier: ^5.4.0
+        version: 5.11.1
       pino-pretty:
         specifier: ^11.2.0
         version: 11.3.0
@@ -334,6 +340,34 @@ importers:
         specifier: ^144.0.0
         version: 144.0.0
     devDependencies:
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.20.1)
+
+  packages/runtime:
+    dependencies:
+      '@sf/config':
+        specifier: workspace:*
+        version: link:../config
+      '@sf/core':
+        specifier: workspace:*
+        version: link:../core
+      bullmq:
+        specifier: ^5.20.0
+        version: 5.81.4
+      ioredis:
+        specifier: ^5.4.0
+        version: 5.11.1
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      pino:
+        specifier: ^9.4.0
+        version: 9.14.0
       typescript:
         specifier: ^5.6.0
         version: 5.9.3

@@ -7,8 +7,8 @@
  * never answered" - can be tested without a Redis to hang against.
  */
 import { WORKER_HEARTBEAT_KEY, readHeartbeat } from "@sf/core";
+import { settleWithin } from "@sf/runtime/deadline";
 import type { Redis } from "ioredis";
-import { settleWithin } from "../lib/settle-within.js";
 
 /** Everything - connect, read, verdict - fits in this, or the check fails. */
 export const HEALTHCHECK_DEADLINE_MS = 5_000;
@@ -60,14 +60,18 @@ type StampRead =
 export async function runHealthcheck(
   options: HealthcheckRunOptions,
 ): Promise<HealthcheckVerdict> {
-  const read = options.redis.get(WORKER_HEARTBEAT_KEY).then(
-    (stamp): StampRead => ({ kind: "stamp", stamp }),
-    (error: unknown): StampRead => ({ kind: "failed", error }),
-  );
+  const read = (): Promise<StampRead> =>
+    options.redis.get(WORKER_HEARTBEAT_KEY).then(
+      (stamp): StampRead => ({ kind: "stamp", stamp }),
+      (error: unknown): StampRead => ({ kind: "failed", error }),
+    );
+  // Live: in the healthcheck process the deadline is the verdict, and a loop
+  // that ran empty must not end the process before it is written.
   const outcome = await settleWithin<StampRead, StampRead>(
     read,
     options.deadlineMs,
     { kind: "timeout" },
+    { unref: false },
   );
 
   if (outcome.kind === "timeout") {

@@ -1,8 +1,9 @@
 import { env } from "@sf/config";
 import { closeDb } from "@sf/db";
+import { closeRedis } from "@sf/runtime";
+import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { systemSmokeJob } from "../src/jobs/system-smoke.js";
-import { closeRedis } from "../src/lib/redis.js";
 import { type WorkerRuntime, startWorkerRuntime } from "../src/runtime.js";
 import {
   deleteSmokeUsage,
@@ -13,7 +14,6 @@ import {
   seedQueueSwitches,
   waitFor,
 } from "./helpers.int.js";
-import { silentLogger } from "./recording-logger.js";
 
 /**
  * The acceptance criterion of E0: a job goes through Redis, runs in the worker

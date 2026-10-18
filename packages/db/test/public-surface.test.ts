@@ -75,24 +75,22 @@ describe("@sf/db exports", () => {
 });
 
 describe("@sf/db root module", () => {
-  it("re-exports the migration runner and the seed", async () => {
-    const surface = await import("../src/index.js");
-
-    expect(typeof surface.runMigrations).toBe("function");
-    expect(typeof surface.seedAppSettings).toBe("function");
-  });
-
   /**
-   * The lock and the session-level runner are for the entry point next to
-   * them (`src/cli/migrate.ts`); nothing outside `@sf/db` has a use for them,
-   * and a lock taken anywhere but `migrateDb` would serialise nothing.
+   * The migration runner and the seed are for the entry points of
+   * `src/cli/` and the test support of this package, which import them from
+   * `src/`; a re-export without a consumer is a second way in that the next
+   * epic would settle on by accident. The lock and the session-level runner
+   * are for the entry point next to them (`src/cli/migrate.ts`) only, and a
+   * lock taken anywhere but `migrateDb` would serialise nothing.
    */
   it.each([
+    "runMigrations",
+    "seedAppSettings",
     "MIGRATION_LOCK_KEY",
     "migrateDb",
     "MIGRATION_LOCK_WAIT_MS",
     "migrationLockTimeoutMessage",
-  ])("keeps %s to the migration runner", async (name) => {
+  ])("keeps %s inside the package", async (name) => {
     const surface: Record<string, unknown> = await import("../src/index.js");
 
     expect(surface).not.toHaveProperty(name);

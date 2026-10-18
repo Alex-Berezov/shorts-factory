@@ -1,12 +1,13 @@
 import { env } from "@sf/config";
 import type { QueueName } from "@sf/core";
 import { closeDb } from "@sf/db";
+import type { QueueFactory } from "@sf/runtime";
+import { closeRedis } from "@sf/runtime";
+import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { Queue } from "bullmq";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { defineJob } from "../src/lib/define-job.js";
-import { type QueueFactory, createQueueFactory } from "../src/lib/queues.js";
-import { closeRedis } from "../src/lib/redis.js";
 import { startWorkerRuntime } from "../src/runtime.js";
 import {
   obliterateQueues,
@@ -14,8 +15,8 @@ import {
   openTestRedis,
   seedQueueSwitches,
   waitFor,
+  workerQueueFactory,
 } from "./helpers.int.js";
-import { silentLogger } from "./recording-logger.js";
 
 /**
  * What the runtime does while it is stopping, against a real Redis.
@@ -62,7 +63,7 @@ function withSlowDlqWrites(real: QueueFactory, delayMs: number): QueueFactory {
         },
       });
     },
-    opened: () => real.opened(),
+    use: (name, read) => real.use(name, read),
     close: () => real.close(),
   };
 }
@@ -92,7 +93,7 @@ describe("worker runtime", () => {
       redis,
       log: silentLogger(),
       processors: { "system.smoke": failingJob },
-      queues: withSlowDlqWrites(createQueueFactory(redis), DLQ_WRITE_DELAY_MS),
+      queues: withSlowDlqWrites(workerQueueFactory(redis), DLQ_WRITE_DELAY_MS),
       switchIntervalMs: 60_000,
     });
 
@@ -129,7 +130,7 @@ describe("worker runtime", () => {
     // already taking jobs, a resync timer and the queues would stay open on a
     // process that is about to exit, and the entry point would close only the
     // connections underneath them.
-    const real = createQueueFactory(redis);
+    const real = workerQueueFactory(redis);
     let closed = false;
     let heartbeatAsked = 0;
     const factory: QueueFactory = {
@@ -144,7 +145,7 @@ describe("worker runtime", () => {
         }
         return real.get(name);
       },
-      opened: () => real.opened(),
+      use: (name, read) => real.use(name, read),
       close: async () => {
         closed = true;
         await real.close();

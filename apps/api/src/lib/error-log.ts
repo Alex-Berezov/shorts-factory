@@ -1,4 +1,5 @@
 import { AppError } from "@sf/core";
+import { LOGGED_DETAILS } from "@sf/runtime";
 import { type FastifyReply, type FastifyRequest, LogController } from "fastify";
 import {
   type MappedError,
@@ -123,6 +124,10 @@ function dataProperty(value: unknown): PropertyDescriptor {
  * an accessor that reads a slot of the error object itself, and on a copy,
  * which has no such slot, the same getter reads `undefined` - the line would
  * name the failure without the place it was thrown from.
+ *
+ * The replaced details go to the logger under `LOGGED_DETAILS` of
+ * `@sf/runtime` as well: its serializer writes that key and never `details`,
+ * which on any error that did not pass through here is the thrower's own.
  */
 function loggableError(err: unknown): unknown {
   if (!(err instanceof AppError)) {
@@ -137,7 +142,10 @@ function loggableError(err: unknown): unknown {
     stack: { ...dataProperty(err.stack), enumerable: false },
   };
   if (err.details !== undefined) {
-    replaced.details = dataProperty(publicDetails(err) ?? OMITTED_DETAILS);
+    const logged = publicDetails(err) ?? OMITTED_DETAILS;
+    replaced.details = dataProperty(logged);
+    // Not enumerable: a key for the serializer, not a field of the error.
+    replaced[LOGGED_DETAILS] = { value: logged, enumerable: false };
   }
   const copy: object = Object.create(Object.getPrototypeOf(err), {
     ...Object.getOwnPropertyDescriptors(err),

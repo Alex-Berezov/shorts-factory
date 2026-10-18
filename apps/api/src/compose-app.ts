@@ -1,22 +1,38 @@
 import { type BuildLabelName, type Env, buildLimits } from "@sf/config";
 import type { BuildInfo } from "@sf/contracts";
-import { closeDb, createDb } from "@sf/db";
-import type { FastifyBaseLogger } from "fastify";
+import { type Db, closeDb, createDb } from "@sf/db";
+import {
+  type ShutdownHandler,
+  createRequestRedis,
+  createShutdownHandler,
+  redisStage,
+  stageOf,
+  subscribeToSignals,
+} from "@sf/runtime";
+import type { Redis } from "ioredis";
+import type { Logger } from "pino";
 import { type AppInstance, buildApp } from "./app.js";
 import { createBudgetProbe } from "./lib/budget.js";
+import { DEPENDENCY_TIMEOUT_MS } from "./lib/dependency-timeout.js";
 import { createHealthProbes } from "./lib/health.js";
 import { createWorkerProbe } from "./lib/heartbeat.js";
-import { createQueueStats } from "./lib/queue-stats.js";
-import { type ClosableRedis, closeRedis, createRedis } from "./lib/redis.js";
-import { type ShutdownTarget, createShutdownHandler } from "./lib/shutdown.js";
+import { type QueueStats, createQueueStats } from "./lib/queue-stats.js";
+
+/**
+ * How long the stop gets before the process is torn down anyway: Fastify
+ * drains the requests in flight, and a request is bounded by
+ * `DEPENDENCY_TIMEOUT_MS` per dependency call.
+ */
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 export interface ComposeOptions {
   /**
    * The process logger, built before this is called: every connection below
-   * reports its failures to it from the moment it is opened, and `buildApp`
-   * gets the same instance instead of building a second one.
+   * reports its failures to it from the moment it is opened, `buildApp` gets
+   * the same instance instead of building a second one, and the stop flushes
+   * it before the exit.
    */
-  log: FastifyBaseLogger;
+  log: Logger;
   /**
    * The build labels `@sf/config` read as unset because they were not labels
    * (`rejectedBuildLabels()`), passed in so that composing stays a function
@@ -24,17 +40,41 @@ export interface ComposeOptions {
    */
   rejectedBuildLabels: readonly BuildLabelName[];
   /** Seam for tests: the Redis client factory. */
-  createRedis?: typeof createRedis;
+  createRedis?: typeof createRequestRedis;
   /** Seam for tests: the factory of the queue counters. */
   createQueueStats?: typeof createQueueStats;
   /** Seam for tests; the process really does exit in production. */
   exit?: (code: number) => void;
+  /**
+   * Seam for tests; production listens for SIGINT and SIGTERM. Called before
+   * anything is opened, so that a signal during a compose that fails - while
+   * its stop is closing what it opened - reaches that stop instead of Node's
+   * default action, which ends the process on the spot with the connections
+   * still open.
+   */
+  subscribe?: (handler: (signal: string) => void) => void;
+}
+
+/**
+ * A compose that failed and has been dealt with: `composeApp` wrote why and
+ * handed what it opened to its stop, which exits with 1 when it is done. The
+ * original failure is the `cause`.
+ */
+export class ComposeFailure extends Error {
+  constructor(cause: unknown) {
+    super("composing the api failed", { cause });
+    this.name = "ComposeFailure";
+  }
 }
 
 export interface ComposedApp {
   app: AppInstance;
-  /** Signal handler: closes the app and the connections, then exits. */
-  shutdown: (signal: string) => Promise<void>;
+  /**
+   * Closes the app and the connections, then exits: the handler of the
+   * signals, and of a start that failed after this returned (`failed: true`,
+   * a port that was taken).
+   */
+  shutdown: ShutdownHandler;
 }
 
 /**
@@ -52,22 +92,6 @@ export function buildInfoFrom(
 }
 
 /**
- * The Redis client as a target of the shutdown. A socket torn down after a
- * refused QUIT is still a closed client (`closeRedis`), so it is no failure of
- * the stop - but it is not a QUIT either, and the line of the stop says so.
- */
-function redisTarget(client: ClosableRedis): ShutdownTarget {
-  return {
-    close: async () => {
-      const outcome = await closeRedis(client);
-      return outcome.kind === "disconnected"
-        ? { warning: "closed by disconnect", err: outcome.err }
-        : undefined;
-    },
-  };
-}
-
-/**
  * Everything the entry point owns except the socket and the signals: the
  * connections, the collectors on top of them, the application and the
  * shutdown that closes them in order. A function rather than top-level code in
@@ -79,58 +103,140 @@ function redisTarget(client: ClosableRedis): ShutdownTarget {
  * that can fire as soon as the client exists, and the callbacks below write
  * straight to the logger instead of to a placeholder that `buildApp` would
  * fill in later.
+ *
+ * The stop exists and listens for the signals before anything is opened: a
+ * compose that fails halfway writes why, closes what it opened through the
+ * same stop, with `failed: true`, and then throws a `ComposeFailure` - the
+ * stop exits the process when it is done, so the caller has nothing left to
+ * close. A target the compose never reached is written as not opened rather
+ * than as closed.
  */
 export function composeApp(env: Env, options: ComposeOptions): ComposedApp {
   const { log } = options;
-  const openRedis = options.createRedis ?? createRedis;
+  const openRedis = options.createRedis ?? createRequestRedis;
   const openQueueStats = options.createQueueStats ?? createQueueStats;
 
-  for (const variable of options.rejectedBuildLabels) {
-    // The name only: the value is whatever the build system passed.
-    log.warn({ variable }, "build label ignored");
-  }
-
-  const db = createDb(env.DATABASE_URL);
-  // The client survives a Redis that is down on its own (`createRedis`
-  // subscribes to `error` itself); this callback only decides where such a
-  // failure is written.
-  const redis = openRedis(env.REDIS_URL, {
-    onError: (err) => {
-      log.error({ err }, "redis client error");
-    },
-  });
-
-  // The `Queue` objects live for the process, not for the request: each one is
-  // a set of listeners and a key of its own, and opening 29 of them per call
-  // to `/system/status` would make the page the most expensive route of the
-  // api. Their failures are not written here: the client above writes its
-  // own, and a refused pass is in the answer of the page (`redis: down`).
-  const queueStats = openQueueStats({ connection: redis });
-
-  const app = buildApp(
-    {
-      health: createHealthProbes({ db, redis }),
-      buildInfo: buildInfoFrom(env),
-      queues: queueStats,
-      worker: createWorkerProbe({ redis }),
-      // No cache here on purpose: a request that joins a read in flight gets
-      // the state as of the start of that read - one read behind at most,
-      // nothing kept.
-      budget: createBudgetProbe({ db, limits: buildLimits(env) }),
-    },
-    { adminPassword: env.ADMIN_PASSWORD, logger: log },
-  );
+  // Assigned below; the stages read them when the stop runs, which may be
+  // before any of them exists.
+  let db: Db | undefined;
+  let redis: Redis | undefined;
+  let queueStats: QueueStats | undefined;
+  let app: AppInstance | undefined;
 
   const shutdown = createShutdownHandler({
-    app,
-    db: { close: () => closeDb(db) },
-    // Before Redis: the queues are closed through the connection they share
-    // with it, and a client that is already gone leaves them hanging.
-    queues: { close: () => queueStats.close() },
-    redis: redisTarget(redis),
-    log: app.log,
+    plan: [
+      // Fastify first: it stops accepting and drains the requests in flight,
+      // which still need their connections.
+      stageOf(
+        "app",
+        () => app,
+        (opened) => opened.close(),
+      ),
+      // Then two branches at once, because nothing in one waits for the
+      // other: the driver on its own, and the queue objects followed by the
+      // Redis client they run on - BullMQ ends its own reads through that
+      // client, and a socket torn down first leaves them waiting for a reply
+      // that cannot come.
+      {
+        parallel: [
+          [
+            stageOf(
+              "db",
+              () => db,
+              (opened) => closeDb(opened),
+            ),
+          ],
+          [
+            stageOf(
+              "queues",
+              () => queueStats,
+              (opened) => opened.close(),
+            ),
+            redisStage(() => redis),
+          ],
+        ],
+      },
+    ],
+    log,
+    startedMessage: "shutdown started",
+    // A request in flight loses nothing to a slow stop, and Compose only
+    // ever sends SIGTERM: a second Ctrl+C is told about, not obeyed (Р3,
+    // E0-12B).
+    repeatedSigint: "log",
+    timeoutMs: SHUTDOWN_TIMEOUT_MS,
     ...(options.exit === undefined ? {} : { exit: options.exit }),
   });
+  (options.subscribe ?? subscribeToSignals)((signal) => {
+    void shutdown(signal);
+  });
 
-  return { app, shutdown };
+  try {
+    for (const variable of options.rejectedBuildLabels) {
+      // The name only: the value is whatever the build system passed.
+      log.warn({ variable }, "build label ignored");
+    }
+
+    const database = createDb(env.DATABASE_URL);
+    db = database;
+    // The client survives a Redis that is down on its own (the factory
+    // subscribes to `error` itself); the logger makes it report the outage
+    // at a level that fades and say when it is back.
+    const client = openRedis(env.REDIS_URL, {
+      commandTimeoutMs: DEPENDENCY_TIMEOUT_MS,
+      log,
+    });
+    redis = client;
+
+    // The `Queue` objects live for the process, not for the request: each one
+    // is a set of listeners and a key of its own, and opening 29 of them per
+    // call to `/system/status` would make the page the most expensive route
+    // of the api. Their connection failures are not written here: the client
+    // above writes its own, and a refused pass is in the answer of the page
+    // (`redis: down`).
+    const stats = openQueueStats({ connection: client, log });
+    queueStats = stats;
+
+    app = buildApp(
+      {
+        health: createHealthProbes({ db: database, redis: client }),
+        buildInfo: buildInfoFrom(env),
+        queues: stats,
+        worker: createWorkerProbe({ redis: client }),
+        // No cache here on purpose: a request that joins a read in flight
+        // gets the state as of the start of that read - one read behind at
+        // most, nothing kept.
+        budget: createBudgetProbe({ db: database, limits: buildLimits(env) }),
+      },
+      { adminPassword: env.ADMIN_PASSWORD, logger: log },
+    );
+    return { app, shutdown };
+  } catch (err) {
+    log.fatal({ err }, "api failed to start");
+    void shutdown("startup failure", { failed: true });
+    throw new ComposeFailure(err);
+  }
+}
+
+/**
+ * `composeApp` for the entry point, which has nobody to throw to. A
+ * `ComposeFailure` is already written and in the hands of its stop, which
+ * exits; anything else was thrown before `composeApp` opened a thing - by
+ * the arguments of the call, or ahead of its stop - and nobody has written
+ * it yet: it gets its `fatal` line here, and `fail` gives the process the
+ * code of a failure. Either way there is no app to start.
+ */
+export function composeOrFail(
+  compose: () => ComposedApp,
+  log: Pick<Logger, "fatal">,
+  fail: () => void,
+): ComposedApp | undefined {
+  try {
+    return compose();
+  } catch (err) {
+    if (!(err instanceof ComposeFailure)) {
+      log.fatal({ err }, "api failed to start");
+      fail();
+    }
+    return undefined;
+  }
 }

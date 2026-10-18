@@ -3,9 +3,11 @@ import { QUEUE_SWITCHES_KEY, type QueueName } from "@sf/core";
 import { type Db, appSettingRepo } from "@sf/db";
 import { defaultQueueSwitches } from "@sf/db/test-support/fixture";
 import { suiteRedisUrl } from "@sf/db/test-support/stack-guard";
+import { type QueueFactory, createQueueRedis } from "@sf/runtime";
+import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { Queue } from "bullmq";
 import type { Redis } from "ioredis";
-import { createRedis } from "../src/lib/redis.js";
+import { createJobQueueFactory } from "../src/lib/job-policy.js";
 
 export { openTestDb } from "@sf/db/test-support/fixture";
 
@@ -34,7 +36,16 @@ export { openTestDb } from "@sf/db/test-support/fixture";
 
 /** Connection for a test file; the caller closes it. */
 export function openTestRedis(): Redis {
-  return createRedis(suiteRedisUrl(env.REDIS_URL, "worker"));
+  return createQueueRedis(suiteRedisUrl(env.REDIS_URL, "worker"));
+}
+
+/**
+ * The queue factory the runtime builds for itself (`startWorkerRuntime`):
+ * the job policy of this app, written to by nobody but the factory's own
+ * listener, which a case about something else does not need to hear.
+ */
+export function workerQueueFactory(connection: Redis): QueueFactory {
+  return createJobQueueFactory(connection, silentLogger());
 }
 
 /**

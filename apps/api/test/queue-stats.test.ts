@@ -1,4 +1,5 @@
 import { QUEUE_NAMES } from "@sf/core";
+import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -24,14 +25,23 @@ let counts: Record<string, number> = {
   delayed: 5,
 };
 let beforeCounts: () => Promise<void> = async () => {};
+/** What `init()` of a `Queue` built from now on settled with; ready if unset. */
+let initRefusal: Error | undefined;
 const closedQueues: string[] = [];
 
 vi.mock("bullmq", () => {
   class FakeQueue {
     readonly name: string;
+    private readonly refusal: Error | undefined;
     constructor(name: string, options: unknown) {
       this.name = name;
+      this.refusal = initRefusal;
       constructed.push({ name, options });
+    }
+    async waitUntilReady(): Promise<void> {
+      if (this.refusal !== undefined) {
+        throw this.refusal;
+      }
     }
     on(): this {
       return this;
@@ -67,7 +77,11 @@ beforeEach(() => {
   closedQueues.length = 0;
   counts = { wait: 1, paused: 2, active: 3, failed: 4, delayed: 5 };
   beforeCounts = async () => {};
+  initRefusal = undefined;
 });
+
+/** What the page writes about the queues is not under test here. */
+const log = silentLogger();
 
 afterEach(() => {
   vi.useRealTimers();
@@ -91,7 +105,7 @@ describe("createQueueStats", () => {
    * worker set.
    */
   it("opens every queue without letting it write the meta key", async () => {
-    const stats = createQueueStats({ connection });
+    const stats = createQueueStats({ connection, log });
 
     await stats.collect();
 
@@ -102,7 +116,7 @@ describe("createQueueStats", () => {
   });
 
   it("reports the counters and the depth of the dlq", async () => {
-    const stats = createQueueStats({ connection });
+    const stats = createQueueStats({ connection, log });
 
     const snapshot = await stats.collect();
 
@@ -125,7 +139,7 @@ describe("createQueueStats", () => {
    */
   it("refuses to invent a counter bullmq did not return", async () => {
     counts = { wait: 1, paused: 2, active: 3, failed: 4 };
-    const stats = createQueueStats({ connection });
+    const stats = createQueueStats({ connection, log });
 
     await expect(stats.collect()).rejects.toBeInstanceOf(QueueCountersError);
   });
@@ -144,7 +158,7 @@ describe("createQueueStats", () => {
       release = resolve;
     });
     beforeCounts = () => gate;
-    const stats = createQueueStats({ connection });
+    const stats = createQueueStats({ connection, log });
 
     const pending = stats.collect();
     const closing = stats.close();
@@ -166,7 +180,7 @@ describe("createQueueStats", () => {
   it("stops waiting for a pass that never answers and closes anyway", async () => {
     vi.useFakeTimers();
     beforeCounts = () => new Promise<void>(() => {});
-    const stats = createQueueStats({ connection, drainTimeoutMs: 20 });
+    const stats = createQueueStats({ connection, log, drainTimeoutMs: 20 });
     // Nobody is ever going to await this one; it is the request Redis ate.
     void stats.collect().catch(() => {});
     // Let the pass reach the fake queues before the close begins.
@@ -187,7 +201,7 @@ describe("createQueueStats", () => {
     vi.useFakeTimers();
     const hung = vi.fn(() => new Promise<void>(() => {}));
     beforeCounts = hung;
-    const stats = createQueueStats({ connection, drainTimeoutMs: 20 });
+    const stats = createQueueStats({ connection, log, drainTimeoutMs: 20 });
 
     const requests = Array.from({ length: 5 }, () => stats.collect());
     for (const request of requests) {
@@ -215,7 +229,7 @@ describe("createQueueStats", () => {
         }),
     );
     beforeCounts = held;
-    const stats = createQueueStats({ connection, drainTimeoutMs: 20 });
+    const stats = createQueueStats({ connection, log, drainTimeoutMs: 20 });
 
     for (let poll = 0; poll < 3; poll += 1) {
       // Nobody awaits these; they are the requests that gave up.
@@ -237,7 +251,7 @@ describe("createQueueStats", () => {
   it("starts a new pass for a request that arrives after the last one answered", async () => {
     const reads = vi.fn(async () => {});
     beforeCounts = reads;
-    const stats = createQueueStats({ connection });
+    const stats = createQueueStats({ connection, log });
 
     await stats.collect();
     await stats.collect();
@@ -253,8 +267,9 @@ describe("createQueueStats", () => {
    * with the same rejection. Kept in the map, it would leave the page showing
    * `redis: down` long after Redis came back, until someone restarted the api.
    */
-  it("throws away a queue whose read failed so the next request rebuilds it", async () => {
-    const stats = createQueueStats({ connection });
+  it("throws away a queue whose init was refused so the next request rebuilds it", async () => {
+    const stats = createQueueStats({ connection, log });
+    initRefusal = new Error("Connection is closed.");
     beforeCounts = async () => {
       throw new Error("Connection is closed.");
     };
@@ -264,6 +279,7 @@ describe("createQueueStats", () => {
     expect(closedQueues).toHaveLength(QUEUE_NAMES.length);
 
     // Redis is back; the next request must not inherit the broken objects.
+    initRefusal = undefined;
     beforeCounts = async () => {};
     await expect(stats.collect()).resolves.toMatchObject({ dlq: { size: 3 } });
     expect(constructed).toHaveLength(QUEUE_NAMES.length * 2);
@@ -271,8 +287,28 @@ describe("createQueueStats", () => {
     await stats.close();
   });
 
+  /**
+   * A command refused after the `Queue` got ready is not a broken `Queue`:
+   * rebuilt on every poll during an outage, it would be 29 new objects and
+   * their listeners per request (docs/TECH_DEBT.md, E0-09).
+   */
+  it("keeps a queue whose read was refused after it got ready", async () => {
+    const stats = createQueueStats({ connection, log });
+    beforeCounts = async () => {
+      throw new Error("Connection is closed.");
+    };
+
+    await expect(stats.collect()).rejects.toThrow(/Connection is closed/);
+    beforeCounts = async () => {};
+    await expect(stats.collect()).resolves.toMatchObject({ dlq: { size: 3 } });
+
+    expect(constructed).toHaveLength(QUEUE_NAMES.length);
+    expect(closedQueues).toHaveLength(0);
+    await stats.close();
+  });
+
   it("refuses a request that arrives after the close", async () => {
-    const stats = createQueueStats({ connection });
+    const stats = createQueueStats({ connection, log });
     await stats.close();
 
     await expect(stats.collect()).rejects.toThrow(/closed/);

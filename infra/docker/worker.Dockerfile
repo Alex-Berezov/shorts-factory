@@ -30,7 +30,9 @@ WORKDIR /repo/apps/worker
 RUN mkdir -p /data/media && chown node:node /data/media
 USER node
 # Exactly the command of `pnpm dev` (docs/DECISIONS.md, 10.09.2026): node is
-# PID 1 and gets SIGTERM itself, the drain of src/lib/shutdown.ts runs. No
+# PID 1 and gets SIGTERM itself, and the drain of the worker runs - the stop
+# of packages/runtime/src/shutdown.ts with the 25 s deadline
+# (SHUTDOWN_TIMEOUT_MS in apps/worker/src/bootstrap.ts). No
 # package manager, no `tsx` CLI and no shell in front of it - each of them
 # takes the signal for itself (apps/worker/test/container.test.ts).
 CMD ["node", "--import", "tsx", "src/index.ts"]

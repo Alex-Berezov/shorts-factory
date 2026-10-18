@@ -1,5 +1,5 @@
+import { settleWithin } from "@sf/runtime";
 import type { Logger } from "pino";
-import { settleWithin } from "../lib/settle-within.js";
 
 /**
  * What `pnpm --filter @sf/worker smoke` actually does, without the process
@@ -11,11 +11,11 @@ import { settleWithin } from "../lib/settle-within.js";
  */
 
 /** How long the worker is given before the run is called a failure. */
-export const SMOKE_DEADLINE_MS = 30_000;
+const SMOKE_DEADLINE_MS = 30_000;
 /** Backstop for the event stream: the state is also polled this often. */
-export const SMOKE_POLL_INTERVAL_MS = 500;
+const SMOKE_POLL_INTERVAL_MS = 500;
 /** How long the verdict waits for Redis to say whether the queue is paused. */
-export const SMOKE_PROBE_MS = 1_000;
+const SMOKE_PROBE_MS = 1_000;
 
 export interface SmokeOutcome {
   ok: boolean;
@@ -56,7 +56,7 @@ export interface SmokeRunOptions {
 }
 
 /** What the queue answered when it was asked whether it is switched off. */
-export type SmokeQueueState = boolean | "unreachable";
+type SmokeQueueState = boolean | "unreachable";
 
 /**
  * Whether the queue is switched off, when the answer is allowed to be "no
@@ -66,18 +66,22 @@ export type SmokeQueueState = boolean | "unreachable";
  * its own, this is where the whole command used to hang: the timer had already
  * fired, and its handler waited for the same dead Redis.
  */
-export async function probeQueueState(
+async function probeQueueState(
   queue: SmokeQueue,
   timeoutMs: number,
 ): Promise<SmokeQueueState> {
-  const asked = queue
-    .isPaused()
-    .catch((): SmokeQueueState => "unreachable")
-    .then((state): SmokeQueueState => state);
+  const asked = (): Promise<SmokeQueueState> =>
+    queue
+      .isPaused()
+      .catch((): SmokeQueueState => "unreachable")
+      .then((state): SmokeQueueState => state);
+  // Live: the verdict of the run waits for this answer, and nothing else
+  // holds the loop of the command while it does.
   return await settleWithin<SmokeQueueState, SmokeQueueState>(
     asked,
     timeoutMs,
     "unreachable",
+    { unref: false },
   );
 }
 
@@ -92,7 +96,7 @@ export async function probeQueueState(
  * asked for. Sending someone to look for a worker that is running fine is how
  * an hour goes by before anyone looks at the switch.
  */
-export function smokeTimeoutReason(
+function smokeTimeoutReason(
   deadlineMs: number,
   state: SmokeQueueState,
 ): string {
@@ -110,7 +114,7 @@ export function smokeTimeoutReason(
  *
  * The deadline is armed before anything is asked of Redis, and everything it
  * asks afterwards is bounded too, and that is the point: the connection this runs on has an offline queue and no request
- * retry limit (BullMQ's requirement, `lib/redis.ts`), so with the stack down
+ * retry limit (BullMQ's requirement, `createQueueRedis`), so with the stack down
  * both `waitUntilReady` and the `add` wait for a socket that never comes.
  * Inside the promise the timer would only start after them - and the command
  * an operator ran to find out what is wrong would print nothing at all.

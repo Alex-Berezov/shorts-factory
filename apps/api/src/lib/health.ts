@@ -1,8 +1,9 @@
 import type { HealthReport, ProbeStatus } from "@sf/contracts";
 import type { Db } from "@sf/db";
 import { pingDb } from "@sf/db";
+import { withDeadline } from "@sf/runtime";
 import type { HealthProbes } from "../deps.js";
-import { DEPENDENCY_TIMEOUT_MS, withDeadline } from "./deadline.js";
+import { DEPENDENCY_TIMEOUT_MS } from "./dependency-timeout.js";
 import { singleFlight } from "./single-flight.js";
 
 /** The part of the Redis client a probe uses. */
@@ -23,14 +24,14 @@ export interface HealthProbesOptions {
  * The reason a probe failed is not returned: it is a message from an external
  * system and `/health` is public. `/system/status`, which is not, reports a
  * classified reason instead (`dependencyFailureCode` in `lib/system-status.ts`);
- * the deadline and its bound are shared with it through `lib/deadline.ts`.
+ * the bound is shared with it through `lib/dependency-timeout.ts`.
  */
 async function probe(
   run: () => Promise<unknown>,
   timeoutMs: number,
 ): Promise<ProbeStatus> {
   try {
-    await withDeadline(run, timeoutMs);
+    await withDeadline(run, timeoutMs, { unref: false });
     return "up";
   } catch {
     return "down";
@@ -51,10 +52,10 @@ async function probe(
  *
  * How long one can hang differs by dependency. A ping to a Redis whose socket
  * is open and silent ends by the `commandTimeout` of its client
- * (`lib/redis.ts`). A database probe has no bound of its own: the
+ * (`createRequestRedis`, `compose-app.ts`). A database probe has no bound of its own: the
  * `connect_timeout` of `createDb` stops counting once the connection is
  * ready, postgres-js puts no timeout on a query, and its cancel cannot be
- * used yet (docs/TECH_DEBT.md, rows of E0-11B, to E0-12B). Such a probe ends
+ * used yet (docs/TECH_DEBT.md, rows of E0-11B, to E0-12H). Such a probe ends
  * when the server answers or the OS breaks the socket: on a half-open socket
  * that is retransmission for up to ~15 minutes, since keepalive only acts on
  * an idle connection. All that time `/health` answers 503 (`db: down`, each

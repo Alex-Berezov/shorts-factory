@@ -1,20 +1,24 @@
 import { type Env, buildLimits } from "@sf/config";
 import { QUEUE_NAMES, type QueueName } from "@sf/core";
 import { type BudgetGuard, type Db, createUsageLogger } from "@sf/db";
+import type { QueueFactory } from "@sf/runtime";
 import { Worker } from "bullmq";
 import type { Redis } from "ioredis";
 import type { Logger } from "pino";
 import { JOB_PROCESSORS } from "./jobs/index.js";
+// Past the barrel on purpose: `jobs/index.ts` is the registry of the queues
+// this process runs, and a step of the start is not a processor. The stamp it
+// clears belongs to the heartbeat job, so the helper lives with that job - and
+// its one caller is the start below, where moving the call would be noticed.
 import { clearHeartbeat } from "./jobs/system-heartbeat.js";
 import { createWorkerBudgetGuard } from "./lib/budget.js";
 import type { QueueProcessor } from "./lib/define-job.js";
 import { type DlqWriter, createDlqWriter } from "./lib/dlq.js";
-import { queueConcurrency } from "./lib/job-policy.js";
+import { createJobQueueFactory, queueConcurrency } from "./lib/job-policy.js";
 import {
   applyQueueSwitches,
   startQueueSwitchSync,
 } from "./lib/queue-switches.js";
-import { type QueueFactory, createQueueFactory } from "./lib/queues.js";
 import { syncSchedules } from "./schedules.js";
 
 /**
@@ -79,7 +83,7 @@ export async function startWorkerRuntime(
       limits: buildLimits(deps.env),
       log: deps.log,
     });
-  const queues = deps.queues ?? createQueueFactory(deps.redis);
+  const queues = deps.queues ?? createJobQueueFactory(deps.redis, deps.log);
   const getQueue = (name: QueueName) => queues.get(name);
 
   const workers = new Map<QueueName, Worker>();

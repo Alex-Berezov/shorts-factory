@@ -29,7 +29,7 @@ export interface WorkerHeartbeatOptions {
  * Requests that arrive while a read is in flight share it (`singleFlight`),
  * like every other dependency call of the api: the deadline of the page gives
  * up on a `GET` to a silent Redis without ending it, and the sharing keeps
- * that to one until the `commandTimeout` of the client (`lib/redis.ts`) ends
+ * that to one until the `commandTimeout` of the client (`compose-app.ts`) ends
  * it. Nothing is kept once it settles.
  */
 export function createWorkerProbe(

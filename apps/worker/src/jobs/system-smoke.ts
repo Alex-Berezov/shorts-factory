@@ -24,8 +24,6 @@ const SmokePayloadSchema = z
   })
   .strict();
 
-export type SmokePayload = z.infer<typeof SmokePayloadSchema>;
-
 export const systemSmokeJob = defineJob({
   queue: "system.smoke",
   payloadSchema: SmokePayloadSchema,

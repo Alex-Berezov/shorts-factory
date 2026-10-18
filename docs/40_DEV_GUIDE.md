@@ -123,6 +123,40 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
    перечисление, совпадающее с union в `@sf/core`, сторожит
    `packages/db/test/enum-parity.test.ts`.
 
+## 4. Новый процесс (CLI, служба) - каркас из `@sf/runtime`
+
+Логгер, Redis, очереди, остановка и дедлайн - только из `@sf/runtime` (ADR-0012), копия в
+`apps/*/src/lib` - находка ревью.
+
+1. **Логгер** - `pino(buildLoggerOptions(env))` в точке входа: вызов `pino()` остаётся в
+   приложении (оттуда резолвится `pino-pretty`), опции - из пакета (`redact`, белый список
+   `serializers.err`). Новое поле ошибки, которое нужно в логе, - строка в белом списке
+   `packages/runtime/src/logger.ts` с кейсом в `packages/runtime/test/logger.test.ts`;
+   `details` ошибки в лог не идут - только то, что вызывающий положил под `LOGGED_DETAILS`.
+2. **Redis** - по политике, а не опциями: `createQueueRedis(url, { log })` для BullMQ и всего,
+   что ставит job; `createRequestRedis(url, { commandTimeoutMs, log })` для запросов api;
+   `createProbeRedis(url, { connectTimeoutMs })` для одноразовой проверки - только подпутём
+   `@sf/runtime/redis` (в барреле её нет: процесс проверки не грузит bullmq и pino; дедлайн -
+   `@sf/runtime/deadline`). Закрытие
+   в остановке - стадия `redisStage(() => client)`, вне её - `closeRedis`.
+3. **Очереди** - `createQueueFactory({ connection, log, readOnly, defaultJobOptions })`:
+   писатель воркера - `createJobQueueFactory(connection, log)` из
+   `apps/worker/src/lib/job-policy.ts` (`DEFAULT_JOB_OPTIONS` у писателя обязательны по типу),
+   читатель - `readOnly: true` без политики; чтение, после которого `Queue` может оказаться сломанным, - через
+   `use(name, read)`.
+4. **Остановка** - `createShutdownHandler({ plan, log, startedMessage, repeatedSigint, timeoutMs })`:
+   порядок плана - контракт процесса (образцы: `apps/worker/src/bootstrap.ts`,
+   `apps/api/src/compose-app.ts`); сигналы подписываются (`subscribeToSignals`) до того, как
+   что-то открыто; провал старта - тот же обработчик с `{ failed: true }`, не голый
+   `process.exit(1)`; стадия ресурса - `stageOf(name, () => target, close)`: цель, которую
+   старт не открыл (`undefined` или промис старта, разрешившийся без неё), даёт строку
+   «not opened», а не `closed`.
+5. **Обещание без ответа** - `withDeadline`/`settleWithin` с явным `unref`: `false` - когда
+   дедлайн и есть вердикт (запрос, CLI, остановка), `true` - когда таймер не должен держать
+   процесс (кэш, ожидание при закрытии).
+6. **Тесты** - рекордер `@sf/runtime/test-support/recording-logger` (настоящий pino, уровни
+   именами; `silentLogger()` для кейсов не про лог).
+
 ## Тесты и гейты
 
 - `pnpm test` - юнит-тесты всех пакетов и корневого проекта `test/` (`turbo run test test:repo`),

@@ -23,5 +23,3 @@ export const JOB_PROCESSORS: Partial<Record<QueueName, QueueProcessor>> = {
   "system.heartbeat": systemHeartbeatJob,
   "system.smoke": systemSmokeJob,
 };
-
-export { systemHeartbeatJob, systemSmokeJob };

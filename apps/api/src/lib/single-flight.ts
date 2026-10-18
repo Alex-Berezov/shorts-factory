@@ -4,7 +4,7 @@
  * one.
  *
  * What it bounds is the pile-up behind a dependency that hangs. Callers put
- * their own deadline on what they get (`withDeadline` in `lib/deadline.ts`),
+ * their own deadline on what they get (`withDeadline` of `@sf/runtime`),
  * so a request gives up on time either way - but without this every request
  * that gave up would leave one more call behind it, still waiting on the same
  * silent socket. With it there is one call in flight at most, however often
@@ -16,7 +16,7 @@
  * joined for as long as it hangs - every caller gives up on its own deadline
  * and reports the dependency as down - so whoever wraps a call in this owns
  * the bound on how long it can hang (the `commandTimeout` of the Redis client
- * in `lib/redis.ts`; for a database query, see `lib/health.ts`).
+ * in `compose-app.ts`; for a database query, see `lib/health.ts`).
  *
  * Nothing is kept after the call settles: the next caller after a success or
  * a failure asks the dependency again.

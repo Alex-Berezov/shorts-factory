@@ -1,8 +1,11 @@
 import { Agent, type IncomingHttpHeaders, request } from "node:http";
 import { REQUEST_ID_HEADER } from "@sf/contracts";
+import {
+  type Recorder,
+  recordingLogger,
+} from "@sf/runtime/test-support/recording-logger";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildTestApp, parseErrorBody } from "./helpers.js";
-import { type Recorder, recordingLogger } from "./recording-logger.js";
 
 /**
  * The stop of the service as a caller sees it, over a real socket: Fastify
@@ -148,7 +151,7 @@ describe("a request that arrives while the service is closing", () => {
       .filter((entry) => entry.requestId === requestId);
     expect(lines).toEqual([
       {
-        level: 30,
+        level: "info",
         time: expect.any(Number),
         pid: expect.any(Number),
         hostname: expect.any(String),

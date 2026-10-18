@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { type EnvLike, isEnvValueSet } from "./env-file.js";
+import { type EnvLike, normalizeEnvValue } from "./env-file.js";
 import {
   BUILD_LABEL_NAMES,
   type BuildLabelName,
@@ -30,8 +30,9 @@ const PRODUCTION_ADMIN_PASSWORD_MIN = 16;
 function normalizeValues(source: EnvLike): EnvLike {
   const result: EnvLike = {};
   for (const [key, value] of Object.entries(source)) {
-    if (isEnvValueSet(value)) {
-      result[key] = value.trim();
+    const normalized = normalizeEnvValue(value);
+    if (normalized !== undefined) {
+      result[key] = normalized;
     }
   }
   return result;

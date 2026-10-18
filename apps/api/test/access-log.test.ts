@@ -1,10 +1,10 @@
 import { REQUEST_ID_HEADER } from "@sf/contracts";
 import { AppError, ValidationError } from "@sf/core";
+import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AppInstance } from "../src/app.js";
 import { AccessLogController } from "../src/lib/error-log.js";
 import { AUTH_HEADER, basicAuthHeader, buildTestApp } from "./helpers.js";
-import { recordingLogger } from "./recording-logger.js";
 
 /** Put into a url by the caller; must not reach any line of the log. */
 const MARKER = "caller-typed-marker";
@@ -155,7 +155,7 @@ describe("access log", () => {
     // The request is answered and written down, once...
     expect(entries).toEqual([
       expect.objectContaining({
-        level: 30,
+        level: "info",
         msg: "request completed",
         method: "GET",
         status: 200,
@@ -180,7 +180,7 @@ describe("access log", () => {
 
     expect(entries).toEqual([
       expect.objectContaining({
-        level: 30,
+        level: "info",
         msg: "request completed",
         method: "GET",
         status: 200,
@@ -215,7 +215,7 @@ describe("access log", () => {
 
     expect(entries).toEqual([
       expect.objectContaining({
-        level: 30,
+        level: "info",
         msg: "request rejected",
         status: 401,
         code: "UNAUTHORIZED",
@@ -239,7 +239,7 @@ describe("access log", () => {
 
     const failure = entries.find((e) => e.msg === "request errored");
     expect(failure).toMatchObject({
-      level: 50,
+      level: "error",
       routeUrl: "/test/broken-response",
       requestId,
       err: {
@@ -269,7 +269,7 @@ describe("access log", () => {
 
     expect(entries).toEqual([
       expect.objectContaining({
-        level: 50,
+        level: "error",
         msg: "request failed",
         status: 502,
         reqId: requestId,
@@ -284,7 +284,7 @@ describe("access log", () => {
 
     expect(entries).toEqual([
       expect.objectContaining({
-        level: 50,
+        level: "error",
         msg: "request errored",
         requestId,
         err: expect.objectContaining({
@@ -303,7 +303,7 @@ describe("access log", () => {
 
     expect(entries).toEqual([
       expect.objectContaining({
-        level: 50,
+        level: "error",
         msg: "response head failed",
         routeUrl: "/test/head-failed",
         requestId,
@@ -332,7 +332,7 @@ describe("access log", () => {
 
       expect(entries).toEqual([
         expect.objectContaining({
-          level: 50,
+          level: "error",
           msg,
           method: "GET",
           routeUrl: path,
@@ -352,7 +352,7 @@ describe("access log", () => {
 
     expect(entries).toEqual([
       expect.objectContaining({
-        level: 50,
+        level: "error",
         msg: "error handler failed",
         status: 500,
         routeUrl: "/test/unmappable",

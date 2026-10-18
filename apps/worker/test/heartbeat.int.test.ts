@@ -1,6 +1,13 @@
 import { env } from "@sf/config";
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SEC } from "@sf/core";
 import { type Db, closeDb } from "@sf/db";
+import type { QueueFactory } from "@sf/runtime";
+import { closeRedis } from "@sf/runtime";
+import {
+  type LoggedLine,
+  recordingLogger,
+  silentLogger,
+} from "@sf/runtime/test-support/recording-logger";
 import type { Queue } from "bullmq";
 import type { Redis } from "ioredis";
 import { type Logger, pino } from "pino";
@@ -8,21 +15,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { bootstrap } from "../src/bootstrap.js";
 import { systemHeartbeatJob } from "../src/jobs/system-heartbeat.js";
 import { systemSmokeJob } from "../src/jobs/system-smoke.js";
-import { type QueueFactory, createQueueFactory } from "../src/lib/queues.js";
-import { closeRedis } from "../src/lib/redis.js";
 import { startWorkerRuntime } from "../src/runtime.js";
 import {
   obliterateQueues,
   openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  workerQueueFactory,
 } from "./helpers.int.js";
 import { recordingUsage, unusedBudget } from "./job-deps.js";
-import {
-  type LoggedLine,
-  recordingLogger,
-  silentLogger,
-} from "./recording-logger.js";
 
 /**
  * The liveness stamp against a real Redis: what a fake cannot have is the
@@ -160,7 +161,7 @@ function noting(real: QueueFactory, events: string[]): QueueFactory {
         },
       });
     },
-    opened: () => real.opened(),
+    use: (name, read) => real.use(name, read),
     close: () => real.close(),
   };
 }
@@ -233,7 +234,7 @@ describe("worker start against redis", () => {
         log: notingWorkers(events),
         processors: { "system.smoke": systemSmokeJob },
         switchIntervalMs: 60_000,
-        queues: noting(createQueueFactory(redis), events),
+        queues: noting(workerQueueFactory(redis), events),
       });
       await runtime.close();
     } finally {
@@ -262,7 +263,7 @@ describe("worker start against redis", () => {
     // The queues the start opens are closed here, whatever the start did: the
     // case is about the start failing, and must not lean on that failure
     // closing what it opened.
-    const queueFactory = createQueueFactory(redis);
+    const queueFactory = workerQueueFactory(redis);
     const runtimeDb = openTestDb();
     try {
       await seedQueueSwitches(runtimeDb);

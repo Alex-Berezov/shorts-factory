@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
  *
  * The one thing a fake queue cannot reproduce: the client the command really
  * uses keeps retrying forever and queues commands offline (BullMQ's
- * requirement, `src/lib/redis.ts`), so every promise in this path - the
+ * requirement, `createQueueRedis` of `@sf/runtime`), so every promise in this path - the
  * `waitUntilReady`, the `add`, the `isPaused` behind the verdict, the `quit`
  * behind the exit - can be one that never settles. This run proves the command
  * still ends by itself, says which of the two things is wrong and leaves with

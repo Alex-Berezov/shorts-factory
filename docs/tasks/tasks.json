@@ -1648,8 +1648,9 @@
       "E0-13"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-10"
+    "status": "in_progress",
+    "added_at": "2026-10-10",
+    "started_at": "2026-10-17"
   },
   {
     "id": "E0-12C",
@@ -1733,6 +1734,34 @@
     "deps": [
       "E0-13",
       "E0-12A"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-17"
+  },
+  {
+    "id": "E0-12G",
+    "epic": "E0",
+    "title": "api/worker: журнал запросов, разбор ошибок, причины healthcheck",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-13",
+      "E0-12B"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-17"
+  },
+  {
+    "id": "E0-12H",
+    "epic": "E0",
+    "title": "Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout })",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-13",
+      "E0-12B"
     ],
     "doc": "TECH_DEBT.md",
     "status": "todo",

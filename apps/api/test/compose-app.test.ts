@@ -1,19 +1,27 @@
 import { type Env, loadEnv } from "@sf/config";
 import { QUEUE_NAMES } from "@sf/core";
+import { buildLoggerOptions, createRequestRedis } from "@sf/runtime";
+import {
+  type Recorder,
+  recordingLogger,
+} from "@sf/runtime/test-support/recording-logger";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildInfoFrom, composeApp } from "../src/compose-app.js";
-import { buildLoggerOptions } from "../src/lib/logger.js";
+import {
+  ComposeFailure,
+  type ComposedApp,
+  buildInfoFrom,
+  composeApp,
+  composeOrFail,
+} from "../src/compose-app.js";
 import { type QueueStats, createQueueStats } from "../src/lib/queue-stats.js";
-import { createRedis } from "../src/lib/redis.js";
 import { dependencyFailureCode } from "../src/lib/system-status.js";
-import { type Recorder, recordingLogger } from "./recording-logger.js";
 
 /**
  * Nothing listens on port 1. The database client does not connect until it is
  * asked something, and no case here asks it. Redis is `idleRedis` below by
- * default; a case that passes the real `createRedis` does reach for port 1 and
+ * default; a case that passes the real `createRequestRedis` does reach for port 1 and
  * is refused, and its client keeps reconnecting until the shutdown that
  * `compose` registers for every case closes it.
  */
@@ -41,17 +49,21 @@ function recordingLog(env: Env): Recorder {
 }
 
 /**
- * A Redis client that never connects on its own (`lazyConnect`), wired to
- * `onError` the way `createRedis` wires it. Nothing in `composeApp` sends it
- * a command; the shutdown closes it without ever reaching the server.
+ * A Redis client that never connects on its own (`lazyConnect`), writing its
+ * failures to the logger it is given, the way the first failure of an outage
+ * is written by `createRequestRedis`. Nothing in `composeApp` sends it a
+ * command; the shutdown closes it without ever reaching the server.
  */
-const idleRedis: typeof createRedis = (url, options) => {
+const idleRedis: typeof createRequestRedis = (url, options) => {
   const client = new Redis(url, { lazyConnect: true });
   client.on("error", (err: Error) => {
-    options?.onError?.(err);
+    options.log?.error({ err }, "redis client error");
   });
   return client;
 };
+
+/** The signals of a case are its own: nothing is subscribed on the process. */
+const noSignals = (): void => {};
 
 /** Shutdowns to run after each case, so no client outlives its test. */
 const pending: Array<() => Promise<void>> = [];
@@ -69,6 +81,7 @@ function compose(
 ): ReturnType<typeof composeApp> {
   const composed = composeApp(env, {
     createRedis: idleRedis,
+    subscribe: noSignals,
     ...options,
     exit: () => {},
   });
@@ -107,14 +120,43 @@ describe("composeApp", () => {
       log,
       rejectedBuildLabels: [],
       createRedis: (url, options) => {
-        options?.onError?.(new Error(STARTUP_FAILURE));
-        return idleRedis(url, options);
+        const client = idleRedis(url, options);
+        client.emit("error", new Error(STARTUP_FAILURE));
+        return client;
       },
     });
 
     const written = raw();
     expect(written).toContain("redis client error");
     expect(written).toContain(STARTUP_FAILURE);
+  });
+
+  it("fades the outages of its Redis client instead of an error per attempt", () => {
+    // The client of requests reconnects every couple of seconds while Redis
+    // is down; the wiring hands it the logger, and the client fades.
+    const env = envWith();
+    const { log, entries } = recordingLog(env);
+    let opened: Redis | undefined;
+    compose(env, {
+      log,
+      rejectedBuildLabels: [],
+      createRedis: (url, options) => {
+        opened = createRequestRedis(url, options);
+        return opened;
+      },
+    });
+
+    // Synchronous, so the refusals of port 1 cannot come in between.
+    for (let i = 0; i < 6; i += 1) {
+      opened?.emit("error", new Error("connect ECONNREFUSED 127.0.0.1:1"));
+    }
+
+    // The sixth is at `debug`, below the level of the service.
+    expect(
+      entries()
+        .filter((entry) => entry.msg === "redis client error")
+        .map((entry) => entry.level),
+    ).toEqual(["error", "warn", "warn", "warn", "warn"]);
   });
 
   /**
@@ -132,7 +174,7 @@ describe("composeApp", () => {
     compose(env, {
       log,
       rejectedBuildLabels: [],
-      createRedis,
+      createRedis: createRequestRedis,
       createQueueStats: (options) => {
         const stats = createQueueStats(options);
         built.push(stats);
@@ -166,8 +208,7 @@ describe("composeApp", () => {
 
     const errors = entries().filter(
       (entry) =>
-        typeof entry.level === "number" &&
-        entry.level >= 50 &&
+        (entry.level === "error" || entry.level === "fatal") &&
         entry.msg !== "redis client error",
     );
     expect(errors).toEqual([]);
@@ -182,7 +223,7 @@ describe("composeApp", () => {
     const warning = entries().find(
       (entry) => entry.msg === "build label ignored",
     );
-    expect(warning).toMatchObject({ level: 40, variable: "APP_VERSION" });
+    expect(warning).toMatchObject({ level: "warn", variable: "APP_VERSION" });
   });
 
   it("says nothing about the build labels when none was dropped", () => {
@@ -245,9 +286,10 @@ describe("composeApp", () => {
   });
 
   /**
-   * Redis is down at the stop: the client of the api refuses the QUIT (no
-   * offline queue) and the socket is torn down instead. The stop is clean and
-   * says how Redis went - the wiring, not a stub, decides that.
+   * Redis is down at the stop: the client of the api is not connected, so it
+   * is torn down without a QUIT - which would only be refused, there being no
+   * offline queue. The stop is clean and says how Redis went - the wiring, not
+   * a stub, decides that; there is no refusal to show, so the line has none.
    */
   it("stops cleanly with a warning when Redis is down at the stop", async () => {
     const env = envWith();
@@ -256,7 +298,8 @@ describe("composeApp", () => {
     const { shutdown } = composeApp(env, {
       log,
       rejectedBuildLabels: [],
-      createRedis,
+      createRedis: createRequestRedis,
+      subscribe: noSignals,
       exit: (code) => codes.push(code),
     });
     pending.push(() => shutdown("SIGTERM"));
@@ -265,15 +308,193 @@ describe("composeApp", () => {
 
     const redisLines = entries().filter((entry) => entry.target === "redis");
     expect(redisLines).toEqual([
-      expect.objectContaining({
-        level: 40,
-        msg: "closed by disconnect",
-        err: expect.objectContaining({
-          message:
-            "Stream isn't writeable and enableOfflineQueue options is false",
-        }),
-      }),
+      expect.objectContaining({ level: "warn", msg: "closed by disconnect" }),
     ]);
+    expect(redisLines[0]).not.toHaveProperty("err");
     expect(codes).toEqual([0]);
   });
+
+  /**
+   * A compose that throws after the first connection is open: what it opened
+   * is closed by the same stop as on a signal, and the process leaves with
+   * the code of a failure instead of the code of a crash with sockets open.
+   * What it never reached is said to be not opened, not closed.
+   */
+  it("closes what it opened and exits with 1 when composing fails halfway", async () => {
+    const env = envWith();
+    const { log, entries } = recordingLog(env);
+    const codes: number[] = [];
+
+    let thrown: unknown;
+    try {
+      composeApp(env, {
+        log,
+        rejectedBuildLabels: [],
+        createRedis: idleRedis,
+        createQueueStats: () => {
+          throw new Error(STARTUP_FAILURE);
+        },
+        subscribe: noSignals,
+        exit: (code) => codes.push(code),
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ComposeFailure);
+    expect(thrown instanceof Error ? thrown.cause : undefined).toMatchObject({
+      message: STARTUP_FAILURE,
+    });
+
+    await vi.waitFor(() => {
+      expect(codes).toEqual([1]);
+    });
+    expect(
+      entries().find((entry) => entry.msg === "api failed to start"),
+    ).toMatchObject({ level: "fatal" });
+    expect(targetsOf(entries(), "closed")).toEqual(["db"]);
+    expect(targetsOf(entries(), "not opened, nothing to close").sort()).toEqual(
+      ["app", "queues"],
+    );
+    expect(entries().find((entry) => entry.target === "redis")).toMatchObject({
+      level: "warn",
+      msg: "closed by disconnect",
+    });
+    expect(
+      entries().find((entry) => entry.msg === "shutdown complete"),
+    ).toMatchObject({ signal: "startup failure", failed: true });
+  });
+
+  it("says the client was not opened when Redis could not be created", async () => {
+    const env = envWith();
+    const { log, entries } = recordingLog(env);
+    const codes: number[] = [];
+
+    expect(() =>
+      composeApp(env, {
+        log,
+        rejectedBuildLabels: [],
+        createRedis: () => {
+          throw new Error(STARTUP_FAILURE);
+        },
+        subscribe: noSignals,
+        exit: (code) => codes.push(code),
+      }),
+    ).toThrow(ComposeFailure);
+
+    await vi.waitFor(() => {
+      expect(codes).toEqual([1]);
+    });
+    expect(targetsOf(entries(), "closed")).toEqual(["db"]);
+    expect(targetsOf(entries(), "not opened, nothing to close").sort()).toEqual(
+      ["app", "queues", "redis"],
+    );
+  });
+
+  /**
+   * The signals are listened for before anything is opened: a SIGTERM while
+   * a failed compose is closing what it opened reaches that stop, instead of
+   * Node's default action, which would end the process on the spot with the
+   * connections still open and the exit code of a kill.
+   */
+  it("hands a signal during the stop of a failed compose to that stop", async () => {
+    const env = envWith();
+    const { log, entries } = recordingLog(env);
+    const codes: number[] = [];
+    const events: string[] = [];
+    let signal: (name: string) => void = () => {};
+
+    expect(() =>
+      composeApp(env, {
+        log,
+        rejectedBuildLabels: [],
+        createRedis: (url, options) => {
+          events.push("redis opened");
+          return idleRedis(url, options);
+        },
+        createQueueStats: () => {
+          throw new Error(STARTUP_FAILURE);
+        },
+        subscribe: (handler) => {
+          events.push("subscribed");
+          signal = handler;
+        },
+        exit: (code) => codes.push(code),
+      }),
+    ).toThrow(ComposeFailure);
+    signal("SIGTERM");
+
+    await vi.waitFor(() => {
+      expect(codes).toEqual([1]);
+    });
+    expect(events).toEqual(["subscribed", "redis opened"]);
+    expect(
+      entries().find((entry) => entry.msg === "shutdown already in progress"),
+    ).toMatchObject({ signal: "SIGTERM", failed: true });
+  });
 });
+
+describe("composeOrFail", () => {
+  it("hands back what composing returned", () => {
+    const env = envWith();
+    const composed: ComposedApp = compose(env, {
+      log: recordingLog(env).log,
+      rejectedBuildLabels: [],
+    });
+    const fail = vi.fn();
+
+    expect(composeOrFail(() => composed, recordingLogger().log, fail)).toBe(
+      composed,
+    );
+    expect(fail).not.toHaveBeenCalled();
+  });
+
+  it("writes a throw nobody wrote yet and fails the process", () => {
+    // Thrown before `composeApp` opened a thing - by an argument of the
+    // call - so no stop is coming to exit with 1.
+    const { log, lines } = recordingLogger();
+    const fail = vi.fn();
+
+    const composed = composeOrFail(
+      () => {
+        throw new Error(STARTUP_FAILURE);
+      },
+      log,
+      fail,
+    );
+
+    expect(composed).toBeUndefined();
+    expect(fail).toHaveBeenCalledTimes(1);
+    expect(lines).toEqual([
+      expect.objectContaining({
+        level: "fatal",
+        msg: "api failed to start",
+        err: expect.objectContaining({ message: STARTUP_FAILURE }),
+      }),
+    ]);
+  });
+
+  it("leaves a failure composeApp already handed to its stop alone", () => {
+    const { log, lines } = recordingLogger();
+    const fail = vi.fn();
+
+    const composed = composeOrFail(
+      () => {
+        throw new ComposeFailure(new Error(STARTUP_FAILURE));
+      },
+      log,
+      fail,
+    );
+
+    expect(composed).toBeUndefined();
+    expect(fail).not.toHaveBeenCalled();
+    expect(lines).toEqual([]);
+  });
+});
+
+/** The targets whose line has this message, in the order of the lines. */
+function targetsOf(
+  lines: ReadonlyArray<{ msg: string; target?: unknown }>,
+  msg: string,
+): unknown[] {
+  return lines.filter((line) => line.msg === msg).map((line) => line.target);
+}

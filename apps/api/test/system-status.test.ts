@@ -14,17 +14,18 @@ import {
   budgetScopeFor,
 } from "@sf/core";
 import { closeDb, createBudgetGuard, createDb } from "@sf/db";
+import { DeadlineError, createRequestRedis } from "@sf/runtime";
+import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import type { Redis } from "ioredis";
 import { describe, expect, it, vi } from "vitest";
 import type { QueuesSnapshot } from "../src/deps.js";
 import { CAP_REPRESENTATIVES, createBudgetProbe } from "../src/lib/budget.js";
-import { DEPENDENCY_TIMEOUT_MS, DeadlineError } from "../src/lib/deadline.js";
+import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
 import { createWorkerProbe } from "../src/lib/heartbeat.js";
 import {
   QueueCountersError,
   createQueueStats,
 } from "../src/lib/queue-stats.js";
-import { createRedis } from "../src/lib/redis.js";
 import {
   type Collected,
   collect,
@@ -40,7 +41,6 @@ import {
   buildTestApp,
   parseErrorBody,
 } from "./helpers.js";
-import { recordingLogger } from "./recording-logger.js";
 
 // The real guard, replaceable: a case below holds the reads of the budget
 // section to count how many a burst of requests sends to the database.
@@ -281,6 +281,16 @@ describe("dependencyFailureCode", () => {
     expect(dependencyFailureCode(connect)).toBe("unreachable");
   });
 
+  it("calls a name the resolver could not answer yet unreachable", () => {
+    // The service name of Redis inside Docker while its DNS is not up: a
+    // fact about the socket, not an answer of the server.
+    const notYet: NodeJS.ErrnoException = new Error(
+      "getaddrinfo EAI_AGAIN redis",
+    );
+    notYet.code = "EAI_AGAIN";
+    expect(dependencyFailureCode(notYet)).toBe("unreachable");
+  });
+
   /**
    * The server that went away with a query in flight - a restart, a failover,
    * a `pg_terminate_backend`. postgres-js raises these as plain `Error`s with
@@ -425,7 +435,9 @@ describe("the ioredis refusals the page calls unreachable", () => {
     // Issued right after creation: the client is `connecting` (and after the
     // refusal `reconnecting`), and with the offline queue off the command is
     // refused instead of waiting for a socket that will not come.
-    const client = createRedis(CLOSED_REDIS_URL);
+    const client = createRequestRedis(CLOSED_REDIS_URL, {
+      commandTimeoutMs: DEPENDENCY_TIMEOUT_MS,
+    });
     try {
       const err = await refusal(() => client.ping());
 
@@ -441,7 +453,9 @@ describe("the ioredis refusals the page calls unreachable", () => {
   });
 
   it("calls a command on a closed client unreachable", async () => {
-    const client = createRedis(CLOSED_REDIS_URL);
+    const client = createRequestRedis(CLOSED_REDIS_URL, {
+      commandTimeoutMs: DEPENDENCY_TIMEOUT_MS,
+    });
     try {
       // The client reaches `end` on the `close` of its socket, not inside
       // `disconnect()`: a command issued in between is refused with the other
@@ -466,9 +480,11 @@ describe("the ioredis refusals the page calls unreachable", () => {
    * after it. The queues section has to be refused the way a command is.
    */
   it("refuses the queues section at once instead of waiting for the client", async () => {
-    const client = createRedis(CLOSED_REDIS_URL);
-    const stats = createQueueStats({ connection: client });
+    const client = createRequestRedis(CLOSED_REDIS_URL, {
+      commandTimeoutMs: DEPENDENCY_TIMEOUT_MS,
+    });
     const { log } = recordingLogger();
+    const stats = createQueueStats({ connection: client, log });
     try {
       const started = performance.now();
       const section = await collect("queues", () => stats.collect(), log);
@@ -627,7 +643,9 @@ describe("a command to a Redis that went silent", () => {
    */
   it("fails by itself at the deadline of the api and is a timeout", async () => {
     const redis = await silentRedis();
-    const client = createRedis(redis.url);
+    const client = createRequestRedis(redis.url, {
+      commandTimeoutMs: DEPENDENCY_TIMEOUT_MS,
+    });
     try {
       await readyWithin(client, 1_000);
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });

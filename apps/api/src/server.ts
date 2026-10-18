@@ -1,11 +1,11 @@
 import { env, rejectedBuildLabels } from "@sf/config";
+import { buildLoggerOptions } from "@sf/runtime";
 import { pino } from "pino";
-import { composeApp } from "./compose-app.js";
-import { buildLoggerOptions } from "./lib/logger.js";
+import { composeApp, composeOrFail } from "./compose-app.js";
 
 /**
  * REST API entry point: reads the configuration, builds the logger before
- * anything that can fail asynchronously, and owns the socket and the signals.
+ * anything that can fail asynchronously, and owns the socket.
  * The connections and the application are assembled in `compose-app.ts`.
  * Which modules exist is not listed here - the registry in
  * `src/routes/index.ts` is the map, and a copy of it in this docblock would be
@@ -14,18 +14,29 @@ import { buildLoggerOptions } from "./lib/logger.js";
  */
 const log = pino(buildLoggerOptions(env));
 
-const { app, shutdown } = composeApp(env, {
+// The signals are subscribed by `composeApp`, before it opens anything.
+const composed = composeOrFail(
+  () =>
+    composeApp(env, {
+      log,
+      rejectedBuildLabels: rejectedBuildLabels(),
+    }),
   log,
-  rejectedBuildLabels: rejectedBuildLabels(),
-});
+  () => {
+    // Nothing was opened, so nothing holds the loop: the process leaves
+    // once the line is out, with this code.
+    process.exitCode = 1;
+  },
+);
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    void shutdown(signal);
+if (composed !== undefined) {
+  const { app, shutdown } = composed;
+
+  // A port that is taken is a start that failed: the connections are already
+  // open, and they are closed by the same stop as on a signal, with the exit
+  // code of a failure.
+  app.listen({ port: env.API_PORT, host: "0.0.0.0" }).catch((err: unknown) => {
+    log.error({ err }, "failed to start the api");
+    void shutdown("listen failure", { failed: true });
   });
 }
-
-app.listen({ port: env.API_PORT, host: "0.0.0.0" }).catch((err: unknown) => {
-  app.log.error({ err }, "failed to start the api");
-  process.exit(1);
-});

@@ -88,6 +88,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    # The stop of api has a 10 s deadline (SHUTDOWN_TIMEOUT_MS in
+    # apps/api/src/compose-app.ts) and flushes the log for up to 1 s after it
+    # (packages/runtime/src/shutdown.ts); Docker's default 10 s would SIGKILL
+    # api with 137 and cut off the last lines of the stop.
+    stop_grace_period: 15s
     restart: unless-stopped
 
   worker:
@@ -110,8 +115,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # The drain of src/lib/shutdown.ts has a 25 s deadline; Docker's default
-    # 10 s would SIGKILL the worker in the middle of it.
+    # The drain of the worker has a 25 s deadline (SHUTDOWN_TIMEOUT_MS in
+    # apps/worker/src/bootstrap.ts); Docker's default 10 s would SIGKILL the
+    # worker in the middle of it.
     stop_grace_period: 30s
     healthcheck:
       # Fresh heartbeat stamp in Redis - the rule /system applies

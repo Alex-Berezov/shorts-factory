@@ -1,9 +1,10 @@
 import { env } from "@sf/config";
 import type { QueueName } from "@sf/core";
 import { suiteRedisUrl } from "@sf/db/test-support/stack-guard";
+import { createRequestRedis } from "@sf/runtime";
 import { Queue } from "bullmq";
 import type { Redis } from "ioredis";
-import { createRedis } from "../src/lib/redis.js";
+import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
 
 export { openTestDb } from "@sf/db/test-support/fixture";
 
@@ -30,7 +31,9 @@ export { openTestDb } from "@sf/db/test-support/fixture";
 
 /** Connection for an integration file of the api; the caller closes it. */
 export function openTestRedis(): Redis {
-  return createRedis(suiteRedisUrl(env.REDIS_URL, "api"));
+  return createRequestRedis(suiteRedisUrl(env.REDIS_URL, "api"), {
+    commandTimeoutMs: DEPENDENCY_TIMEOUT_MS,
+  });
 }
 
 /**

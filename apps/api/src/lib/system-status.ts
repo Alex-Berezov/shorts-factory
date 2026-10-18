@@ -1,10 +1,12 @@
 import type { DependencyCheck, ProbeFailureCode } from "@sf/contracts";
-import type { FastifyBaseLogger } from "fastify";
 import {
-  DEPENDENCY_TIMEOUT_MS,
   DeadlineError,
+  connectionFailure,
+  errorCode,
   withDeadline,
-} from "./deadline.js";
+} from "@sf/runtime";
+import type { FastifyBaseLogger } from "fastify";
+import { DEPENDENCY_TIMEOUT_MS } from "./dependency-timeout.js";
 
 /**
  * How the page is assembled: one deadline per section, a failure of a
@@ -17,46 +19,22 @@ import {
  */
 
 /**
- * Error codes both drivers use for "there is no one at the other end".
+ * The codes postgres-js raises as plain `Error`s of its own (`src/errors.js`)
+ * when there is no one at the other end. `CONNECT_TIMEOUT` is the connect
+ * timeout of `createDb`; the other three are the server going away with a
+ * query in flight - `CONNECTION_CLOSED` is what an ordinary restart or a
+ * failover looks like from here, and a page that answered 500 to it would be
+ * a page that survives "Postgres is off" and not "Postgres came back".
  *
- * Read off `err.code`, never off the message: the wording belongs to the
- * driver and changes with it, and a match on free text is how the host, the
- * port and occasionally the credentials in that text end up being treated as
- * a classification.
+ * The failures of a socket both drivers share, and the refusals of ioredis
+ * while its socket is down, are `connectionFailure` of `@sf/runtime` - the
+ * same set the `error` listener of every `Queue` reads.
  */
-const UNREACHABLE_CODES: ReadonlySet<string> = new Set([
-  "ECONNREFUSED",
-  "ENOTFOUND",
-  "ETIMEDOUT",
-  "EPIPE",
-  "ECONNRESET",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  // postgres-js, `src/errors.js`: the four it raises as plain `Error`s with a
-  // `code` of their own. `CONNECT_TIMEOUT` is the connect timeout of
-  // `createDb`; the other three are the server going away with a query in
-  // flight - `CONNECTION_CLOSED` is what an ordinary restart or a failover
-  // looks like from here, and a page that answered 500 to it would be a page
-  // that survives "Postgres is off" and not "Postgres came back".
+const POSTGRES_UNREACHABLE_CODES: ReadonlySet<string> = new Set([
   "CONNECT_TIMEOUT",
   "CONNECTION_CLOSED",
   "CONNECTION_DESTROYED",
   "CONNECTION_ENDED",
-]);
-
-/**
- * The verbatim message ioredis rejects a command with once the
- * `commandTimeout` of the client (`lib/redis.ts`) ran out: the socket is open
- * and nothing came back in time, which is what `timeout` says. A plain
- * `Error` without a `code` (`built/Command.js`), so the message is all there
- * is to recognise it by.
- */
-const REDIS_COMMAND_TIMEOUT_MESSAGE = "Command timed out";
-
-/** Verbatim messages of the ioredis refusals that mean "the socket is down". */
-const REDIS_DOWN_MESSAGES: ReadonlySet<string> = new Set([
-  "Connection is closed.",
-  "Stream isn't writeable and enableOfflineQueue options is false",
 ]);
 
 /**
@@ -92,7 +70,7 @@ const POSTGRES_UNREACHABLE_CLASSES: ReadonlySet<string> = new Set(["08"]);
  * SQLSTATEs of a query the server gave up on: `57014` query_canceled, what a
  * `statement_timeout` or a cancel request ends a query with. Nothing came
  * back in time, which is `timeout` - the same reason the refusal of ioredis
- * after its `commandTimeout` gets (`REDIS_COMMAND_TIMEOUT_MESSAGE`), so one
+ * after its `commandTimeout` gets (`connectionFailure`, `@sf/runtime`), so one
  * state of a dependency reads the same whichever driver saw it.
  */
 const POSTGRES_TIMEOUT_STATES: ReadonlySet<string> = new Set(["57014"]);
@@ -143,30 +121,6 @@ function postgresFailureCode(
 }
 
 /**
- * Failures recognised by class rather than by code, and meaning "there is no
- * one at the other end" all the same.
- *
- * `MaxRetriesPerRequestError` is ioredis flushing the command queue because
- * the socket is dead and the retry budget of this client is spent
- * (`event_handler.js`, `maxRetriesPerRequest: 1` in `lib/redis.ts`). It
- * carries no `code`, and it is the opposite of a server that answered: an
- * operator told `error` would go looking in the log for a Redis that is simply
- * not running.
- */
-const UNREACHABLE_ERROR_NAMES: ReadonlySet<string> = new Set([
-  "MaxRetriesPerRequestError",
-]);
-
-/** The `code` an error carries, when it carries one. */
-function errorCode(err: unknown): string | undefined {
-  if (typeof err !== "object" || err === null || !("code" in err)) {
-    return undefined;
-  }
-  const { code } = err;
-  return typeof code === "string" ? code : undefined;
-}
-
-/**
  * Which kind of dependency failure this was, or `undefined` when it was none.
  *
  * The distinction is the point. `timeout`, `unreachable` and the refusals of a
@@ -189,24 +143,15 @@ export function dependencyFailureCode(
   if (err instanceof DeadlineError) {
     return "timeout";
   }
+  const connection = connectionFailure(err);
+  if (connection !== undefined) {
+    return connection;
+  }
   const code = errorCode(err);
-  if (code !== undefined && UNREACHABLE_CODES.has(code)) {
+  if (code !== undefined && POSTGRES_UNREACHABLE_CODES.has(code)) {
     return "unreachable";
   }
   if (err instanceof Error) {
-    if (err.message === REDIS_COMMAND_TIMEOUT_MESSAGE) {
-      return "timeout";
-    }
-    // The two refusals ioredis raises while the socket is down and the offline
-    // queue is off. They arrive as plain `Error`s with no `code`, so there is
-    // nothing else to recognise them by; the comparison is against the whole
-    // constant string, never a pattern over a message that may carry a host.
-    if (REDIS_DOWN_MESSAGES.has(err.message)) {
-      return "unreachable";
-    }
-    if (UNREACHABLE_ERROR_NAMES.has(err.name)) {
-      return "unreachable";
-    }
     if (err.name === "PostgresError") {
       return postgresFailureCode(code);
     }
@@ -245,7 +190,10 @@ export async function collect<T>(
   log: FastifyBaseLogger,
 ): Promise<Collected<T>> {
   try {
-    return { ok: true, value: await withDeadline(run, DEPENDENCY_TIMEOUT_MS) };
+    return {
+      ok: true,
+      value: await withDeadline(run, DEPENDENCY_TIMEOUT_MS, { unref: false }),
+    };
   } catch (err) {
     const reason = dependencyFailureCode(err);
     if (reason === undefined) {

@@ -80,7 +80,7 @@ Experiment Engine -> Localization/TTS -> Publishing). Один репозито�
 
 - TypeScript strict везде; `any` запрещён во всех формах (замок `S01`), клапан `// any-ok: причина (E?-??)`.
 - Направление зависимостей: `apps -> packages`; `integrations -> core, config`; `db -> core`;
-  `@sf/core` не зависит ни от чего, кроме `zod`.
+  `runtime -> config, core`; `@sf/core` не зависит ни от чего, кроме `zod`.
 - Всё асинхронное - идемпотентные BullMQ-джобы с детерминированным `jobId`, ретраями, DLQ;
   каждый внешний вызов пишет стоимость (units/tokens/USD) в `api_usage_log` до возврата.
 - YouTube Data API: `search.list` **никогда** (100 units). Синк - uploads playlist, снапшоты -

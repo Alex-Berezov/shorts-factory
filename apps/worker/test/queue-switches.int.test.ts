@@ -1,6 +1,7 @@
 import { QUEUE_SWITCHES_KEY, QueueSwitchesSchema } from "@sf/core";
 import type { QueueName } from "@sf/core";
 import { appSettingRepo, closeDb } from "@sf/db";
+import { closeRedis } from "@sf/runtime";
 import { pino } from "pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -10,13 +11,12 @@ import {
   readQueueSwitches,
   startQueueSwitchSync,
 } from "../src/lib/queue-switches.js";
-import { createQueueFactory } from "../src/lib/queues.js";
-import { closeRedis } from "../src/lib/redis.js";
 import {
   obliterateQueues,
   openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  workerQueueFactory,
 } from "./helpers.int.js";
 
 /**
@@ -29,7 +29,7 @@ const QUEUES = ["system.smoke", "system.dlq"] as const;
 
 const db = openTestDb();
 const redis = openTestRedis();
-const queues = createQueueFactory(redis);
+const queues = workerQueueFactory(redis);
 
 /** A logger that keeps its lines, so a warning can be asserted. */
 function recordingLogger() {
@@ -297,7 +297,7 @@ describe("queue switch resync", () => {
   it("refuses to open a queue after the factory was closed", async () => {
     // Where a late tick would land: the cache is empty by then, so a new
     // `Queue` would be created with listeners nobody is going to close.
-    const factory = createQueueFactory(redis);
+    const factory = workerQueueFactory(redis);
     factory.get("system.smoke");
     await factory.close();
 

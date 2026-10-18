@@ -175,6 +175,7 @@ shorts-factory/
 │   ├── db/         # Drizzle-схема, миграции, репозитории, учёт расхода: `createUsageLogger`, `createBudgetGuard` (E0-09)
 │   │   └── test-support/ # общая тестовая обвязка int-наборов: страж стека, фикстура базы (`@sf/db/test-support/*`, только из тестов; ADR-0011)
 │   ├── config/     # типизированный .env (Zod), константы квот/бюджета
+│   ├── runtime/    # каркас процессов api и worker: опции логгера (белый список `serializers.err`), три Redis-клиента, фабрика `Queue`, остановка, дедлайн (E0-12B, ADR-0012); `test-support/` - рекордер pino для тестов
 │   ├── contracts/  # Zod-схемы запросов/ответов API, общие для api и web (E0-07)
 │   ├── api-client/ # типизированный fetch-клиент по контрактам (E0-07)
 │   ├── storage/    # интерфейс Storage + локальная FS (E9-06), позже S3-совместимое
@@ -192,6 +193,7 @@ shorts-factory/
 ```
 
 Правило зависимостей: `apps/* → packages/*`; `integrations → core, config`; `db → core`;
+`runtime → config, core` (плюс `pino`, `ioredis`, `bullmq`; политика джобов, пороги api и домен в него не едут - ADR-0012);
 `contracts → core` (из `@sf/core` в `@sf/contracts` - только реестры значений `as const` и коды ошибок; ни функций, ни Zod-схем домена, ни классов - ADR-0007; сегодня это коды ошибок, `QUEUE_NAMES`, `BUDGET_SCOPE_KEYS` / `BUDGET_MEASURES` / `BUDGET_PERIODS`; плюс `zod`); `api-client → contracts` (и больше
 ни на что: ни `core`, ни `config`, ни `db` — клиент знает форму провода и адрес, а не домен);
 `core` ни от чего не зависит. Скоринг (velocity/acceleration/ranking) — чистые функции в `core`,

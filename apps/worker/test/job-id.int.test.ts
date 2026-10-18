@@ -1,7 +1,7 @@
 import { jobIds } from "@sf/core";
+import { closeRedis } from "@sf/runtime";
 import { Queue } from "bullmq";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { closeRedis } from "../src/lib/redis.js";
 import { obliterateQueues, openTestRedis } from "./helpers.int.js";
 
 /**

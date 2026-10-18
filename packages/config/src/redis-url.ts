@@ -1,4 +1,4 @@
-import { type EnvLike, bootstrapEnv, isEnvValueSet } from "./env-file.js";
+import { type EnvLike, bootstrapEnv, normalizeEnvValue } from "./env-file.js";
 import { EnvSchema } from "./schema.js";
 
 /**
@@ -11,10 +11,7 @@ import { EnvSchema } from "./schema.js";
  * module parses nothing; `@sf/config` itself parses everything on import.
  */
 export function loadRedisUrl(source: EnvLike): string {
-  const value = source.REDIS_URL;
-  return EnvSchema.shape.REDIS_URL.parse(
-    isEnvValueSet(value) ? value.trim() : undefined,
-  );
+  return EnvSchema.shape.REDIS_URL.parse(normalizeEnvValue(source.REDIS_URL));
 }
 
 /**

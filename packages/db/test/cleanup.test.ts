@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { withCleanup } from "../src/cleanup.js";
 
 /**
- * The one "which failure is thrown" policy of `@sf/db`: the migration lock,
- * `runMigrations` and the CLI entry points all go through it.
+ * The one "which failure is thrown" policy of `@sf/db`: the migration lock
+ * (`src/migrate.ts`, inside the package - the barrel does not export it) and
+ * the CLI entry points (`src/cli/run.ts`) go through it.
  */
 describe("withCleanup", () => {
   it("returns the body's result and cleans up once", async () => {

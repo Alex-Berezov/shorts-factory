@@ -1,8 +1,18 @@
+import { createDb } from "@sf/db";
+import type { ClosableRedis } from "@sf/runtime";
+import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import { pino } from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { bootstrap } from "../src/bootstrap.js";
-import { SIGINT_REPEAT_WINDOW_MS } from "../src/lib/shutdown.js";
+import { bootstrap, connectionStages } from "../src/bootstrap.js";
 import type { WorkerRuntime } from "../src/runtime.js";
+
+/**
+ * How long a second Ctrl+C is still the same keypress: the window of
+ * `SIGINT_REPEAT_WINDOW_MS` in packages/runtime/src/shutdown.ts, which the
+ * package keeps to itself - no app reads it. A longer window there turns
+ * the cases that wait this one out red.
+ */
+const SIGINT_REPEAT_WINDOW_MS = 1_000;
 
 /**
  * The order the process starts and stops in. Ctrl+C cannot be delivered to a
@@ -21,7 +31,9 @@ function fakeRuntime(closed: string[]): WorkerRuntime {
       get: () => {
         throw new Error("not used");
       },
-      opened: () => [],
+      use: () => {
+        throw new Error("not used");
+      },
       close: async () => {},
     },
     handled: ["system.smoke"],
@@ -273,5 +285,93 @@ describe("bootstrap", () => {
     expect(runtime).toBeUndefined();
     expect(closed).toEqual(["redis", "db"]);
     expect(codes).toEqual([1]);
+  });
+
+  it("says the workers and the queues were not opened when the start throws", async () => {
+    // `closed target=workers` for a runtime that never existed tells the
+    // operator the worker was up and drained - the opposite of what happened.
+    const { log: recorded, lines } = recordingLogger();
+    const codes: number[] = [];
+
+    await bootstrap({
+      log: recorded,
+      start: async () => {
+        throw new Error("redis is down");
+      },
+      connections: connections([]),
+      subscribe: () => {},
+      exit: (code) => codes.push(code),
+    });
+
+    const targets = (msg: string) =>
+      lines.filter((line) => line.msg === msg).map((line) => line.target);
+    expect(targets("not opened, nothing to close")).toEqual([
+      "workers",
+      "queues",
+    ]);
+    expect(targets("closed")).toEqual(["redis", "db"]);
+    expect(codes).toEqual([1]);
+  });
+});
+
+/**
+ * The connections of the entry point as the stop closes them: the Redis
+ * client goes through the stage of `@sf/runtime`, the same as the api's.
+ */
+describe("connectionStages", () => {
+  /** Nothing listens on port 1; postgres-js does not connect until asked. */
+  const CLOSED_DATABASE_URL =
+    "postgres://sf:sf@127.0.0.1:1/shorts_factory_none";
+
+  /** A client that is connected, and whose QUIT is refused. */
+  function refusingRedis(refusal: Error): ClosableRedis & { calls: string[] } {
+    const calls: string[] = [];
+    return {
+      calls,
+      status: "ready",
+      quit: async () => {
+        calls.push("quit");
+        throw refusal;
+      },
+      disconnect: () => {
+        calls.push("disconnect");
+      },
+    };
+  }
+
+  it("writes a refused QUIT as a disconnect, with the refusal", async () => {
+    // Written as `closed` before: the operator could not tell a QUIT from a
+    // torn socket, and the reason was gone.
+    const refusal = new Error("Connection is closed.");
+    const redis = refusingRedis(refusal);
+    const { log, lines } = recordingLogger();
+    const codes: number[] = [];
+    let signal: (name: string) => void = () => {};
+
+    await bootstrap({
+      log,
+      start: async () => fakeRuntime([]),
+      connections: connectionStages(redis, createDb(CLOSED_DATABASE_URL)),
+      subscribe: (handler) => {
+        signal = handler;
+      },
+      exit: (code) => codes.push(code),
+    });
+    signal("SIGTERM");
+    await vi.waitFor(() => {
+      expect(codes).toEqual([0]);
+    });
+
+    expect(redis.calls).toEqual(["quit", "disconnect"]);
+    expect(lines.filter((line) => line.target === "redis")).toEqual([
+      expect.objectContaining({
+        level: "warn",
+        msg: "closed by disconnect",
+        err: expect.objectContaining({ message: "Connection is closed." }),
+      }),
+    ]);
+    expect(
+      lines.filter((line) => line.target === "db").map((line) => line.msg),
+    ).toEqual(["closed"]);
   });
 });

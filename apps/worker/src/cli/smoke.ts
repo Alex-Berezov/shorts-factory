@@ -1,11 +1,14 @@
 import { env } from "@sf/config";
+import {
+  buildLoggerOptions,
+  closeRedis,
+  createQueueRedis,
+  settleWithin,
+} from "@sf/runtime";
 import { QueueEvents } from "bullmq";
 import { pino } from "pino";
 import { systemSmokeJob } from "../jobs/system-smoke.js";
-import { buildWorkerLoggerOptions } from "../lib/logger.js";
-import { createQueueFactory } from "../lib/queues.js";
-import { closeRedis, createRedis } from "../lib/redis.js";
-import { settleWithin } from "../lib/settle-within.js";
+import { createJobQueueFactory } from "../lib/job-policy.js";
 import { runSmoke } from "./smoke-run.js";
 
 /**
@@ -21,18 +24,18 @@ import { runSmoke } from "./smoke-run.js";
 /** The connections get this long to go away; the verdict is already out. */
 const CLOSE_DEADLINE_MS = 5_000;
 
-const log = pino(buildWorkerLoggerOptions(env));
+const log = pino(buildLoggerOptions(env));
 
 // Reported, not swallowed: a Redis that refuses the connection is the most
 // likely reason this command has nothing to say, and the client keeps the
-// commands queued instead of failing them (see `lib/redis.ts`). The logger is
+// commands queued instead of failing them (see `createQueueRedis`). The logger is
 // the whole wiring - the same one the worker entry point gets, rather than a
 // second copy of it that forgets the reconnect.
-const redis = createRedis(env.REDIS_URL, { log });
+const redis = createQueueRedis(env.REDIS_URL, { log });
 // Its own connection: `QueueEvents` blocks on the stream, and a blocked client
 // could not add the job below.
-const eventsConnection = createRedis(env.REDIS_URL, { log });
-const queues = createQueueFactory(redis);
+const eventsConnection = createQueueRedis(env.REDIS_URL, { log });
+const queues = createJobQueueFactory(redis, log);
 const queue = queues.get("system.smoke");
 const events = new QueueEvents("system.smoke", {
   connection: eventsConnection,
@@ -56,15 +59,21 @@ if (outcome.ok) {
 }
 
 const closed = await settleWithin(
-  (async () => {
-    await events.close();
-    await queues.close();
-    await closeRedis(redis);
-    await closeRedis(eventsConnection);
-    return true;
-  })().catch(() => false),
+  async () => {
+    try {
+      await events.close();
+      await queues.close();
+      await closeRedis(redis);
+      await closeRedis(eventsConnection);
+      return true;
+    } catch {
+      return false;
+    }
+  },
   CLOSE_DEADLINE_MS,
   false,
+  // Live: the exit code below waits for this verdict.
+  { unref: false },
 );
 if (!closed) {
   log.warn(

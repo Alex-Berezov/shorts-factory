@@ -1,6 +1,41 @@
+import { type Db, closeDb } from "@sf/db";
+import {
+  type ClosableRedis,
+  type RepeatedSigint,
+  type ShutdownStage,
+  createShutdownHandler,
+  redisStage,
+  stageOf,
+  subscribeToSignals,
+} from "@sf/runtime";
 import type { Logger } from "pino";
-import { type ShutdownStage, createShutdownHandler } from "./lib/shutdown.js";
 import type { WorkerRuntime } from "./runtime.js";
+
+/**
+ * How long the stop gets before the process is torn down anyway. Longer than
+ * the api's ten seconds: the first stage waits for jobs that are running, and
+ * a job is allowed to take longer than a request.
+ *
+ * Whoever sent the signal has a deadline of its own, and it is shorter than
+ * this one by default: `docker stop` - and Compose with it - sends SIGKILL ten
+ * seconds after the signal unless the service declares `stop_grace_period`.
+ * So this number only holds where that is declared, and E0-11 declares it
+ * (`stop_grace_period: 30s` on the worker service, docs/30_E0_TASKS.md). Under
+ * a shorter grace the container is killed mid-drain and the exit code is not
+ * ours: a job in flight comes back through the stalled scan instead.
+ */
+const SHUTDOWN_TIMEOUT_MS = 25_000;
+
+/**
+ * A second Ctrl+C leaves at once: the operator does not want to wait for the
+ * drain, and the jobs it was running come back to the queue as stalled, which
+ * is safe because every job is idempotent. Compose only ever sends SIGTERM,
+ * so the graceful stop of a container is not affected.
+ */
+const REPEATED_SIGINT: RepeatedSigint = {
+  hint: "press Ctrl+C again to exit now; unfinished jobs will be retried",
+  forcedMessage: "forced exit, active jobs return as stalled",
+};
 
 /**
  * The order the worker process starts and stops in, without the connections
@@ -29,17 +64,28 @@ export interface BootstrapOptions {
   subscribe?(handler: (signal: string) => void): void;
   /** Seam for tests; the process really does exit in production. */
   exit?(code: number): void;
-  /** Deadline of the whole stop; the default lives in `lib/shutdown.ts`. */
+  /** Deadline of the whole stop; `SHUTDOWN_TIMEOUT_MS` when left out. */
   timeoutMs?: number;
 }
 
-/** SIGINT is Ctrl+C in a console, SIGTERM is what an orchestrator sends. */
-function subscribeToSignals(handler: (signal: string) => void): void {
-  for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.on(signal, () => {
-      handler(signal);
-    });
-  }
+/**
+ * The connections of the entry point as the last stages of the stop, in
+ * closing order: Redis, then the database. Redis goes through `redisStage` of
+ * `@sf/runtime`, the same stage as the api's: a QUIT that was refused, or a
+ * client torn down because it was not connected, is a `warn` that says so -
+ * with the refusal - rather than a `closed` that hides it.
+ */
+export function connectionStages(
+  redis: ClosableRedis,
+  db: Db,
+): ShutdownStage[] {
+  return [
+    redisStage(() => redis),
+    {
+      name: "db",
+      close: () => closeDb(db),
+    },
+  ];
 }
 
 /**
@@ -61,26 +107,31 @@ export async function bootstrap(
   let started: Promise<WorkerRuntime | undefined> = Promise.resolve(undefined);
 
   const shutdown = createShutdownHandler({
-    stages: [
-      {
-        name: "workers",
-        close: async () => {
-          await (await started)?.closeWorkers();
-        },
-      },
-      {
-        name: "queues",
-        close: async () => {
-          await (await started)?.closeQueues();
-        },
-      },
+    // In this order, and the order is the contract: workers (each one
+    // draining its active jobs), then the queues and their event streams, then
+    // the connections. A connection closed while a job is still running loses
+    // that job, and closing Redis before the workers takes away the socket
+    // they need to release their locks.
+    // A start that failed has no runtime: both stages say "not opened" then,
+    // not `closed` for workers and queues that never existed.
+    plan: [
+      stageOf(
+        "workers",
+        () => started,
+        (runtime) => runtime.closeWorkers(),
+      ),
+      stageOf(
+        "queues",
+        () => started,
+        (runtime) => runtime.closeQueues(),
+      ),
       ...options.connections,
     ],
     log: options.log,
+    startedMessage: "shutdown started, draining active jobs",
+    repeatedSigint: REPEATED_SIGINT,
+    timeoutMs: options.timeoutMs ?? SHUTDOWN_TIMEOUT_MS,
     ...(options.exit === undefined ? {} : { exit: options.exit }),
-    ...(options.timeoutMs === undefined
-      ? {}
-      : { timeoutMs: options.timeoutMs }),
   });
 
   const subscribe = options.subscribe ?? subscribeToSignals;

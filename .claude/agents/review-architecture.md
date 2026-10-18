@@ -19,7 +19,7 @@ model: fable
 
 1. `.claude/qa-index.md`; признак совпал - полная запись по номеру.
 2. `docs/10_SYSTEM_DESIGN.md` §6 (структура и правило зависимостей: `apps → packages`;
-   `integrations → core, config`; `db → core`; `core` ни от чего) и §1 (модульный монолит,
+   `integrations → core, config`; `db → core`; `runtime → config, core`; `core` ни от чего) и §1 (модульный монолит,
    границы модулей ради будущего выделения).
 3. Документ эпика `docs/3x_Ex_TASKS.md` - «Архитектурные решения»: план уже принят, и
    отклонение от него без записи в `docs/DECISIONS.md` - находка.

@@ -10,7 +10,9 @@
  *    Postgres and Redis - there for the host's `pnpm dev` - bind loopback only.
  * 2. api, worker and web run with NODE_ENV=production (a missing value is
  *    validated as production anyway, but the stack must not depend on that).
- * 3. The worker gets at least 30 s to stop - its drain has a 25 s deadline.
+ * 3. The worker gets at least 30 s to stop - its drain has a 25 s deadline -
+ *    and api at least 15 s - its stop has a 10 s deadline and the log a 1 s
+ *    flush after it. Docker's default 10 s would SIGKILL either mid-stop.
  * 4. api and worker carry a healthcheck; the worker's runs
  *    src/cli/healthcheck.ts (the heartbeat rule of /system) - any other
  *    command, `true` included, says nothing about a worker that stopped
@@ -72,7 +74,15 @@ const PUBLISHED = new Set(["web"]);
 const UNPUBLISHED = new Set(["api", "worker", "migrate"]);
 /** Anything else (Postgres, Redis for `pnpm dev`) may bind loopback only. */
 const LOOPBACK = new Set(["127.0.0.1", "::1"]);
-const MIN_WORKER_GRACE_SEC = 30;
+/**
+ * The least `stop_grace_period` of a service whose stop has a deadline of
+ * its own: the deadline (SHUTDOWN_TIMEOUT_MS of apps/worker/src/bootstrap.ts,
+ * 25 s; of apps/api/src/compose-app.ts, 10 s), the flush of the log before the
+ * exit (FLUSH_TIMEOUT_MS of packages/runtime/src/shutdown.ts, 1 s) and room
+ * for the process to leave. Below it the exit code and the last lines of the
+ * stop are Docker's SIGKILL, not the service's.
+ */
+const MIN_GRACE_SEC = { worker: 30, api: 15 };
 /**
  * The worker's healthcheck: the heartbeat check, run by node - the whole
  * command, so nothing around it (`|| exit 0`, `; true`, a `#` comment) can
@@ -347,13 +357,14 @@ export function checkCompose(config, project) {
     }
   }
 
-  // 3. worker grace period
-  const worker = services.worker;
-  if (worker !== undefined) {
-    const grace = durationSec(worker.stop_grace_period);
-    if (!(grace >= MIN_WORKER_GRACE_SEC)) {
+  // 3. grace periods of the services that stop against a deadline
+  for (const [name, least] of Object.entries(MIN_GRACE_SEC)) {
+    const service = services[name];
+    if (service === undefined) continue;
+    const grace = durationSec(service.stop_grace_period);
+    if (!(grace >= least)) {
       problems.push(
-        `worker: stop_grace_period ${worker.stop_grace_period ?? "(default 10s)"} is below ${MIN_WORKER_GRACE_SEC}s`,
+        `${name}: stop_grace_period ${service.stop_grace_period ?? "(default 10s)"} is below ${least}s`,
       );
     }
   }

@@ -27,6 +27,19 @@ export function isEnvValueSet(value: string | undefined): value is string {
   return value !== undefined && value.trim() !== "";
 }
 
+/**
+ * The value a config field gets from a raw one: trimmed when it is set, and
+ * absent when it is not (`isEnvValueSet`). One function for every reader of
+ * the environment - `loadEnv` for the whole config, `loadRedisUrl` for the
+ * healthcheck - so that a value with a stray space or a blank one cannot mean
+ * one thing to the worker and another to the check that judges it.
+ */
+export function normalizeEnvValue(
+  value: string | undefined,
+): string | undefined {
+  return isEnvValueSet(value) ? value.trim() : undefined;
+}
+
 function isFileNotFound(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }

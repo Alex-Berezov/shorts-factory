@@ -1,10 +1,13 @@
+import {
+  recordingLogger,
+  silentLogger,
+} from "@sf/runtime/test-support/recording-logger";
 import { describe, expect, it } from "vitest";
 import {
   type SmokeEvents,
   type SmokeQueue,
   runSmoke,
 } from "../src/cli/smoke-run.js";
-import { recordingLogger, silentLogger } from "./recording-logger.js";
 
 /**
  * The command an operator runs when they want to know whether the pipeline is

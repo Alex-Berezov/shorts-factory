@@ -1,9 +1,10 @@
 import { env } from "@sf/config";
 import { closeDb, createBudgetGuard, createUsageLogger } from "@sf/db";
+import { closeRedis } from "@sf/runtime";
+import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { defineJob } from "../src/lib/define-job.js";
-import { closeRedis } from "../src/lib/redis.js";
 import { type WorkerRuntime, startWorkerRuntime } from "../src/runtime.js";
 import {
   obliterateQueues,
@@ -12,7 +13,6 @@ import {
   seedQueueSwitches,
   waitFor,
 } from "./helpers.int.js";
-import { silentLogger } from "./recording-logger.js";
 
 /**
  * Both halves of the E0-09 acceptance, against the real runtime.

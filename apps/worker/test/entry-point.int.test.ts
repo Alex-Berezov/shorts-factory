@@ -2,6 +2,7 @@ import { fork } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { closeDb } from "@sf/db";
+import { closeRedis } from "@sf/runtime";
 import { Queue } from "bullmq";
 import {
   afterAll,
@@ -14,8 +15,6 @@ import {
 } from "vitest";
 import { z } from "zod";
 import { systemSmokeJob } from "../src/jobs/system-smoke.js";
-import { closeRedis } from "../src/lib/redis.js";
-import { SIGINT_REPEAT_WINDOW_MS } from "../src/lib/shutdown.js";
 import { DEV_COMMAND } from "./dev-command.js";
 import {
   deleteSmokeUsage,
@@ -25,6 +24,14 @@ import {
   seedQueueSwitches,
   waitFor,
 } from "./helpers.int.js";
+
+/**
+ * How long a second Ctrl+C is still the same keypress: the window of
+ * `SIGINT_REPEAT_WINDOW_MS` in packages/runtime/src/shutdown.ts, which the
+ * package keeps to itself - no app reads it. A longer window there turns
+ * the cases that wait this one out red.
+ */
+const SIGINT_REPEAT_WINDOW_MS = 1_000;
 
 /**
  * The DoD of E0-08 as a run: a real worker process, started the way

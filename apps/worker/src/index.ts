@@ -1,9 +1,8 @@
 import { env } from "@sf/config";
-import { closeDb, createDb } from "@sf/db";
+import { createDb } from "@sf/db";
+import { buildLoggerOptions, createQueueRedis } from "@sf/runtime";
 import { pino } from "pino";
-import { bootstrap } from "./bootstrap.js";
-import { buildWorkerLoggerOptions } from "./lib/logger.js";
-import { closeRedis, createRedis } from "./lib/redis.js";
+import { bootstrap, connectionStages } from "./bootstrap.js";
 import { startWorkerRuntime } from "./runtime.js";
 
 /**
@@ -13,18 +12,15 @@ import { startWorkerRuntime } from "./runtime.js";
  * `system.smoke`, every other queue of the registry waits for the epic that
  * fills it in.
  */
-const log = pino(buildWorkerLoggerOptions(env));
+const log = pino(buildLoggerOptions(env));
 const db = createDb(env.DATABASE_URL);
 
 // The logger is what turns on the health reporting of the client: an outage
 // at a level that fades, a reconnect that says the next one is news again.
-const redis = createRedis(env.REDIS_URL, { log });
+const redis = createQueueRedis(env.REDIS_URL, { log });
 
 await bootstrap({
   log,
   start: () => startWorkerRuntime({ env, db, redis, log }),
-  connections: [
-    { name: "redis", close: () => closeRedis(redis) },
-    { name: "db", close: () => closeDb(db) },
-  ],
+  connections: connectionStages(redis, db),
 });

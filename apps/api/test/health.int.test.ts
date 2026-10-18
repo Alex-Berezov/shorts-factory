@@ -1,10 +1,11 @@
 import { HealthResponseSchema } from "@sf/contracts";
 import { closeDb } from "@sf/db";
+import { createRequestRedis } from "@sf/runtime";
 import type { Redis } from "ioredis";
 import { afterEach, describe, expect, it } from "vitest";
 import { type AppInstance, buildApp } from "../src/app.js";
+import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
 import { createHealthProbes } from "../src/lib/health.js";
-import { createRedis } from "../src/lib/redis.js";
 import { openTestDb, openTestRedis } from "./helpers.int.js";
 import {
   EMPTY_QUEUES,
@@ -20,7 +21,7 @@ import {
  * dead one is reported quickly instead of hanging.
  *
  * The live clients come from `helpers.int.ts` rather than from `createDb`
- * and `createRedis` here: the run is already behind the entry check of the
+ * and `createRequestRedis` here: the run is already behind the entry check of the
  * preset, and `openTestDb`/`openTestRedis` check their URL once more, so the
  * next integration file of the api - written by copying this one - inherits
  * the guard instead of a way around it.
@@ -116,8 +117,12 @@ describe("GET /health against live services", () => {
   it("reports a dead Redis quickly instead of waiting on retries", async () => {
     // The client defaults would queue the ping offline and reconnect forever,
     // so this case is the proof that `enableOfflineQueue` and the timeouts of
-    // `createRedis` hold on a real socket.
-    const { app } = startApp(createRedis(CLOSED_REDIS_URL));
+    // `createRequestRedis` hold on a real socket.
+    const { app } = startApp(
+      createRequestRedis(CLOSED_REDIS_URL, {
+        commandTimeoutMs: DEPENDENCY_TIMEOUT_MS,
+      }),
+    );
     await app.ready();
 
     const startedAt = Date.now();

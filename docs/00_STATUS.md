@@ -4,32 +4,34 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-17. **Не �
 
 ## Сводка
 
-- **Прогресс:** `████░░░░░░░░░░░░░░░░░░░░░░░░░░` 19/133 задач, 16.7 / 148.7 оценочных дней.
+- **Прогресс:** `████░░░░░░░░░░░░░░░░░░░░░░░░░░` 19/135 задач, 16.7 / 151.7 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** ничего — возьмите задачу из «Следующие»
+- **В работе:** [E0-12B](TECH_DEBT.md#e0-12b-общий-пакет-инфраструктуры-apiworker-logger-redact-redis-shutdown-фабрика-queue-примитив-дедлайна-чистка-публичных-экспортов) Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов
 - **Заблокировано:** нет
 
 ## Сейчас в работе
 
-_Нет задач в работе._
+| Задача | Название | Оценка | Начата |
+|---|---|---|---|
+| [E0-12B](TECH_DEBT.md#e0-12b-общий-пакет-инфраструктуры-apiworker-logger-redact-redis-shutdown-фабрика-queue-примитив-дедлайна-чистка-публичных-экспортов) | Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов | 1 д | 2026-10-17 |
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
 | Задача | Название | Оценка | Эпик |
 |---|---|---|---|
-| [E0-12B](TECH_DEBT.md#e0-12b-общий-пакет-инфраструктуры-apiworker-logger-redact-redis-shutdown-фабрика-queue-примитив-дедлайна-чистка-публичных-экспортов) | Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов | 1 д | E0 |
 | [E0-12C](TECH_DEBT.md#e0-12c-гейт-compose-и-cli-migrate-таблица-правил-обязательные-postgresredis-юнит-check-compose-шаги-и-классы-ошибок-migrate-единый-appdockerfile-exec-форма-cmd) | Гейт compose и CLI migrate: таблица правил, обязательные postgres/redis, юнит check-compose, шаги и классы ошибок migrate, единый app.Dockerfile, exec-форма CMD | 1 д | E0 |
 | [E0-12D](TECH_DEBT.md#e0-12d-обвязка-harness-selftest-без-vm-u3-экспорт-selectgates-замки-на-форму-роутов-и-направление-зависимостей-contractsapi-client) | Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client | 0.5 д | E0 |
 | [E0-12E](TECH_DEBT.md#e0-12e-чистка-тестов-по-строкам-дисциплины-configcontractsapi-client-int-наборы-sfdb-appsapi-п3-e0-12a-поздние-строки-чистки) | Чистка тестов по строкам дисциплины: config/contracts/api-client, int-наборы @sf/db, apps/api (п.3 E0-12A + поздние строки чистки) | 1.5 д | E0 |
 | [E0-12F](TECH_DEBT.md#e0-12f-корневой-vitest-проект-scripts-переезд-репо-тестов-из-appsworker-jsdoc-типы-scripts-входы-turbo-с-пробой-cache-miss-кэш-turbo-в-ci) | Корневой vitest-проект scripts/**: переезд репо-тестов из apps/worker, JSDoc-типы scripts, входы turbo с пробой cache miss, кэш .turbo в CI | 1.5 д | E0 |
+| [E12-01](42_E12_TASKS.md#e12-01-sfcore-схема-журнала-и-csv-парсер) | `@sf/core`: схема журнала и CSV-парсер | 0.5 д | E12 |
 
-Взять в работу: `node scripts/tasks.mjs start E0-12B`
+Взять в работу: `node scripts/tasks.mjs start E0-12C`
 
 ## Прогресс по эпикам
 
 | | Эпик | Задачи | Дни (сделано / всего) | Документ |
 |---|---|---|---|---|
-| 🔄 | **E0** Каркас проекта и инфраструктура | `██████████░░` 19/24 | 16.7 / 22.2 | [30_E0_TASKS.md](30_E0_TASKS.md) |
+| 🔄 | **E0** Каркас проекта и инфраструктура | `█████████░░░` 19/26 | 16.7 / 25.2 | [30_E0_TASKS.md](30_E0_TASKS.md) |
 | ⬜ | **E12** Импорт ручной фазы (Phase 0) | `░░░░░░░░░░░░` 0/5 | 0 / 4 | [42_E12_TASKS.md](42_E12_TASKS.md) |
 | ⬜ | **E1** Source Radar | `░░░░░░░░░░░░` 0/12 | 0 / 15.5 | [31_E1_TASKS.md](31_E1_TASKS.md) |
 | ⬜ | **E2** Video Intelligence / Content DNA | `░░░░░░░░░░░░` 0/10 | 0 / 11 | [32_E2_TASKS.md](32_E2_TASKS.md) |
@@ -70,11 +72,13 @@ _Нет задач в работе._
 | ✅ | [E0-11C](TECH_DEBT.md#e0-11c-workercore-пульс-воркера-строгий-iso-допуск-штамп-прежнего-процесса-healthcheck-функцией-второй-sigint) | worker/core: пульс воркера (строгий ISO, допуск, штамп прежнего процесса), healthcheck функцией, второй SIGINT | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-17 |
 | ✅ | [E0-12](30_E0_TASKS.md#e0-12-ci-сервисы-postgresredis-кэш-интеграционные-тесты-сборка-образов) | CI: сервисы Postgres/Redis, кэш, интеграционные тесты, сборка образов | 0.5 д | ✅E0-11 | 2026-10-10 | 2026-10-10 |
 | ✅ | [E0-12A](TECH_DEBT.md#e0-12a-общий-пресет-vitest-и-test-support-sfdb-фикстура-int-наборов-общий-страж-стека-чистка-тестовых-хелперов-корневой-vitest-проект-scripts) | Общий пресет vitest и test-support @sf/db: фикстура int-наборов, общий страж стека, чистка тестовых хелперов, корневой vitest-проект scripts/** | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-17 |
-| ⬜ | [E0-12B](TECH_DEBT.md#e0-12b-общий-пакет-инфраструктуры-apiworker-logger-redact-redis-shutdown-фабрика-queue-примитив-дедлайна-чистка-публичных-экспортов) | Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов | 1 д | ✅E0-13 |  |  |
+| 🔄 | [E0-12B](TECH_DEBT.md#e0-12b-общий-пакет-инфраструктуры-apiworker-logger-redact-redis-shutdown-фабрика-queue-примитив-дедлайна-чистка-публичных-экспортов) | Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов | 1 д | ✅E0-13 | 2026-10-17 |  |
 | ⬜ | [E0-12C](TECH_DEBT.md#e0-12c-гейт-compose-и-cli-migrate-таблица-правил-обязательные-postgresredis-юнит-check-compose-шаги-и-классы-ошибок-migrate-единый-appdockerfile-exec-форма-cmd) | Гейт compose и CLI migrate: таблица правил, обязательные postgres/redis, юнит check-compose, шаги и классы ошибок migrate, единый app.Dockerfile, exec-форма CMD | 1 д | ✅E0-13 ✅E0-12A |  |  |
 | ⬜ | [E0-12D](TECH_DEBT.md#e0-12d-обвязка-harness-selftest-без-vm-u3-экспорт-selectgates-замки-на-форму-роутов-и-направление-зависимостей-contractsapi-client) | Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client | 0.5 д | ✅E0-13 |  |  |
 | ⬜ | [E0-12E](TECH_DEBT.md#e0-12e-чистка-тестов-по-строкам-дисциплины-configcontractsapi-client-int-наборы-sfdb-appsapi-п3-e0-12a-поздние-строки-чистки) | Чистка тестов по строкам дисциплины: config/contracts/api-client, int-наборы @sf/db, apps/api (п.3 E0-12A + поздние строки чистки) | 1.5 д | ✅E0-13 ✅E0-12A |  |  |
 | ⬜ | [E0-12F](TECH_DEBT.md#e0-12f-корневой-vitest-проект-scripts-переезд-репо-тестов-из-appsworker-jsdoc-типы-scripts-входы-turbo-с-пробой-cache-miss-кэш-turbo-в-ci) | Корневой vitest-проект scripts/**: переезд репо-тестов из apps/worker, JSDoc-типы scripts, входы turbo с пробой cache miss, кэш .turbo в CI | 1.5 д | ✅E0-13 ✅E0-12A |  |  |
+| ⬜ | [E0-12G](TECH_DEBT.md#e0-12g-apiworker-журнал-запросов-разбор-ошибок-причины-healthcheck) | api/worker: журнал запросов, разбор ошибок, причины healthcheck | 1.5 д | ✅E0-13 🔄E0-12B |  |  |
+| ⬜ | [E0-12H](TECH_DEBT.md#e0-12h-postgres-классы-sqlstate-срокотмена-запроса-пробы-closedb{-timeout-}) | Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout }) | 1.5 д | ✅E0-13 🔄E0-12B |  |  |
 | ✅ | [E0-13](30_E0_TASKS.md#e0-13-документация-разработчика-adr-закрытие-эпика) | Документация разработчика, ADR, закрытие эпика | 0.5 д | ✅E0-12 | 2026-10-10 | 2026-10-10 |
 
 ### E12. Импорт ручной фазы (Phase 0)

@@ -21,12 +21,21 @@
       ]
     },
     "//#typecheck:repo": {},
-    "//#test:repo": {},
+    "//#test:repo": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/packages/config/src/schema.ts"
+      ]
+    },
     "test:int": {
       "dependsOn": ["^test:int"],
       "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/vitest.preset.ts"],
       "cache": false
     },
-    "dev": { "cache": false, "persistent": true }
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "passThroughEnv": ["APP_VERSION", "GIT_COMMIT"]
+    }
   }
 }

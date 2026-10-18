@@ -1,5 +1,11 @@
 import type { QueueName } from "@sf/core";
+import {
+  type QueueFactory,
+  type RuntimeLogger,
+  createQueueFactory,
+} from "@sf/runtime";
 import type { JobsOptions } from "bullmq";
+import type { Redis } from "ioredis";
 
 /**
  * How a job of a given queue is run: the retry policy every job inherits and
@@ -28,6 +34,24 @@ export const DEFAULT_JOB_OPTIONS: JobsOptions = {
   removeOnComplete: { count: 1_000 },
   removeOnFail: { count: 1_000 },
 };
+
+/**
+ * The queues every process of this app adds jobs through - the runtime, the
+ * smoke command, the integration fixtures: the factory of `@sf/runtime` as a
+ * writer, with the policy above. One function, so that an option added to the
+ * policy of the queues reaches all three instead of the one it was added in.
+ */
+export function createJobQueueFactory(
+  connection: Redis,
+  log: RuntimeLogger,
+): QueueFactory {
+  return createQueueFactory({
+    connection,
+    log,
+    defaultJobOptions: DEFAULT_JOB_OPTIONS,
+    readOnly: false,
+  });
+}
 
 /**
  * Upper bound on how many jobs of one queue may run at once, whatever

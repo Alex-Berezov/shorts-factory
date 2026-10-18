@@ -881,6 +881,76 @@ check('standards: замечание на any и console в новом файл�
   }
 });
 /**
+ * @sf/runtime (E0-12B, ADR-0012) - код процессов api и worker: console и process.env в его src
+ * ловятся так же, как в apps; тесты пакета не ловятся (L-008: отказ и пропуск на боевом пути).
+ */
+check('standards: console и process.env в packages/runtime/src пойманы, в его test - нет', () => {
+  const srcDir = path.join(ROOT, 'packages/runtime/src');
+  const testDir = path.join(ROOT, 'packages/runtime/test');
+  if (!fs.existsSync(srcDir) || !fs.existsSync(testDir)) return 'нет packages/runtime/src или packages/runtime/test';
+  const body = 'export const u = process.env.SF_X;\nconsole.log(u);\n';
+  const bad = path.join(srcDir, 'zz_selftest_bad.ts');
+  const good = path.join(testDir, 'zz_selftest.test.ts');
+  fs.writeFileSync(bad, body);
+  fs.writeFileSync(good, body);
+  try {
+    const r1 = probe('standards.js', { tool_input: { file_path: bad } }, CWD);
+    const r2 = probe('standards.js', { tool_input: { file_path: good } }, CWD);
+    if (r1.code !== 2 || !/S03/.test(r1.err) || !/S05/.test(r1.err)) return 'console/process.env в src не пойманы: код ' + r1.code + ' ' + r1.err.slice(0, 160);
+    if (/S03|S05/.test(r2.err)) return 'тест пакета получил S03/S05: ' + r2.err.slice(0, 160);
+    return true;
+  } finally {
+    fs.unlinkSync(bad);
+    fs.unlinkSync(good);
+  }
+});
+/**
+ * S11 (E0-12B): web не тянет серверные пакеты - ни корнем, ни подпутём (`@sf/runtime/redis` грузит
+ * ioredis, `@sf/config/redis-url` читает REDIS_URL, `@sf/db/test-support/*` - Postgres), ни побочным
+ * `import "@sf/..."`, ни реэкспортом. Пропуск - на том, чем web пользуется: `@sf/config/server`
+ * (помечен server-only), `@sf/api-client/server`, `@sf/contracts`, побочный `import "server-only"`
+ * (L-008: отказ каждой формы и пропуск на боевом пути).
+ */
+check('standards: серверные пакеты в apps/web/src (корень, подпуть, побочный импорт) пойманы S11, вход web - нет', () => {
+  const webDir = path.join(ROOT, 'apps/web/src/lib');
+  if (!fs.existsSync(webDir)) return 'нет apps/web/src/lib';
+  const refused = [
+    'import { withDeadline } from "@sf/runtime";',
+    "import { createProbeRedis } from '@sf/runtime/redis';",
+    'import { createDb } from "@sf/db";',
+    'import { withFixture } from "@sf/db/test-support/fixture";',
+    'import type { Env } from "@sf/config";',
+    'import { loadRedisUrl } from "@sf/config/redis-url";',
+    'import { REPO_ROOT } from "@sf/config/paths";',
+    'import { createClient } from "@sf/youtube";',
+    'import "@sf/db";',
+    "import '@sf/config/redis-url';",
+    'export { createDb } from "@sf/db";',
+  ];
+  const allowed = [
+    'import { env } from "@sf/config/server";',
+    'import { createServerClient } from "@sf/api-client/server";',
+    'import { BuildInfoSchema } from "@sf/contracts";',
+    'import "server-only";',
+  ];
+  const file = path.join(webDir, 'zz_selftest_s11.ts');
+  try {
+    for (const line of refused) {
+      fs.writeFileSync(file, line + '\nexport const x = 1;\n');
+      const r = probe('standards.js', { tool_input: { file_path: file } }, CWD);
+      if (r.code !== 2 || !/S11/.test(r.err)) return 'не пойман S11: ' + line + ' - код ' + r.code + ' ' + r.err.slice(0, 160);
+    }
+    for (const line of allowed) {
+      fs.writeFileSync(file, line + '\nexport const x = 1;\n');
+      const r = probe('standards.js', { tool_input: { file_path: file } }, CWD);
+      if (/S11/.test(r.err)) return 'вход web получил S11: ' + line + ' - ' + r.err.slice(0, 160);
+    }
+    return true;
+  } finally {
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  }
+});
+/**
  * Пробы Stop- и UserPromptSubmit-хуков. Состояние - L.statePath(), то есть временная папка
  * прогона (SF_HOOK_STATE_DIR); помощник кладёт туда стартовое состояние пробы, а транскрипт -
  * в свою временную папку, которую убирает после пробы.

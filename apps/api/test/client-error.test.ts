@@ -1,5 +1,6 @@
 import { Socket } from "node:net";
 import { REQUEST_ID_HEADER } from "@sf/contracts";
+import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import type { ConnectionError } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AppInstance } from "../src/app.js";
@@ -8,7 +9,6 @@ import {
   answerClientError,
 } from "../src/plugins/error-handler.js";
 import { buildTestApp, parseErrorBody } from "./helpers.js";
-import { recordingLogger } from "./recording-logger.js";
 
 /** Bigger than Node's default `maxHeaderSize` (16 KB). */
 const OVERSIZED_HEADER_VALUE = "a".repeat(20 * 1024);
@@ -108,7 +108,7 @@ describe("a request Node refuses on the socket", () => {
     const entries = recorder.entries();
     expect(entries).toEqual([
       expect.objectContaining({
-        level: 30,
+        level: "info",
         msg: "request rejected",
         status: 431,
         code: "REQUEST_HEADER_FIELDS_TOO_LARGE",
@@ -265,7 +265,7 @@ describe("answerClientError", () => {
     expect(res.headers[REQUEST_ID_HEADER]).toBe(error.requestId);
     expect(entries()).toEqual([
       expect.objectContaining({
-        level: 30,
+        level: "info",
         msg: "request rejected",
         status: 408,
         code: "REQUEST_TIMEOUT",
@@ -352,7 +352,7 @@ describe("answerClientError", () => {
     expect(socket.destroyCalls).toEqual([err]);
     expect(entries()).toEqual([
       expect.objectContaining({
-        level: 30,
+        level: "info",
         msg: "request rejected",
         status: 408,
         code: "REQUEST_TIMEOUT",
@@ -374,7 +374,7 @@ describe("answerClientError", () => {
     expect(socket.destroyCalls).toEqual([err]);
     expect(entries()).toEqual([
       expect.objectContaining({
-        level: 30,
+        level: "info",
         msg: "request rejected",
         status: 431,
         code: "REQUEST_HEADER_FIELDS_TOO_LARGE",

@@ -27,6 +27,7 @@
         "apps/worker/src/**",
         "packages/core/src/**",
         "packages/db/src/**",
+        "packages/runtime/src/**",
         "packages/integrations/*/src/**",
         "packages/contracts/src/**",
         "packages/api-client/src/**",
@@ -53,6 +54,7 @@
         "apps/web/src/**",
         "packages/core/src/**",
         "packages/db/src/**",
+        "packages/runtime/src/**",
         "packages/integrations/*/src/**",
         "packages/contracts/src/**",
         "packages/api-client/src/**",
@@ -103,9 +105,9 @@
       "id": "S11",
       "kind": "line",
       "files": ["apps/web/src/**"],
-      "pattern": "from\\s+['\"]@sf/(db|config|youtube|gemini|tts)['\"]",
+      "pattern": "(?:from|import)\\s+['\"]@sf/(?:(?:db|youtube|gemini|tts|runtime)(?:/[^'\"]*)?|config(?:/(?!server['\"])[^'\"]*)?)['\"]",
       "skipIf": "^\\s*(//|\\*)|server-only",
-      "message": "Web не импортирует db/config/интеграции напрямую: секреты и соединения не должны попадать в бандл. Web ходит в api через @sf/api-client и @sf/contracts; серверный код помечается import 'server-only'."
+      "message": "Web не импортирует серверные пакеты - db, config, runtime, интеграции - ни корнем, ни подпутём (@sf/config/redis-url, @sf/db/test-support/*, @sf/runtime/redis), ни побочным import '@sf/...': секреты и соединения не должны попадать в бандл. Единственный серверный вход web - @sf/config/server (помечен server-only). Web ходит в api через @sf/api-client и @sf/contracts; серверный код помечается import 'server-only'."
     },
     {
       "id": "S12",
@@ -138,7 +140,7 @@
     {
       "id": "test:int",
       "cmd": "pnpm test:int",
-      "when": "glob:{apps/api/**,apps/worker/**,packages/db/**,packages/config/**,packages/core/**,packages/contracts/**,packages/integrations/**,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,turbo.json,tsconfig*.json,vitest.preset.ts,.env.test}",
+      "when": "glob:{apps/api/**,apps/worker/**,packages/db/**,packages/runtime/**,packages/config/**,packages/core/**,packages/contracts/**,packages/integrations/**,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,turbo.json,tsconfig*.json,vitest.preset.ts,.env.test}",
       "note": "интеграционные тесты apps/api, apps/worker, packages/db (turbo run test:int --concurrency=1, по одному пакету) против Postgres/Redis из infra/docker-compose.yml; без поднятого Compose гейт честно красный (ADR-0010, docs/60_HARNESS.md, «Известные ограничения») - это стоп-условие, а не повод выключать гейт; красный по таймауту хука на холодном стеке (Hook timed out) - перезапуск при поднятом стеке (docs/TECH_DEBT.md, E0-02A; в E0-12A не воспроизведён за 4 холодных прогона). Выбирается на графе int-пакетов + корневые конфиги + .env.test (только корень): пакеты со scripts['test:int'], их транзитивные workspace-зависимости (в т.ч. @sf/config/vitest/setup), корневые манифесты и конфиги, корневой vitest.preset.ts (его вызывает каждый vitest.int.config.ts, ADR-0011), фикстура testEnvFilePath; apps/web и packages/api-client его не выбирают (E0-02A, docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «Селектор гейта test:int»). Каждый пакет workspace со scripts['test:int'], его транзитивные workspace-зависимости, setupFiles конфига из --config и testEnvFilePath обязаны быть под glob - это проверяет harness-selftest"
     },
     {
