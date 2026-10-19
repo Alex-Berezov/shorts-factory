@@ -5,11 +5,10 @@ import {
   type BudgetLimits,
   createBudgetGuard,
 } from "../src/budget.js";
-import { type Db, closeDb } from "../src/client.js";
 import { apiUsageLogRepo } from "../src/repos/api-usage-log.js";
 import { apiUsageLog } from "../src/schema/system.js";
 import { createUsageLogger } from "../src/usage-logger.js";
-import { openTestDb, resetTestDatabase } from "../test-support/fixture.js";
+import { useTestDb } from "../test-support/fixture.js";
 
 /**
  * The guard against the real table: what a job asks before it spends.
@@ -26,29 +25,23 @@ const LIMITS: BudgetLimits = {
   ttsMonthlyBudgetUsd: 10,
 };
 
-let db: Db;
+const db = useTestDb(
+  { beforeAll, afterAll },
+  {
+    beforeClose: async (open) => {
+      await open.$client`delete from api_usage_log`;
+    },
+  },
+);
 let guard: BudgetGuard;
 
-beforeAll(async () => {
-  await resetTestDatabase();
-  db = openTestDb();
-  guard = createBudgetGuard({ db, limits: LIMITS });
-});
-
-afterAll(async () => {
-  // Still unassigned when `beforeAll` failed before opening it - a refusal of
-  // the guard, a database that is down - whatever its type says; that failure
-  // is the one to read, not a TypeError from here.
-  if (db === undefined) {
-    return;
-  }
-  await db.$client`delete from api_usage_log`;
-  await closeDb(db);
+beforeAll(() => {
+  guard = createBudgetGuard({ db: db(), limits: LIMITS });
 });
 
 describe("createBudgetGuard against the spend table", () => {
   it("lets a call through while the cap has room", async () => {
-    const usage = createUsageLogger(db, { jobId: "radar.snapshot/1" });
+    const usage = createUsageLogger(db(), { jobId: "radar.snapshot/1" });
     await usage({
       provider: "youtube_data",
       operation: "videos.list",
@@ -63,7 +56,7 @@ describe("createBudgetGuard against the spend table", () => {
   });
 
   it("refuses the call once the day's quota cap is reached", async () => {
-    const usage = createUsageLogger(db, { jobId: "radar.snapshot/2" });
+    const usage = createUsageLogger(db(), { jobId: "radar.snapshot/2" });
     await usage({
       provider: "youtube_data",
       operation: "videos.list",
@@ -88,7 +81,7 @@ describe("createBudgetGuard against the spend table", () => {
    * would never fire.
    */
   it("adds up the paid speech vendors against the single monthly cap", async () => {
-    const usage = createUsageLogger(db, { jobId: "tts.generate/1" });
+    const usage = createUsageLogger(db(), { jobId: "tts.generate/1" });
     await usage({
       provider: "elevenlabs",
       operation: "tts.synthesize",
@@ -126,8 +119,8 @@ describe("createBudgetGuard against the spend table", () => {
    * to be visible to the guard as spend, not as nothing.
    */
   it("counts spend too small for the column to hold exactly", async () => {
-    await db.$client`delete from api_usage_log`;
-    const usage = createUsageLogger(db, { jobId: "gemini.price/1" });
+    await db().$client`delete from api_usage_log`;
+    const usage = createUsageLogger(db(), { jobId: "gemini.price/1" });
     for (let i = 0; i < 100; i++) {
       await usage({
         provider: "gemini",
@@ -159,8 +152,8 @@ describe("the day a cap is counted in", () => {
   const BEFORE_MIDNIGHT_UTC = new Date("2026-03-13T23:00:00Z");
 
   it("keeps the units of the Pacific day the UTC day has already dropped", async () => {
-    await db.$client`delete from api_usage_log`;
-    await db.insert(apiUsageLog).values({
+    await db().$client`delete from api_usage_log`;
+    await db().insert(apiUsageLog).values({
       provider: "youtube_data",
       operation: "videos.list",
       units: 60,
@@ -168,7 +161,7 @@ describe("the day a cap is counted in", () => {
     });
 
     const pacific = createBudgetGuard({
-      db,
+      db: db(),
       limits: LIMITS,
       now: () => NOW,
     });
@@ -185,7 +178,7 @@ describe("the day a cap is counted in", () => {
     // reads empty - the answer that hands out a second quota.
     await expect(
       apiUsageLogRepo.sumUsage(
-        db,
+        db(),
         { providers: ["youtube_data"], measure: "units", period: "day" },
         { now: NOW, timeZone: "UTC" },
       ),
@@ -193,15 +186,19 @@ describe("the day a cap is counted in", () => {
   });
 
   it("counts the money caps in UTC", async () => {
-    await db.$client`delete from api_usage_log`;
-    await db.insert(apiUsageLog).values({
+    await db().$client`delete from api_usage_log`;
+    await db().insert(apiUsageLog).values({
       provider: "gemini",
       operation: "generateContent",
       costUsd: "0.40000",
       createdAt: BEFORE_MIDNIGHT_UTC,
     });
 
-    const guard = createBudgetGuard({ db, limits: LIMITS, now: () => NOW });
+    const guard = createBudgetGuard({
+      db: db(),
+      limits: LIMITS,
+      now: () => NOW,
+    });
 
     // Our own day, which turned over at 00:00 UTC: yesterday's spend is not
     // today's.

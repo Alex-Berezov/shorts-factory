@@ -38,6 +38,25 @@ function readSource(target: string): string {
   return readFileSync(join(packageDir, target), "utf8");
 }
 
+/**
+ * What is wrong with the order of a subpath's conditions, if anything.
+ * Conditions are matched in declaration order: `browser` first, so no
+ * condition a bundler also knows (`import`, `node`) wins before it, and
+ * `default` last, because it matches everything and anything after it is dead.
+ */
+function conditionOrderIssue(
+  conditions: Record<string, string>,
+): string | undefined {
+  const keys = Object.keys(conditions);
+  if (keys[0] !== "browser") {
+    return "`browser` is not the first condition";
+  }
+  if (keys.at(-1) !== "default") {
+    return "`default` is not the last condition";
+  }
+  return undefined;
+}
+
 describe("package exports", () => {
   it("sends browser bundlers of the root entry to the server-only module", () => {
     // A client component that imports `@sf/config` resolves to the module with
@@ -102,10 +121,44 @@ describe("package exports", () => {
         browserTarget: "./src/server.ts",
       });
       if (typeof target !== "string") {
-        // `default` last, as for the root entry: conditions after it are dead.
-        expect(Object.keys(target).at(-1)).toBe("default");
+        expect({ subpath, order: conditionOrderIssue(target) }).toEqual({
+          subpath,
+          order: undefined,
+        });
       }
     }
+  });
+
+  it("names a subpath whose browser condition is not the first one", () => {
+    // A bundler takes the first condition it knows: `import` ahead of
+    // `browser` sends a client bundle to the plain module, secret and all.
+    expect(
+      conditionOrderIssue({
+        import: "./src/redis-url.ts",
+        browser: "./src/server.ts",
+        default: "./src/redis-url.ts",
+      }),
+    ).toBe("`browser` is not the first condition");
+  });
+
+  it("names a subpath whose default condition is not the last one", () => {
+    expect(
+      conditionOrderIssue({
+        browser: "./src/server.ts",
+        default: "./src/redis-url.ts",
+        node: "./src/redis-url.ts",
+      }),
+    ).toBe("`default` is not the last condition");
+  });
+
+  it("names nothing for browser first and default last", () => {
+    expect(
+      conditionOrderIssue({
+        browser: "./src/server.ts",
+        node: "./src/redis-url.ts",
+        default: "./src/redis-url.ts",
+      }),
+    ).toBeUndefined();
   });
 
   it("publishes the list of server secrets as its own subpath", () => {

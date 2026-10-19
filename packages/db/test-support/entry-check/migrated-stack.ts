@@ -1,5 +1,5 @@
-// The environment the files of the run will see: the setup file of the
-// thin config, loaded here first, before `@sf/config` parses it.
+// Named twice on purpose: a `globalSetup` runs in the main vitest process,
+// `setupFiles` in the workers; both need the env before `@sf/config` parses it.
 import "@sf/config/vitest/setup";
 import { assertMigrated } from "../fixture.js";
 

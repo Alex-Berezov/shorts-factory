@@ -1,6 +1,7 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { repoRoot } from "@sf/config/paths";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -94,35 +95,90 @@ function packageDirOf(name: string, dependencies: ReadonlySet<string>): string {
   );
 }
 
+/** The text of a string literal or a template without substitutions. */
+function literal(node: ts.Node | undefined): string | undefined {
+  return node !== undefined &&
+    (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
+    ? node.text
+    : undefined;
+}
+
+/** An import or export whose every binding is a type: erased, loads nothing. */
+function typeOnly(node: ts.ImportDeclaration | ts.ExportDeclaration): boolean {
+  if (ts.isExportDeclaration(node)) {
+    return (
+      node.isTypeOnly ||
+      (node.exportClause !== undefined &&
+        ts.isNamedExports(node.exportClause) &&
+        node.exportClause.elements.length > 0 &&
+        node.exportClause.elements.every((element) => element.isTypeOnly))
+    );
+  }
+  const clause = node.importClause;
+  if (clause === undefined) {
+    return false;
+  }
+  if (clause.isTypeOnly) {
+    return true;
+  }
+  const named = clause.namedBindings;
+  return (
+    clause.name === undefined &&
+    named !== undefined &&
+    ts.isNamedImports(named) &&
+    named.elements.length > 0 &&
+    named.elements.every((element) => element.isTypeOnly)
+  );
+}
+
 /**
- * The specifiers a module loads when it runs: `import`/`export ... from`
- * whose bindings are not all types. A type-only import is erased by the
- * compiler and loads nothing.
+ * The specifiers a module loads when it runs, read from its syntax tree with
+ * the compiler of the devDependencies: `import`/`export ... from` whose
+ * bindings are not all types, a bare `import "…"`, and every
+ * `import("…")`/`require("…")` call - a lazy load is a load all the same.
+ * A type-only import and `typeof import("…")` in a type are erased by the
+ * compiler and load nothing; a comment or a string that merely mentions a
+ * call is no call. What this reading cannot name - a call whose argument is
+ * not a string literal - is refused, not passed over (L-028): a graph with a
+ * hole in it is not a graph without bullmq.
+ *
+ * The same walk as `importSpecifiers` of the root `test/imports.ts`, which a
+ * package may not import (ADR-0011); it differs in two places: it keeps only
+ * what loads at runtime (type-only imports and `typeof import("…")` are
+ * dropped, not reported), and a call it cannot read throws instead of coming
+ * back as `<dynamic>`. One walk for both is owed (docs/TECH_DEBT.md, E0-12N).
  */
-function valueImports(source: string): string[] {
+function valueImports(source: string, fileName = "module.ts"): string[] {
+  const tree = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+  );
   const found: string[] = [];
-  const statement =
-    /^(?:import|export)\s+(type\s+)?([^;]*?)\s*from\s+["']([^"']+)["']/gms;
-  for (const match of source.matchAll(statement)) {
-    const [, typeOnly, bindings = "", specifier] = match;
-    if (typeOnly !== undefined || specifier === undefined) {
-      continue;
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      const specifier = literal(node.moduleSpecifier);
+      if (specifier !== undefined && !typeOnly(node)) {
+        found.push(specifier);
+      }
+    } else if (
+      ts.isCallExpression(node) &&
+      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(node.expression) &&
+          node.expression.text === "require"))
+    ) {
+      const specifier = literal(node.arguments[0]);
+      if (specifier === undefined) {
+        throw new Error(
+          `cannot tell what ${node.getText(tree)} loads: only a string literal names a module this walk can follow`,
+        );
+      }
+      found.push(specifier);
     }
-    const braced = /^\{([^}]*)\}$/.exec(bindings.trim());
-    const names = braced?.[1]
-      ?.split(",")
-      .map((name) => name.trim())
-      .filter((name) => name !== "");
-    if (names?.every((name) => name.startsWith("type "))) {
-      continue;
-    }
-    found.push(specifier);
-  }
-  for (const match of source.matchAll(/^import\s+["']([^"']+)["']/gm)) {
-    if (match[1] !== undefined) {
-      found.push(match[1]);
-    }
-  }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
   return found;
 }
 
@@ -162,7 +218,7 @@ function externalModules(
       continue;
     }
     visited.add(file);
-    for (const specifier of valueImports(readFileSync(file, "utf8"))) {
+    for (const specifier of valueImports(readFileSync(file, "utf8"), file)) {
       if (specifier.startsWith(".")) {
         queue.push(join(dirname(file), specifier.replace(/\.js$/, ".ts")));
       } else if (specifier.startsWith("@sf/")) {
@@ -204,6 +260,38 @@ describe("the container healthcheck", () => {
 });
 
 describe("the walk of the healthcheck graph", () => {
+  it("sees a module loaded lazily, by import() or require()", () => {
+    const lazy = [
+      "export async function heavy() {",
+      '  const { Queue } = await import("bullmq");',
+      "  return Queue;",
+      "}",
+    ].join("\n");
+
+    expect(valueImports(lazy)).toEqual(["bullmq"]);
+    expect(valueImports('const pino = require("pino");')).toEqual(["pino"]);
+  });
+
+  it("reads no load out of a type, a comment or a string", () => {
+    const mentions = [
+      'type QueueClass = typeof import("bullmq").Queue;',
+      "// const { Queue } = await import(someVar);",
+      "/* require(pinoName) */",
+      'const hint = "call import(name) to load it";',
+      'import type { Logger } from "pino";',
+      'import { type Job } from "bullmq";',
+      'export type { Queue } from "bullmq";',
+    ].join("\n");
+
+    expect(valueImports(mentions)).toEqual([]);
+  });
+
+  it("refuses a lazy load it cannot name", () => {
+    expect(() => valueImports("await import(moduleName);")).toThrow(
+      "cannot tell what import(moduleName) loads",
+    );
+  });
+
   it("refuses a package outside the dependencies of the worker", () => {
     const without = new Set(
       [...DEPENDENCIES].filter((n) => n !== "@sf/runtime"),

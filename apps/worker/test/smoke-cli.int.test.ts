@@ -1,6 +1,7 @@
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { type ChildRun, collectOutput, endOf } from "./child-run.js";
 
 /**
  * `pnpm --filter @sf/worker smoke` against a Redis that is not there.
@@ -22,32 +23,13 @@ const DEAD_REDIS = "redis://127.0.0.1:1";
 /** The command's own deadline is 30 s, plus the probe and the closing. */
 const RUN_TIMEOUT_MS = 90_000;
 
-interface Run {
-  code: number | null;
-  signal: NodeJS.Signals | null;
-  output: string;
-}
-
-async function runSmokeCli(): Promise<Run> {
+async function runSmokeCli(): Promise<ChildRun> {
   const child = fork(CLI, [], {
     execArgv: ["--import", "tsx"],
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     env: { ...process.env, REDIS_URL: DEAD_REDIS },
   });
-  let output = "";
-  child.stdout?.on("data", (chunk: Buffer) => {
-    output += chunk.toString();
-  });
-  child.stderr?.on("data", (chunk: Buffer) => {
-    output += chunk.toString();
-  });
-
-  return await new Promise<Run>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      resolve({ code, signal, output });
-    });
-  });
+  return await endOf(child, collectOutput(child));
 }
 
 describe("smoke cli against a dead redis", () => {

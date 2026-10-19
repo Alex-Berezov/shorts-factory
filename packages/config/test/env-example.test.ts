@@ -101,19 +101,108 @@ describe(".env.example", () => {
     expect(env.LOG_LEVEL).toBe("info");
   });
 
-  it("documents every key the schema knows", () => {
-    const text = readFileSync(examplePath, "utf8");
-    const documented = new Set(
-      text
-        .split("\n")
-        // A key kept commented out (`# NODE_ENV=development`) still counts as
-        // documented: the operator sees it and its default.
-        .map((line) => line.replace(/^#\s*/, "").split("=")[0]?.trim() ?? "")
-        .filter((key) => key !== ""),
-    );
-
+  it("documents every key the schema knows and no other", () => {
     expect(
-      [...Object.keys(EnvSchema.shape)].filter((key) => !documented.has(key)),
-    ).toEqual([]);
+      exampleDrift(
+        readFileSync(examplePath, "utf8"),
+        Object.keys(EnvSchema.shape),
+      ),
+    ).toEqual({ undocumented: [], unknown: [], unreadable: [] });
   });
 });
+
+describe("exampleDrift", () => {
+  const schemaKeys = ["DATABASE_URL", "NODE_ENV", "GEMINI_API_KEY"];
+
+  it("reads a key from an assignment, set or kept commented out", () => {
+    expect(
+      exampleDrift(
+        "DATABASE_URL=postgres://x\n# NODE_ENV=development\nGEMINI_API_KEY=\r\n",
+        schemaKeys,
+      ),
+    ).toEqual({ undocumented: [], unknown: [], unreadable: [] });
+  });
+
+  it("names a schema key the example only mentions in a note", () => {
+    // The schema gained a key, the example got a note instead of a line:
+    // the operator sees no variable to set, so the key is not documented.
+    expect(
+      exampleDrift(
+        "DATABASE_URL=\n# NODE_ENV=development\n# GEMINI_API_KEY is not needed yet\n",
+        schemaKeys,
+      ),
+    ).toEqual({
+      undocumented: ["GEMINI_API_KEY"],
+      unknown: [],
+      unreadable: [],
+    });
+  });
+
+  it("names an example key the schema does not know", () => {
+    // A misspelt or retired key: the operator fills it in, nothing reads it.
+    expect(
+      exampleDrift(
+        "DATABASE_URL=\n# NODE_ENV=development\nGEMINI_API_KEY=\nGEMINI_API_KYE=\n",
+        schemaKeys,
+      ),
+    ).toEqual({
+      undocumented: [],
+      unknown: ["GEMINI_API_KYE"],
+      unreadable: [],
+    });
+  });
+
+  it("names a line it cannot read as an assignment instead of passing it over", () => {
+    // `export KEY=` or a key in lower case documents nothing this reading can
+    // see: skipped, a misspelt key there would never be reported.
+    expect(
+      exampleDrift(
+        "DATABASE_URL=\n# NODE_ENV=x\nexport GEMINI_API_KEY=\ngemini_api_kye=\n",
+        schemaKeys,
+      ),
+    ).toEqual({
+      undocumented: ["GEMINI_API_KEY"],
+      unknown: [],
+      unreadable: ["export GEMINI_API_KEY=", "gemini_api_kye="],
+    });
+  });
+
+  it("reads no key from prose that quotes an assignment", () => {
+    expect(
+      exampleDrift(
+        'DATABASE_URL=\n# NODE_ENV=x\nGEMINI_API_KEY=\n# Quotes are stripped (`KEY="a b"`).\n',
+        schemaKeys,
+      ),
+    ).toEqual({ undocumented: [], unknown: [], unreadable: [] });
+  });
+});
+
+/**
+ * How an env example and the schema disagree, both ways. A key kept commented
+ * out (`# NODE_ENV=development`) still counts as documented: the operator sees
+ * it and its value. A comment that only mentions a name (`# KEY is not needed
+ * yet`) assigns nothing and documents nothing. A line that is neither blank,
+ * a comment nor `KEY=` is `unreadable` - reported, not passed over (L-028).
+ */
+function exampleDrift(
+  text: string,
+  schemaKeys: readonly string[],
+): { undocumented: string[]; unknown: string[]; unreadable: string[] } {
+  const documented = new Set<string>();
+  const unreadable: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const key = /^#?\s*([A-Z][A-Z0-9_]*)=/.exec(line)?.[1];
+    if (key !== undefined) {
+      documented.add(key);
+    } else if (line.trim() !== "" && !line.trimStart().startsWith("#")) {
+      unreadable.push(line);
+    }
+  }
+  const known = new Set(schemaKeys);
+
+  return {
+    undocumented: schemaKeys.filter((key) => !documented.has(key)),
+    unknown: [...documented].filter((key) => !known.has(key)),
+    unreadable,
+  };
+}

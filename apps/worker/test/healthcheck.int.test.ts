@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SEC } from "@sf/core";
 import { closeRedis } from "@sf/runtime";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { collectOutput, endOf } from "./child-run.js";
 import { openTestRedis } from "./helpers.int.js";
 
 /**
@@ -39,17 +40,11 @@ async function runHealthcheck(env: NodeJS.ProcessEnv = {}): Promise<Run> {
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     env: { ...process.env, ...env },
   });
-  let stdout = "";
-  child.stdout?.on("data", (chunk: Buffer) => {
-    stdout += chunk.toString();
-  });
-
-  return await new Promise<Run>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      resolve({ code, signal, stdout, elapsedMs: Date.now() - startedAt });
-    });
-  });
+  const { code, signal, output } = await endOf(
+    child,
+    collectOutput(child, ["stdout"]),
+  );
+  return { code, signal, stdout: output, elapsedMs: Date.now() - startedAt };
 }
 
 beforeEach(async () => {

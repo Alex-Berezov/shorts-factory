@@ -221,6 +221,9 @@ describe("worker start against redis", () => {
     // a stamp cleared once a job could run might be the fresh one this
     // process's own first tick has just written.
     const events: string[] = [];
+    // Closed here whatever the start did, as in the case below: a start that
+    // fails half-way must not leave the queues it opened on the connection.
+    const queueFactory = workerQueueFactory(redis);
     const runtimeDb = openTestDb();
     try {
       await seedQueueSwitches(runtimeDb);
@@ -234,10 +237,11 @@ describe("worker start against redis", () => {
         log: notingWorkers(events),
         processors: { "system.smoke": systemSmokeJob },
         switchIntervalMs: 60_000,
-        queues: noting(workerQueueFactory(redis), events),
+        queues: noting(queueFactory, events),
       });
       await runtime.close();
     } finally {
+      await queueFactory.close();
       await closeDb(runtimeDb);
     }
 

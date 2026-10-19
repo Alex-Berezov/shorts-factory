@@ -1,12 +1,6 @@
-import { BudgetExceededError, NotFoundError, ValidationError } from "@sf/core";
+import { NotFoundError } from "@sf/core";
 import { describe, expect, it } from "vitest";
-import {
-  BUDGET_EXCEEDED_ERROR_CODE,
-  CLIENT_ERROR_CODES,
-  ErrorBodySchema,
-  NOT_FOUND_ERROR_CODE,
-  VALIDATION_ERROR_CODE,
-} from "../src/errors.js";
+import { CLIENT_ERROR_CODES, ErrorBodySchema } from "../src/errors.js";
 
 /** An envelope with everything the schema requires and nothing else. */
 function envelope(): { error: Record<string, unknown> } {
@@ -63,18 +57,6 @@ describe("ErrorBodySchema", () => {
 });
 
 describe("error codes", () => {
-  it("names the domain failures the way their classes do", () => {
-    // One source per code: the class and the constant are the same string, so
-    // a client branching on the wire value and a job branching on the class
-    // cannot drift apart.
-    expect(new ValidationError("x").code).toBe(VALIDATION_ERROR_CODE);
-    expect(new NotFoundError("x").code).toBe(NOT_FOUND_ERROR_CODE);
-    expect(
-      new BudgetExceededError("x", { provider: "gemini", spent: 1, cap: 1 })
-        .code,
-    ).toBe(BUDGET_EXCEEDED_ERROR_CODE);
-  });
-
   it("reports a missing route under the domain code, not a second spelling", () => {
     expect(CLIENT_ERROR_CODES[404]).toBe(new NotFoundError("route").code);
   });

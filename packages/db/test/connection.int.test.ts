@@ -1,18 +1,23 @@
 import { env } from "@sf/config";
-import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { closeDb, createDb } from "../src/client.js";
 import { pingDb } from "../src/health.js";
+import { openTestSql } from "../test-support/fixture.js";
 import { TEST_STACK } from "../test-support/stack-guard.js";
 
 /**
  * Talks to the real Postgres from `infra/docker-compose.yml` (test database
  * `shorts_factory_test`, see `infra/postgres/init/01-test-db.sql`).
- * Deliberately uses the raw driver and no schema: this file answers "is the
- * test database reachable at all", so a failure here points at the
- * infrastructure and not at `@sf/db`.
+ * The queries go through the raw driver, with no schema and no drizzle: once
+ * the file is loaded, a red case here says "the test database is not
+ * reachable", not "a query of `@sf/db` is wrong". The client comes from the
+ * fixture, behind the stack guard, like every other connection of the suite -
+ * and the fixture imports `src/client.ts`, `src/catalog.ts` and
+ * `src/migrate.ts`, so a file of `@sf/db` that fails to load fails this one
+ * too, before any query: a failure to load points at the code, not at the
+ * infrastructure.
  */
-const sql = postgres(env.DATABASE_URL);
+const sql = openTestSql();
 
 beforeAll(async () => {
   // Gates the whole file: a future truncate/seed in this suite must never

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { EnvLike } from "../src/env-file.js";
 import { loadEnv, rejectedBuildLabels } from "../src/load-env.js";
 import { repoRoot } from "../src/paths.js";
-import { EnvSchema } from "../src/schema.js";
+import { EnvSchema, isBuildLabel } from "../src/schema.js";
 import { baseSource, envIssues, issuePaths } from "./helpers.js";
 
 describe("loadEnv - empty values", () => {
@@ -273,6 +273,19 @@ describe("loadEnv - build fingerprint", () => {
     expect(
       loadEnv(baseSource({ APP_VERSION: "1.4.0 (2026-09-08)" })).APP_VERSION,
     ).toBeUndefined();
+  });
+
+  it("reads an empty label as unset and never as a label", () => {
+    // The parse drops an empty value before the label rule sees it, so the
+    // rule's lower bound is only visible through the rule itself - and both
+    // `buildLabel()` and `rejectedBuildLabels` go through it.
+    expect(
+      loadEnv(baseSource({ APP_VERSION: "" })).APP_VERSION,
+    ).toBeUndefined();
+    expect(loadEnv(baseSource({ GIT_COMMIT: "" })).GIT_COMMIT).toBeUndefined();
+    expect(isBuildLabel("")).toBe(false);
+    expect(isBuildLabel("a")).toBe(true);
+    expect(isBuildLabel("a".repeat(64))).toBe(true);
   });
 
   it("accepts a version with pre-release and build metadata", () => {

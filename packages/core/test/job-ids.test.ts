@@ -36,12 +36,6 @@ describe("jobId", () => {
     expect(() => jobId("", "abc")).toThrow(ValidationError);
   });
 
-  it("refuses a numeric part that is NaN, as not a safe integer of zero or more", () => {
-    expect(() => jobId("radar.score", Number.NaN, "1h")).toThrow(
-      ValidationError,
-    );
-  });
-
   it.each([
     ["a fraction", 1.5],
     ["an integer that prints in exponent form", 1e21],
@@ -49,6 +43,7 @@ describe("jobId", () => {
     ["an integer beyond the safe range", Number.MAX_SAFE_INTEGER + 1],
     ["positive infinity", Number.POSITIVE_INFINITY],
     ["negative infinity", Number.NEGATIVE_INFINITY],
+    ["NaN", Number.NaN],
   ])("refuses a numeric part that is %s", (_label, value) => {
     // Each of these prints in a way of its own (`1.5`, `1e+21`, `-1`,
     // `9007199254740992`), and the id would carry that print rather than the
@@ -131,6 +126,7 @@ describe("jobIds.dlqEntry", () => {
     ["an integer beyond the safe range", Number.MAX_SAFE_INTEGER + 1],
     ["positive infinity", Number.POSITIVE_INFINITY],
     ["negative infinity", Number.NEGATIVE_INFINITY],
+    ["NaN", Number.NaN],
   ])("refuses a creation moment that is %s", (_label, value) => {
     // The builder goes around `jobId()`, so the numeric rule has to hold for
     // its own parts too; the message names the part, so the refusal cannot
@@ -143,24 +139,9 @@ describe("jobIds.dlqEntry", () => {
     );
   });
 
-  it("writes a creation moment of negative zero as 0", () => {
-    expect(jobIds.dlqEntry("system.smoke", "abc", -0)).toBe(
-      "dlq/system.smoke/abc/0",
-    );
-  });
-
   it("refuses an empty original id", () => {
     expect(() => jobIds.dlqEntry("system.smoke", "", 7)).toThrow(
       ValidationError,
-    );
-  });
-
-  it("refuses a NaN creation moment, as not a safe integer of zero or more", () => {
-    expect(() => jobIds.dlqEntry("system.smoke", "abc", Number.NaN)).toThrow(
-      ValidationError,
-    );
-    expect(() => jobIds.dlqEntry("system.smoke", "abc", Number.NaN)).toThrow(
-      /created at/,
     );
   });
 });

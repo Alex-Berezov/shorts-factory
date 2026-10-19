@@ -39,10 +39,18 @@ describe("system.smoke payload", () => {
     );
     expect(id).toBe("system.smoke/1773000000000");
     expect(add).toHaveBeenCalledTimes(1);
+    // The whole options object, spelled out: a drift of the retry policy of
+    // the job is as much a change of the enqueue as a drift of its id.
     expect(add).toHaveBeenCalledWith(
       "system.smoke",
       { requestedAtMs: 1_773_000_000_000 },
-      expect.objectContaining({ jobId: "system.smoke/1773000000000" }),
+      {
+        attempts: 5,
+        backoff: { type: "exponential", delay: 5_000 },
+        removeOnComplete: { count: 1_000 },
+        removeOnFail: { count: 1_000 },
+        jobId: "system.smoke/1773000000000",
+      },
     );
   });
 });

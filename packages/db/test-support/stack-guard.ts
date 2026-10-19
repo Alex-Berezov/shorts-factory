@@ -17,12 +17,15 @@
  *   server, and is refused;
  * - scheme: `postgres:`/`postgresql:` for Postgres, `redis:` for Redis;
  * - the host as the driver reads it, not only as `new URL` does: postgres-js
- *   3.4 takes the host after the *first* `@`, percent-decodes it and reads a
- *   `,` as a list of hosts, while `new URL` takes the host after the *last*
- *   `@`. A URL with a second `@`, a `,` or a `%` in its host, a backslash, a
- *   space or a fragment is refused before it is parsed, and the host and port
+ *   takes the host after the *first* `@`, percent-decodes it and reads a `,`
+ *   as a list of hosts, while `new URL` takes the host after the *last* `@`.
+ *   A URL with a second `@`, a `,` or a `%` in its host, a backslash, a space
+ *   or a fragment is refused before it is parsed, and the host and port
  *   `new URL` found must be, letter for letter, what the driver would dial -
- *   so `sf:sf@db.example.com,x@localhost:5442` cannot pass for local;
+ *   so `sf:sf@db.example.com,x@localhost:5442` cannot pass for local. The
+ *   installed drivers, not a version written here, are what this is checked
+ *   against: `apps/api/test/stack-guard-drivers.test.ts` (postgres-js and
+ *   ioredis on one table of addresses);
  * - no query string on either URL: postgres-js and ioredis read connection
  *   options from it, and a URL that only looks local is still refused;
  * - Postgres database: by the name in the URL here, and by the name the server
@@ -80,11 +83,11 @@ const SCHEMES = {
 type Service = keyof typeof SCHEMES;
 
 /**
- * Characters the URL standard and the drivers read differently: whitespace and
- * control characters (`new URL` drops a tab, a driver keeps it), a backslash
- * (ioredis 5 parses a WHATWG URL, but an older reader or a proxy may still turn
- * it into a `/` that ends the host),
- * a fragment (postgres-js does not cut the host at `#`).
+ * Characters the URL standard and the drivers read differently: whitespace
+ * and control characters (`new URL` drops a tab, a driver keeps it), a
+ * backslash (ioredis parses a WHATWG URL, but an older reader or a proxy may
+ * still turn it into a `/` that ends the host), a fragment (postgres-js does
+ * not cut the host at `#`).
  */
 function isAmbiguous(raw: string): boolean {
   for (const char of raw) {

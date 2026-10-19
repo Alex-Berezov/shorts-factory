@@ -1,67 +1,52 @@
 import { QUEUE_NAMES } from "@sf/core";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type Db, closeDb } from "../src/client.js";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { appSettingRepo } from "../src/repos/app-setting.js";
 import { hasAppSettingTable, seedAppSettings } from "../src/seed.js";
 import {
   emptyTestDatabase,
-  openTestDb,
   resetTestDatabase,
+  useTestDb,
 } from "../test-support/fixture.js";
 
-let db: Db;
-
-beforeAll(async () => {
-  await resetTestDatabase();
-  db = openTestDb();
-});
-
-afterAll(async () => {
-  // Still unassigned when `beforeAll` failed before opening it - a refusal of
-  // the guard, a database that is down - whatever its type says; that failure
-  // is the one to read, not a TypeError from here.
-  if (db !== undefined) {
-    await closeDb(db);
-  }
-});
+const db = useTestDb({ beforeAll, afterAll });
 
 describe("appSettingRepo", () => {
   it("returns undefined for a key that was never written", async () => {
-    expect(await appSettingRepo.get(db, "nothing.here")).toBeUndefined();
+    expect(await appSettingRepo.get(db(), "nothing.here")).toBeUndefined();
   });
 
   it("writes and reads a value back", async () => {
-    await appSettingRepo.set(db, "test.key", { a: 1, b: ["x"] });
+    await appSettingRepo.set(db(), "test.key", { a: 1, b: ["x"] });
 
-    expect(await appSettingRepo.get(db, "test.key")).toEqual({
+    expect(await appSettingRepo.get(db(), "test.key")).toEqual({
       a: 1,
       b: ["x"],
     });
   });
 
   it("overwrites an existing key and moves updated_at forward", async () => {
-    await appSettingRepo.set(db, "test.stamp", 1);
+    await appSettingRepo.set(db(), "test.stamp", 1);
     const first = await stampOf("test.stamp");
 
-    await appSettingRepo.set(db, "test.stamp", 2);
+    await appSettingRepo.set(db(), "test.stamp", 2);
 
-    expect(await appSettingRepo.get(db, "test.stamp")).toBe(2);
+    expect(await appSettingRepo.get(db(), "test.stamp")).toBe(2);
     // Strictly forward: both writes stamp the column from `now()`, so an equal
     // timestamp means the second write did not stamp it at all.
     expect(await stampOf("test.stamp")).toBeGreaterThan(first);
   });
 
   it("refuses undefined instead of losing the write", async () => {
-    await appSettingRepo.set(db, "test.undefined", { kept: true });
+    await appSettingRepo.set(db(), "test.undefined", { kept: true });
     const before = await stampOf("test.undefined");
 
     // The message has to name the way out that exists: the column is NOT NULL,
     // so `null` is not one.
     await expect(
-      appSettingRepo.set(db, "test.undefined", undefined),
+      appSettingRepo.set(db(), "test.undefined", undefined),
     ).rejects.toThrow(/must not be undefined; the column is NOT NULL/);
 
-    expect(await appSettingRepo.get(db, "test.undefined")).toEqual({
+    expect(await appSettingRepo.get(db(), "test.undefined")).toEqual({
       kept: true,
     });
     expect(await stampOf("test.undefined")).toBe(before);
@@ -70,13 +55,13 @@ describe("appSettingRepo", () => {
 
 describe("hasAppSettingTable", () => {
   it("sees the table on a migrated database", async () => {
-    expect(await hasAppSettingTable(db)).toBe(true);
+    expect(await hasAppSettingTable(db())).toBe(true);
   });
 
   it("does not see it on a database db:migrate never touched", async () => {
     await emptyTestDatabase();
     try {
-      expect(await hasAppSettingTable(db)).toBe(false);
+      expect(await hasAppSettingTable(db())).toBe(false);
     } finally {
       await resetTestDatabase();
     }
@@ -84,26 +69,33 @@ describe("hasAppSettingTable", () => {
 });
 
 describe("seedAppSettings", () => {
-  it("writes the defaults a fresh installation needs", async () => {
-    await seedAppSettings(db);
+  // Every case starts from a table nobody seeded and states the rows it needs:
+  // what a previous case left behind is not part of any contract here.
+  beforeEach(async () => {
+    await db().$client`DELETE FROM app_setting`;
+  });
 
-    expect(await appSettingRepo.get(db, "radar.weights")).toEqual({
+  it("writes the defaults a fresh installation needs", async () => {
+    await seedAppSettings(db());
+
+    expect(await appSettingRepo.get(db(), "radar.weights")).toEqual({
       velocity: 0.5,
       acceleration: 0.3,
       baselineRatio: 0.2,
     });
     // The whole registry, not a sample: a queue missing from the seed reads
     // back as `undefined` in E0-08 instead of a switch.
-    const queues = await appSettingRepo.get(db, "queues.enabled");
+    const queues = await appSettingRepo.get(db(), "queues.enabled");
     expect(queues).toEqual(
       Object.fromEntries(QUEUE_NAMES.map((name) => [name, true])),
     );
   });
 
   it("run twice, leaves the defaults in place", async () => {
-    await seedAppSettings(db);
+    await seedAppSettings(db());
+    await seedAppSettings(db());
 
-    expect(await appSettingRepo.get(db, "radar.weights")).toEqual({
+    expect(await appSettingRepo.get(db(), "radar.weights")).toEqual({
       velocity: 0.5,
       acceleration: 0.3,
       baselineRatio: 0.2,
@@ -112,11 +104,11 @@ describe("seedAppSettings", () => {
 
   it("does not undo a value the operator changed", async () => {
     const tuned = { velocity: 0.7, acceleration: 0.2, baselineRatio: 0.1 };
-    await appSettingRepo.set(db, "radar.weights", tuned);
+    await appSettingRepo.set(db(), "radar.weights", tuned);
 
-    await seedAppSettings(db);
+    await seedAppSettings(db());
 
-    expect(await appSettingRepo.get(db, "radar.weights")).toEqual(tuned);
+    expect(await appSettingRepo.get(db(), "radar.weights")).toEqual(tuned);
   });
 
   /**
@@ -140,11 +132,11 @@ describe("seedAppSettings", () => {
       ]),
     );
     alreadySeeded[turnedOff] = false;
-    await appSettingRepo.set(db, "queues.enabled", alreadySeeded);
+    await appSettingRepo.set(db(), "queues.enabled", alreadySeeded);
 
-    await seedAppSettings(db);
+    await seedAppSettings(db());
 
-    expect(await appSettingRepo.get(db, "queues.enabled")).toEqual({
+    expect(await appSettingRepo.get(db(), "queues.enabled")).toEqual({
       ...Object.fromEntries(QUEUE_NAMES.map((name) => [name, true])),
       [turnedOff]: false,
     });
@@ -157,14 +149,14 @@ describe("seedAppSettings", () => {
    * and every `trend_signal` ends up with `NaN`.
    */
   it("adds a weight a later default brought, keeping the operator's numbers", async () => {
-    await appSettingRepo.set(db, "radar.weights", {
+    await appSettingRepo.set(db(), "radar.weights", {
       velocity: 0.7,
       acceleration: 0.2,
     });
 
-    await seedAppSettings(db);
+    await seedAppSettings(db());
 
-    expect(await appSettingRepo.get(db, "radar.weights")).toEqual({
+    expect(await appSettingRepo.get(db(), "radar.weights")).toEqual({
       velocity: 0.7,
       acceleration: 0.2,
       baselineRatio: 0.2,
@@ -188,11 +180,11 @@ describe("seedAppSettings", () => {
     // A queue that used to exist, and a live one the operator turned off.
     stored["radar.sync"] = true;
     stored[stillThere] = false;
-    await appSettingRepo.set(db, "queues.enabled", stored);
+    await appSettingRepo.set(db(), "queues.enabled", stored);
 
-    await seedAppSettings(db);
+    await seedAppSettings(db());
 
-    expect(await appSettingRepo.get(db, "queues.enabled")).toEqual({
+    expect(await appSettingRepo.get(db(), "queues.enabled")).toEqual({
       ...Object.fromEntries(QUEUE_NAMES.map((name) => [name, true])),
       [stillThere]: false,
     });
@@ -203,16 +195,16 @@ describe("seedAppSettings", () => {
    * its known set is the shape of `TrendWeights` - E1-05's to define.
    */
   it("leaves the other settings alone", async () => {
-    await appSettingRepo.set(db, "radar.weights", {
+    await appSettingRepo.set(db(), "radar.weights", {
       velocity: 0.5,
       acceleration: 0.3,
       baselineRatio: 0.2,
       retired: 0.1,
     });
 
-    await seedAppSettings(db);
+    await seedAppSettings(db());
 
-    expect(await appSettingRepo.get(db, "radar.weights")).toEqual({
+    expect(await appSettingRepo.get(db(), "radar.weights")).toEqual({
       velocity: 0.5,
       acceleration: 0.3,
       baselineRatio: 0.2,
@@ -227,13 +219,13 @@ describe("seedAppSettings", () => {
    * (E0-11).
    */
   it("run with nothing to merge, leaves updated_at where it was", async () => {
-    await seedAppSettings(db);
+    await seedAppSettings(db());
     const before = {
       queues: await stampOf("queues.enabled"),
       weights: await stampOf("radar.weights"),
     };
 
-    await seedAppSettings(db);
+    await seedAppSettings(db());
 
     expect(await stampOf("queues.enabled")).toBe(before.queues);
     expect(await stampOf("radar.weights")).toBe(before.weights);
@@ -249,7 +241,7 @@ describe("seedAppSettings", () => {
  * transparent ones.
  */
 async function stampOf(key: string): Promise<bigint> {
-  const rows = await db.$client<{ stamp_us: string }[]>`
+  const rows = await db().$client<{ stamp_us: string }[]>`
     SELECT (extract(epoch FROM updated_at) * 1000000)::bigint AS stamp_us
     FROM app_setting WHERE key = ${key}
   `;

@@ -149,13 +149,40 @@ describe("GET /system/status", () => {
   });
 
   it("gives up on a section that never answers instead of holding the page", async () => {
-    const { body } = await status({
+    const app = buildTestApp({
       worker: { read: () => new Promise<WorkerStatus>(() => {}) },
     });
+    await app.ready();
+    // The deadline of the page on the fake clock: a section that never
+    // settles is ended by it, not by the machine's time running out.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let answered: { payload: string } | undefined;
+      void app
+        .inject({
+          method: "GET",
+          url: "/system/status",
+          headers: { authorization: AUTH_HEADER },
+        })
+        .then((res) => {
+          answered = res;
+        });
 
-    expect(body.worker).toBeNull();
-    expect(body.checks.redis).toEqual({ status: "down", reason: "timeout" });
-  }, 10_000);
+      await vi.advanceTimersByTimeAsync(DEPENDENCY_TIMEOUT_MS - 1);
+      expect(answered).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(answered).toBeDefined());
+
+      const body = SystemStatusResponseSchema.parse(
+        JSON.parse(answered?.payload ?? ""),
+      );
+      expect(body.worker).toBeNull();
+      expect(body.checks.redis).toEqual({ status: "down", reason: "timeout" });
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
 
   it("keeps the text of a driver failure out of the response", async () => {
     // The message of a driver failure carries the host, the port and sometimes

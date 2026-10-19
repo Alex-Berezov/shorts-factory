@@ -1,7 +1,8 @@
 import { env } from "@sf/config";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import postgres from "postgres";
-import { type Db, createDb } from "../src/client.js";
+import { tableExists } from "../src/catalog.js";
+import { type Db, clientOptions, closeDb, createDb } from "../src/client.js";
 import { migrationsFolder, runMigrations } from "../src/migrate.js";
 import {
   type Migration,
@@ -36,10 +37,81 @@ export function openTestDb(): Db {
   return createDb(env.DATABASE_URL, { max: 2 });
 }
 
-/** Raw client for assertions about the database itself (catalogs, bad input). */
+/**
+ * The URL of the test database once the guard has passed it, for a test that
+ * derives another address from it - a relay in front of the same server,
+ * another database of the same server. Built from here, the derived address
+ * cannot start from a URL the guard never saw.
+ */
+export function testDatabaseUrl(): URL {
+  assertLocalTestPostgres(env.DATABASE_URL);
+  return new URL(env.DATABASE_URL);
+}
+
+/**
+ * The two file hooks `useTestDb` registers its work in - vitest's
+ * `beforeAll`/`afterAll`, handed in by the file: this module is also loaded
+ * by the entry check of a run (`globalSetup`), where vitest cannot be
+ * imported.
+ */
+interface FileHooks {
+  beforeAll(fn: () => Promise<void>): void;
+  afterAll(fn: () => Promise<void>): void;
+}
+
+/**
+ * The database handle of one integration file. `beforeAll` brings the test
+ * database to its starting state (`prepare`, by default `resetTestDatabase`)
+ * and opens the handle; `afterAll` runs `beforeClose` and closes it. A
+ * `beforeAll` that failed before the handle was opened - a refusal of the
+ * guard, a database that is down - leaves nothing to close, and `afterAll`
+ * says nothing: that failure is the one to read, not a TypeError after it.
+ *
+ * Returns a getter rather than the handle: there is no handle until the hook
+ * has run, and a case that reaches for it anyway hears why.
+ */
+export function useTestDb(
+  hooks: FileHooks,
+  options: {
+    readonly prepare?: () => Promise<void>;
+    readonly beforeClose?: (db: Db) => Promise<void>;
+  } = {},
+): () => Db {
+  let db: Db | undefined;
+  hooks.beforeAll(async () => {
+    await (options.prepare ?? resetTestDatabase)();
+    db = openTestDb();
+  });
+  hooks.afterAll(async () => {
+    const open = db;
+    db = undefined;
+    if (open === undefined) {
+      return;
+    }
+    try {
+      await options.beforeClose?.(open);
+    } finally {
+      await closeDb(open);
+    }
+  });
+  return () => {
+    if (db === undefined) {
+      throw new Error(
+        "the test database is not open: the beforeAll of useTestDb has not run, or failed",
+      );
+    }
+    return db;
+  };
+}
+
+/**
+ * Raw client for assertions about the database itself (catalogs, bad input).
+ * Opened with the options of the service client, but not through `createDb`:
+ * the client drizzle wraps answers `timestamptz` as text.
+ */
 export function openTestSql(): postgres.Sql {
   assertLocalTestPostgres(env.DATABASE_URL);
-  return postgres(env.DATABASE_URL, { max: 1 });
+  return postgres(env.DATABASE_URL, clientOptions({ max: 1 }));
 }
 
 /**
@@ -96,10 +168,11 @@ export async function resetTestDatabase(): Promise<void> {
 export async function assertMigrated(): Promise<void> {
   assertLocalTestRedis(env.REDIS_URL);
   const journal = journalMigrations(readMigrationFiles({ migrationsFolder }));
-  const sql = openTestSql();
+  assertLocalTestPostgres(env.DATABASE_URL);
+  const db = createDb(env.DATABASE_URL, { max: 1 });
   let applied: Migration[];
   try {
-    applied = await readAppliedMigrations(sql);
+    applied = await readAppliedMigrations(db);
   } catch (error) {
     // The guard has passed: the address is local and holds no password.
     const where = new URL(env.DATABASE_URL).host;
@@ -112,7 +185,7 @@ export async function assertMigrated(): Promise<void> {
       { cause: error },
     );
   } finally {
-    await sql.end();
+    await closeDb(db);
   }
   const gap = migrationGap(journal, applied);
   if (!isMigrated(gap)) {
@@ -122,14 +195,11 @@ export async function assertMigrated(): Promise<void> {
   }
 }
 
-async function readAppliedMigrations(sql: postgres.Sql): Promise<Migration[]> {
-  const table = await sql<{ present: boolean }[]>`
-    SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS present
-  `;
-  if (!table[0]?.present) {
+async function readAppliedMigrations(db: Db): Promise<Migration[]> {
+  if (!(await tableExists(db, "drizzle.__drizzle_migrations"))) {
     return [];
   }
-  return sql<{ createdAt: string; hash: string }[]>`
+  return db.$client<{ createdAt: string; hash: string }[]>`
     SELECT created_at::text AS "createdAt", hash FROM drizzle.__drizzle_migrations
   `;
 }

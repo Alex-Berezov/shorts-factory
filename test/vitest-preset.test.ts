@@ -270,6 +270,31 @@ describe("package vitest configs", () => {
     expect(wrong).toEqual([]);
   });
 
+  /**
+   * The border of `intTestConfig` is a fact of the files (ADR-0011): a package
+   * with a `*.int.test.ts` has an integration run on the preset, behind an
+   * entry check of `ENTRY_CHECK_OF`, and a package without one has none. An
+   * integration file nothing runs is a test that never fails; a run with no
+   * files is a gate that checks nothing.
+   */
+  it("gives an integration run to exactly the packages with integration files", () => {
+    const names = dirs.map((dir) =>
+      relative(repoRoot, dir).replaceAll("\\", "/"),
+    );
+    const withFiles = names.filter((name) =>
+      repoFilesUnder(name).some((path) => path.endsWith(".int.test.ts")),
+    );
+    const withRun = names.filter(
+      (name) =>
+        scriptsOf(readRepoJson(`${name}/package.json`))["test:int"] !==
+        undefined,
+    );
+    const checked = Object.keys(ENTRY_CHECK_OF).sort();
+
+    expect(withFiles.sort()).toEqual(checked);
+    expect(withRun.sort()).toEqual(checked);
+  });
+
   it("every integration run is behind its entry check", async () => {
     // Read from the configs as vitest loads them, not from their text.
     const runs: string[] = [];
@@ -336,15 +361,5 @@ describe("apps/web vitest config", () => {
     // the setup of the web tests it would be red, or green by chance.
     const { default: config } = await import("../apps/web/vitest.config.js");
     expect(config.test?.include).toEqual(["test/**/*.test.ts"]);
-  });
-});
-
-describe("root test:int script", () => {
-  it("runs the integration packages one at a time", () => {
-    // Files of one package are serialised by the preset; packages share the
-    // same test database and Redis, and this flag is what serialises them.
-    const script = scriptsOf(readRepoJson("package.json"))["test:int"];
-    expect(script).toMatch(/^turbo run test:int\b/);
-    expect(script).toMatch(/(?:^|\s)--concurrency=1(?:\s|$)/);
   });
 });

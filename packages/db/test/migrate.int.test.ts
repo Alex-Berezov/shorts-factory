@@ -1,33 +1,36 @@
-import { readFileSync } from "node:fs";
 import { type Server, type Socket, connect, createServer } from "node:net";
-import { env } from "@sf/config";
 import { type SQLWrapper, sql as drizzleSql } from "drizzle-orm";
+import { readMigrationFiles } from "drizzle-orm/migrator";
 import { PgDialect } from "drizzle-orm/pg-core";
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { type Db, closeDb, createDb } from "../src/client.js";
 import {
   MIGRATE_NEEDS_SINGLE_CONNECTION,
   MIGRATION_LOCK_WAIT_MS,
   migrateDb,
   migrationLockTimeoutMessage,
+  migrationsFolder,
   runMigrations,
 } from "../src/migrate.js";
 import {
   emptyTestDatabase,
   openTestSql,
   resetTestDatabase,
+  testDatabaseUrl,
 } from "../test-support/fixture.js";
+import { captureProcessOutput } from "./capture-output.js";
 
-/** Migrations the repository ships, read from drizzle's own journal. */
-const SHIPPED_MIGRATIONS = (
-  JSON.parse(
-    readFileSync(
-      new URL("../migrations/meta/_journal.json", import.meta.url),
-      "utf8",
-    ),
-  ) as { entries: unknown[] }
-).entries.length;
+/** Migrations the repository ships, read the way drizzle's migrator reads them. */
+const SHIPPED_MIGRATIONS = readMigrationFiles({ migrationsFolder }).length;
 
 /**
  * DoD of E0-04: the migration runner brings an empty database to the model of
@@ -58,6 +61,9 @@ const TABLES_SECTION_5 = [
   "video_stats_snapshot",
 ];
 
+/** The address of the test database, through the guard - every handle of the file opens it. */
+const TEST_DATABASE_URL = testDatabaseUrl().href;
+
 const sql = openTestSql();
 
 /**
@@ -72,6 +78,34 @@ async function heldAdvisoryLocks(): Promise<number> {
       AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
   `;
   return rows[0]?.n ?? -1;
+}
+
+/**
+ * Waits until no session of the test database holds an advisory lock. A
+ * session closed while it still held one - the unlock failed, the process
+ * left - is ended by the server asynchronously, so a read right after
+ * `closeDb` can still see that lock. A run that released its lock itself
+ * (`migrateDb` unlocks before `runMigrations` closes the handle, as in the
+ * `beforeEach` of this file) leaves none behind to wait for: the cases that
+ * read `heldAdvisoryLocks()` straight after it read the state as it is.
+ */
+async function expectNoAdvisoryLocks(): Promise<void> {
+  await vi.waitFor(
+    async () => {
+      expect(await heldAdvisoryLocks()).toBe(0);
+    },
+    { timeout: 5_000, interval: 50 },
+  );
+}
+
+/** The tables of schema `public`, by name. */
+async function publicTables(): Promise<string[]> {
+  const rows = await sql<{ table_name: string }[]>`
+    SELECT table_name FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+    ORDER BY table_name
+  `;
+  return rows.map((row) => row.table_name);
 }
 
 /** The text of a drizzle query, to pick out the statements of the release. */
@@ -172,7 +206,7 @@ function underTheLock(observed: ObservedStatement[]): ObservedStatement[] {
  * reconnect is refused - the "database went away" a migration can meet.
  */
 async function openRelay(): Promise<{ url: string; cut: () => Promise<void> }> {
-  const target = new URL(env.DATABASE_URL);
+  const target = testDatabaseUrl();
   const sockets = new Set<Socket>();
   const server: Server = createServer((client) => {
     const upstream = connect({
@@ -193,7 +227,7 @@ async function openRelay(): Promise<{ url: string; cut: () => Promise<void> }> {
   if (address === null || typeof address === "string") {
     throw new Error("relay has no port");
   }
-  const url = new URL(env.DATABASE_URL);
+  const url = testDatabaseUrl();
   url.hostname = "127.0.0.1";
   url.port = String(address.port);
   return {
@@ -206,8 +240,17 @@ async function openRelay(): Promise<{ url: string; cut: () => Promise<void> }> {
   };
 }
 
+// The file starts from a reset database - a stray type a previous run left
+// under a full journal is gone - and every case from a migrated one:
+// `runMigrations` applies nothing to one, and the whole folder to one a
+// previous case emptied. A case about an empty or a broken database makes it
+// so itself, and resets it in its `finally`.
 beforeAll(async () => {
   await resetTestDatabase();
+});
+
+beforeEach(async () => {
+  await runMigrations(TEST_DATABASE_URL);
 });
 
 afterAll(async () => {
@@ -216,23 +259,21 @@ afterAll(async () => {
 
 describe("runMigrations", () => {
   it("creates every table of System Design §5 on an empty database", async () => {
-    const rows = await sql<{ table_name: string }[]>`
-      SELECT table_name FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-      ORDER BY table_name
-    `;
+    await emptyTestDatabase();
+    await runMigrations(TEST_DATABASE_URL);
 
-    expect(rows.map((row) => row.table_name)).toEqual(TABLES_SECTION_5);
+    expect(await publicTables()).toEqual(TABLES_SECTION_5);
   });
 
   it("is idempotent: a second run applies nothing and does not fail", async () => {
-    await expect(runMigrations(env.DATABASE_URL)).resolves.toBeUndefined();
+    const before = await publicTables();
 
-    const rows = await sql<{ table_name: string }[]>`
-      SELECT table_name FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-    `;
-    expect(rows).toHaveLength(TABLES_SECTION_5.length);
+    await expect(runMigrations(TEST_DATABASE_URL)).resolves.toBeUndefined();
+
+    // The same tables by name, not only as many: a second pass that dropped
+    // one table and created another would keep the count.
+    expect(await publicTables()).toEqual(before);
+    expect(before).toEqual(TABLES_SECTION_5);
   });
 });
 
@@ -245,8 +286,8 @@ describe("migrateDb", () => {
    */
   it("serialises two runners started together on an empty database", async () => {
     await emptyTestDatabase();
-    const first = createDb(env.DATABASE_URL, { max: 1 });
-    const second = createDb(env.DATABASE_URL, { max: 1 });
+    const first = createDb(TEST_DATABASE_URL, { max: 1 });
+    const second = createDb(TEST_DATABASE_URL, { max: 1 });
 
     try {
       const outcomes = await Promise.allSettled([
@@ -276,7 +317,7 @@ describe("migrateDb", () => {
   });
 
   it("waits for the lock at most MIGRATION_LOCK_WAIT_MS by default", async () => {
-    const db = createDb(env.DATABASE_URL, { max: 1 });
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
     const observed = observeLockTimeout(db);
     try {
       await migrateDb(db);
@@ -293,7 +334,7 @@ describe("migrateDb", () => {
    * short every statement of the migration that waits for a table lock.
    */
   it("runs the migration under the session's own lock_timeout", async () => {
-    const db = createDb(env.DATABASE_URL, { max: 1 });
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
     const observed = observeLockTimeout(db);
     let before = "";
     try {
@@ -313,7 +354,7 @@ describe("migrateDb", () => {
   });
 
   it("reports nothing to apply on a current database", async () => {
-    const db = createDb(env.DATABASE_URL, { max: 1 });
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
     try {
       await expect(migrateDb(db)).resolves.toEqual({
         applied: 0,
@@ -333,7 +374,7 @@ describe("migrateDb on failure", () => {
   it.each([0, Number.NaN, -1, 1.5])(
     "refuses lockWaitMs %s before its first query",
     async (lockWaitMs) => {
-      const db = createDb(env.DATABASE_URL, { max: 1 });
+      const db = createDb(TEST_DATABASE_URL, { max: 1 });
       const execute = vi.spyOn(db, "execute");
       try {
         await expect(migrateDb(db, { lockWaitMs })).rejects.toThrow(
@@ -346,20 +387,29 @@ describe("migrateDb on failure", () => {
     },
   );
 
+  /**
+   * Read while the pool is still open: closing it ends its sessions, and any
+   * lock one of them took would be gone before a read after `closeDb`.
+   */
   it("refuses a pooled handle before it takes the lock", async () => {
-    const pooled = createDb(env.DATABASE_URL);
+    await expectNoAdvisoryLocks();
+    const pooled = createDb(TEST_DATABASE_URL);
+    // Nothing reaches the database first: a lock taken and released before
+    // the refusal would leave no trace in `pg_locks`.
+    const execute = vi.spyOn(pooled, "execute");
     try {
       await expect(migrateDb(pooled)).rejects.toThrow(
         MIGRATE_NEEDS_SINGLE_CONNECTION,
       );
+      expect(execute).toHaveBeenCalledTimes(0);
+      expect(await heldAdvisoryLocks()).toBe(0);
     } finally {
       await closeDb(pooled);
     }
-    expect(await heldAdvisoryLocks()).toBe(0);
   });
 
   it("restores client_min_messages of the handle it was given", async () => {
-    const db = createDb(env.DATABASE_URL, { max: 1 });
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
     try {
       await migrateDb(db);
       const rows = await db.execute<{ client_min_messages: string }>(
@@ -376,7 +426,7 @@ describe("migrateDb on failure", () => {
    * them before the run gets them back.
    */
   it("puts back the lock_timeout and client_min_messages the session had", async () => {
-    const db = createDb(env.DATABASE_URL, { max: 1 });
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
     try {
       await db.execute(drizzleSql`set lock_timeout = '5s'`);
       await db.execute(drizzleSql`set client_min_messages = error`);
@@ -401,7 +451,7 @@ describe("migrateDb on failure", () => {
     await emptyTestDatabase();
     // The first statement of 0000_core, already there: the migration fails.
     await sql`CREATE TYPE public.snapshot_point AS ENUM ('1h')`;
-    const db = createDb(env.DATABASE_URL, { max: 1 });
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
     try {
       await db.execute(drizzleSql`set lock_timeout = '5s'`);
       await db.execute(drizzleSql`set client_min_messages = error`);
@@ -429,7 +479,7 @@ describe("migrateDb on failure", () => {
    * otherwise the caller's handle silently keeps the run's wait.
    */
   it("puts lock_timeout back when restoring it after the lock fails", async () => {
-    const db = createDb(env.DATABASE_URL, { max: 1 });
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
     const restoreError = new Error("restore failed");
     try {
       await db.execute(drizzleSql`set lock_timeout = '5s'`);
@@ -462,7 +512,7 @@ describe("migrateDb on failure", () => {
     await emptyTestDatabase();
     // The first statement of 0000_core, already there: the migration fails.
     await sql`CREATE TYPE public.snapshot_point AS ENUM ('1h')`;
-    const db = createDb(env.DATABASE_URL, { max: 1 });
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
     try {
       await expect(migrateDb(db)).rejects.toMatchObject({ code: "42710" });
       expect(await heldAdvisoryLocks()).toBe(0);
@@ -514,7 +564,7 @@ describe("migrateDb on failure", () => {
    * failure of the latter must not leave the lock held by a live session.
    */
   it("releases the lock even when restoring client_min_messages fails", async () => {
-    const db = createDb(env.DATABASE_URL, { max: 1 });
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
     const resetError = new Error("reset failed");
     failStatements(db, "set_config('client_min_messages'", resetError);
     const onReleaseError = vi.fn();
@@ -537,7 +587,7 @@ describe("migrateDb on failure", () => {
    * callback, and closing the handle ends the lock with the session.
    */
   it("returns the outcome when only the unlock fails, and reports the failure", async () => {
-    const db = createDb(env.DATABASE_URL, { max: 1 });
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
     const unlockError = new Error("unlock failed");
     failStatements(db, "pg_advisory_unlock", unlockError);
     const onReleaseError = vi.fn();
@@ -551,7 +601,7 @@ describe("migrateDb on failure", () => {
     } finally {
       await closeDb(db);
     }
-    expect(await heldAdvisoryLocks()).toBe(0);
+    await expectNoAdvisoryLocks();
   });
 
   /**
@@ -560,8 +610,8 @@ describe("migrateDb on failure", () => {
    * forever with an empty log (and the whole Compose stack behind it).
    */
   it("gives up waiting for a held lock with a message that says so", async () => {
-    const first = createDb(env.DATABASE_URL, { max: 1 });
-    const second = createDb(env.DATABASE_URL, { max: 1 });
+    const first = createDb(TEST_DATABASE_URL, { max: 1 });
+    const second = createDb(TEST_DATABASE_URL, { max: 1 });
     let release: () => void = () => undefined;
     const held = new Promise<void>((done) => {
       release = done;
@@ -613,16 +663,7 @@ describe("migrateDb on failure", () => {
  */
 describe("the db:migrate entry point", () => {
   it("migrates through its own connection and exits with 0", async () => {
-    const out: string[] = [];
-    const err: string[] = [];
-    vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
-      out.push(String(chunk));
-      return true;
-    });
-    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
-      err.push(String(chunk));
-      return true;
-    });
+    const { out, err } = captureProcessOutput();
     let exitCode: typeof process.exitCode;
     try {
       await import("../src/cli/migrate.js");
@@ -637,14 +678,14 @@ describe("the db:migrate entry point", () => {
       `migrations: nothing to apply, ${SHIPPED_MIGRATIONS} already applied\n`,
     ]);
     expect(exitCode).toBe(0);
-    expect(await heldAdvisoryLocks()).toBe(0);
+    await expectNoAdvisoryLocks();
   });
 });
 
 describe("heldAdvisoryLocks", () => {
   /** A lock on another database of the same server is not this test's. */
   it("does not count an advisory lock held on another database", async () => {
-    const url = new URL(env.DATABASE_URL);
+    const url = testDatabaseUrl();
     url.pathname = "/postgres";
     const other = postgres(url.toString(), { max: 1 });
     try {

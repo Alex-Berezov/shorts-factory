@@ -23,6 +23,7 @@ export {
 } from "./redis.js";
 export {
   type RepeatedSigint,
+  SIGINT_REPEAT_WINDOW_MS,
   type ShutdownHandler,
   type ShutdownStage,
   createShutdownHandler,

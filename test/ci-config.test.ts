@@ -19,7 +19,9 @@ import {
  * the turbo hash of a task covers is `turbo-inputs.test.ts`. A test of the
  * root project, next to the other tests of how the repository is built and
  * run (container.test.ts, compose-rules.test.ts); `//#test:repo` hashes every
- * tracked file of the repository, so each file read here is in its hash.
+ * file of the repository git does not ignore - tracked, or untracked and not
+ * ignored, the set `repoFilesUnder` lists - so each file read here is in its
+ * hash.
  */
 const read = readRepoFile;
 const workflow = read(".github/workflows/ci.yml").replace(/\r\n/g, "\n");

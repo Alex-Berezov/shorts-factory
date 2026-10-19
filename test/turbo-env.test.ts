@@ -39,7 +39,8 @@ describe("turbo.json, dev task", () => {
     // The literal above against the schema it copies, read as text: the
     // root project imports no package, so this is what keeps the two lists
     // from drifting apart. The file is in the hash of `//#test:repo` as every
-    // tracked file is (rule (d) of turbo-inputs.test.ts).
+    // file git does not ignore is, tracked or not (rule (d) of
+    // turbo-inputs.test.ts, `repoFilesUnder`).
     const schema = readRepoFile("packages/config/src/schema.ts");
     const declared = /BUILD_LABEL_NAMES = \[([^\]]*)\]/.exec(schema)?.[1];
     const names = [...(declared ?? "").matchAll(/"([A-Z_]+)"/g)].map(

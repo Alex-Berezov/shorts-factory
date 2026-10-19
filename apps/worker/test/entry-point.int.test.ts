@@ -1,7 +1,7 @@
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { closeDb } from "@sf/db";
-import { closeRedis } from "@sf/runtime";
+import { SIGINT_REPEAT_WINDOW_MS, closeRedis } from "@sf/runtime";
 import { Queue } from "bullmq";
 import {
   afterAll,
@@ -13,6 +13,7 @@ import {
   it,
 } from "vitest";
 import { systemSmokeJob } from "../src/jobs/system-smoke.js";
+import { type ChildRun, collectOutput, endOf, startOf } from "./child-run.js";
 import { DEV_COMMAND, manifestScripts } from "./dev-command.js";
 import {
   deleteSmokeUsage,
@@ -22,14 +23,6 @@ import {
   seedQueueSwitches,
   waitFor,
 } from "./helpers.int.js";
-
-/**
- * How long a second Ctrl+C is still the same keypress: the window of
- * `SIGINT_REPEAT_WINDOW_MS` in packages/runtime/src/shutdown.ts, which the
- * package keeps to itself - no app reads it. A longer window there turns
- * the cases that wait this one out red.
- */
-const SIGINT_REPEAT_WINDOW_MS = 1_000;
 
 /**
  * The DoD of E0-08 as a run: a real worker process, started the way
@@ -58,6 +51,8 @@ const ENTRY = fileURLToPath(
 const JOB_COUNT = 30;
 /** How long the worker may take to come up and say so. */
 const START_DEADLINE_MS = 20_000;
+/** How much of what a child said goes into the failure of its start. */
+const OUTPUT_TAIL_CHARS = 2_000;
 /**
  * The longest the usage table stays locked once the worker is up, whatever
  * happens to the case. Counted from the start of the worker, not from the
@@ -66,19 +61,16 @@ const START_DEADLINE_MS = 20_000;
  * code. Far above what the case needs after the start (the jobs, the first
  * signal, the repeat window, the second signal); with the start deadline it
  * stays under the 30 s test timeout, so a case that fails or hangs never takes
- * the lock into the next case or the next file.
+ * the lock into the next case or the next file. Measured from `armBackstop` to
+ * the release, ten runs on the development machine held it 1.19-1.33 s: the
+ * bound is six times that, and three times the slowest run would still be
+ * under it.
  */
 const HOLD_MAX_MS = 8_000;
 
 const db = openTestDb();
 const redis = openTestRedis();
 const smoke = new Queue("system.smoke", { connection: redis });
-
-interface Run {
-  code: number | null;
-  signal: NodeJS.Signals | null;
-  stdout: string;
-}
 
 /**
  * Starts the worker, waits until it is up, signals it and waits for the end.
@@ -92,38 +84,24 @@ interface Run {
  * left running would keep taking the jobs of the next case.
  */
 async function runUnderSignal(
-  options: { twice?: boolean; onStarted?: () => void } = {},
-): Promise<Run> {
+  options: {
+    twice?: boolean;
+    onStarted?: () => void;
+    env?: NodeJS.ProcessEnv;
+  } = {},
+): Promise<ChildRun> {
   const child = fork(ENTRY, [], {
     execArgv: ["--import", "tsx"],
     stdio: ["ignore", "pipe", "pipe", "ipc"],
+    ...(options.env === undefined ? {} : { env: options.env }),
   });
-  let stdout = "";
-  child.stdout?.on("data", (chunk: Buffer) => {
-    stdout += chunk.toString();
-  });
-  child.stderr?.on("data", (chunk: Buffer) => {
-    stdout += chunk.toString();
-  });
-
-  const ended = new Promise<Run>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      resolve({ code, signal, stdout });
-    });
-  });
+  const output = collectOutput(child);
+  const ended = endOf(child, output);
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`the worker never started; it said: ${stdout}`));
-      }, START_DEADLINE_MS);
-      child.on("message", (message: unknown) => {
-        if (message === "started") {
-          clearTimeout(timer);
-          resolve();
-        }
-      });
+    await startOf(child, output, {
+      deadlineMs: START_DEADLINE_MS,
+      tailChars: OUTPUT_TAIL_CHARS,
     });
     options.onStarted?.();
 
@@ -141,7 +119,7 @@ async function runUnderSignal(
     if (options.twice === true) {
       await waitFor(
         async () =>
-          stdout.includes("shutdown started, draining active jobs")
+          output().includes("shutdown started, draining active jobs")
             ? true
             : undefined,
         { what: "the first signal to start the stop", intervalMs: 20 },
@@ -257,12 +235,12 @@ describe("worker entry point under a signal", () => {
     expect(run.signal).toBeNull();
     expect(run.code).toBe(0);
 
-    const stages = [...run.stdout.matchAll(/"target":"([a-z]+)"/g)].map(
+    const stages = [...run.output.matchAll(/"target":"([a-z]+)"/g)].map(
       (match) => match[1],
     );
     expect(stages).toEqual(["workers", "queues", "redis", "db"]);
-    expect(run.stdout).toContain("shutdown started, draining active jobs");
-    expect(run.stdout).toContain("shutdown complete");
+    expect(run.output).toContain("shutdown started, draining active jobs");
+    expect(run.output).toContain("shutdown complete");
 
     // The jobs it had taken are finished, not abandoned half-way: an active
     // job left behind comes back only through the stalled scan, which is what
@@ -273,7 +251,7 @@ describe("worker entry point under a signal", () => {
 
   it("leaves at once with 130 when the signal comes a second time", async () => {
     let hold: Awaited<ReturnType<typeof holdUsageWrites>> | undefined;
-    let run: Run;
+    let run: ChildRun;
     try {
       hold = await holdUsageWrites();
       run = await runUnderSignal({ twice: true, onStarted: hold.armBackstop });
@@ -288,8 +266,19 @@ describe("worker entry point under a signal", () => {
     // The process chose the code itself; nothing outside killed it.
     expect(run.signal).toBeNull();
     expect(run.code).toBe(130);
-    expect(run.stdout).toContain("shutdown started, draining active jobs");
-    expect(run.stdout).toContain("forced exit, active jobs return as stalled");
+    expect(run.output).toContain("shutdown started, draining active jobs");
+    expect(run.output).toContain("forced exit, active jobs return as stalled");
+  });
+
+  it("fails at once, with the reason, when the worker dies on its way up", async () => {
+    // A config the worker refuses at import: the child exits with 1 before
+    // it can say it started.
+    const startedAt = Date.now();
+
+    await expect(
+      runUnderSignal({ env: { ...process.env, LOG_LEVEL: "loud" } }),
+    ).rejects.toThrow(/exited before it started \(code 1, .*LOG_LEVEL/s);
+    expect(Date.now() - startedAt).toBeLessThan(START_DEADLINE_MS / 2);
   });
 
   it("is started by `pnpm dev` exactly the way this test starts it", () => {

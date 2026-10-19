@@ -15,7 +15,12 @@ import { createBudgetProbe } from "../src/lib/budget.js";
 import { createHealthProbes } from "../src/lib/health.js";
 import { createWorkerProbe } from "../src/lib/heartbeat.js";
 import { type QueueStats, createQueueStats } from "../src/lib/queue-stats.js";
-import { openTestDb, openTestQueue, openTestRedis } from "./helpers.int.js";
+import {
+  openTestDb,
+  openTestQueues,
+  openTestRedis,
+  whenReady,
+} from "./helpers.int.js";
 import { AUTH_HEADER, TEST_PASSWORD } from "./helpers.js";
 
 /**
@@ -26,7 +31,8 @@ import { AUTH_HEADER, TEST_PASSWORD } from "./helpers.js";
  * The api and the worker suites share one test stack, one after the other
  * (`turbo run test:int --concurrency=1`), and whatever a crashed run leaves
  * behind is met by the next one, so this suite keeps to a Redis database of its
- * own (`suiteRedisUrl` in `helpers.int.ts`) and to a provider of its own in the
+ * own (`suiteRedisUrl` of `packages/db/test-support/stack-guard.ts`, through
+ * `openTestRedis` in `helpers.int.ts`) and to a provider of its own in the
  * shared test database: the worker spends `gemini`, this file spends
  * `youtube_data`, and everything it writes it also removes.
  */
@@ -152,7 +158,8 @@ describe("GET /system/status against the live stack", () => {
   it("tells a paused queue from an idle one", async () => {
     // Opened without writing its meta: the case after this one holds the page
     // to that, and a fixture that wrote it would teach the opposite.
-    const queue = openTestQueue(PAUSE_QUEUE, redis);
+    const queues = openTestQueues(redis);
+    const queue = queues.get(PAUSE_QUEUE);
     try {
       await queue.pause();
 
@@ -172,7 +179,7 @@ describe("GET /system/status against the live stack", () => {
       ).toMatchObject({ paused: false });
     } finally {
       await queue.resume();
-      await queue.close();
+      await queues.close();
     }
   });
 
@@ -218,16 +225,29 @@ describe("GET /system/status against the live stack", () => {
   });
 });
 
+/**
+ * The connection of this suite, not of a forked api: what a forked process
+ * dials is checked by its client ids in `entry-point.int.test.ts`.
+ */
 describe("the Redis of the api suite", () => {
   it("is the api's own database, not the one the worker suite takes jobs from", async () => {
     // The pause above must not reach a queue of the worker suite: the two
     // keep apart by database, and this is the connection every case uses.
     expect(redis.options.db).toBe(Number(TEST_REDIS_DATABASE_OF.api));
     expect(redis.options.db).not.toBe(Number(TEST_REDIS_DATABASE_OF.worker));
-    // And the server agrees: the connection really sits in that database.
-    const info = await redis.client("INFO");
-    expect(String(info)).toMatch(
-      new RegExp(`\\bdb=${TEST_REDIS_DATABASE_OF.api}\\b`),
-    );
+    // And the server agrees: a connection the same factory opens really sits
+    // in that database. A client of the case's own, fresh rather than warmed
+    // up by the cases above, and asked once its socket is up: with no offline
+    // queue a command sent while the client is still connecting is refused.
+    const own = openTestRedis();
+    try {
+      await whenReady(own);
+      const info = await own.client("INFO");
+      expect(String(info)).toMatch(
+        new RegExp(`\\bdb=${TEST_REDIS_DATABASE_OF.api}\\b`),
+      );
+    } finally {
+      own.disconnect();
+    }
   });
 });

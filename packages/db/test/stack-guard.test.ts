@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { inspect, parseEnv } from "node:util";
 import { testEnvFilePath } from "@sf/config/paths";
-import postgres from "postgres";
 import { describe, expect, it } from "vitest";
 import {
   TEST_REDIS_DATABASE_OF,
@@ -261,46 +260,6 @@ describe("the stack guard: refuses", () => {
     expect(() =>
       assertBothHalves(LOCAL_DB, "redis://localhost:6389/2"),
     ).toThrow(/redis database "2"/);
-  });
-});
-
-describe("the guard against the driver", () => {
-  /** Where postgres-js would connect for `url` - read from its options, no socket. */
-  function driverTarget(url: string): { hosts: string[]; ports: number[] } {
-    const sql = postgres(url, { max: 1 });
-    const target = {
-      hosts: [...sql.options.host],
-      ports: [...sql.options.port],
-    };
-    void sql.end();
-    return target;
-  }
-
-  it("lets through only URLs the driver dials on the test stack", () => {
-    // `[::1]` is left out: postgres-js 3.4 cannot dial an IPv6 literal from a
-    // URL at all (it reads the host as `[`), which fails closed.
-    const local: readonly string[] = TEST_STACK.hosts;
-    for (const url of [
-      LOCAL_DB,
-      "postgresql://sf:sf@127.0.0.1:5442/shorts_factory_test",
-    ]) {
-      expect(() => assertLocalTestPostgres(url)).not.toThrow();
-      const target = driverTarget(url);
-      expect(target.hosts.filter((host) => !local.includes(host))).toEqual([]);
-      expect(target.ports).toEqual([Number(TEST_STACK.postgresPort)]);
-    }
-  });
-
-  it("refuses the URLs on which new URL and the driver disagree", () => {
-    // The cases above are only worth something while the driver really does
-    // go elsewhere on them.
-    for (const url of [SPLIT_AT_FIRST_AT, ENCODED_HOST_LIST]) {
-      expect(driverTarget(url).hosts, url).toContain("db.example.com");
-      expect(new URL(url).hostname, url).not.toBe("db.example.com");
-      expect(() => assertLocalTestPostgres(url), url).toThrow(
-        /refusing to touch Postgres/,
-      );
-    }
   });
 });
 

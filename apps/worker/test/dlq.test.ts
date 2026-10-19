@@ -7,6 +7,7 @@ import {
 import { UnrecoverableError } from "bullmq";
 import { describe, expect, it, vi } from "vitest";
 import {
+  type DlqRecord,
   type FailedJob,
   createDlqWriter,
   createFailedHandler,
@@ -24,6 +25,21 @@ function failedJob(overrides: Partial<FailedJob> = {}): FailedJob {
     timestamp: 1_773_000_000_000,
     failedReason: "quota exhausted",
     stacktrace: ["Error: quota exhausted"],
+    ...overrides,
+  };
+}
+
+/** The record of `failedJob()` failed at the moment the handlers are given. */
+function dlqRecord(overrides: Partial<DlqRecord> = {}): DlqRecord {
+  return {
+    queue: "radar.score",
+    jobId: "radar.score/abc/24h",
+    name: "radar.score",
+    data: { videoId: "abc" },
+    failedReason: "quota exhausted",
+    stacktrace: ["Error: quota exhausted"],
+    attemptsMade: 5,
+    failedAt: "2026-09-10T10:00:00.000Z",
     ...overrides,
   };
 }
@@ -85,16 +101,7 @@ describe("toDlqRecord", () => {
       new Date("2026-09-10T10:00:00.000Z"),
     );
 
-    expect(record).toEqual({
-      queue: "radar.score",
-      jobId: "radar.score/abc/24h",
-      name: "radar.score",
-      data: { videoId: "abc" },
-      failedReason: "quota exhausted",
-      stacktrace: ["Error: quota exhausted"],
-      attemptsMade: 5,
-      failedAt: "2026-09-10T10:00:00.000Z",
-    });
+    expect(record).toEqual(dlqRecord());
   });
 
   it("falls back to the error when the job carries no reason", () => {
@@ -123,31 +130,37 @@ describe("createFailedHandler", () => {
     await onFailed(failedJob(), new Error("boom"));
 
     expect(dlq.add).toHaveBeenCalledTimes(1);
-    expect(dlq.add).toHaveBeenCalledWith(
-      "system.dlq",
-      {
-        queue: "radar.score",
-        jobId: "radar.score/abc/24h",
-        name: "radar.score",
-        data: { videoId: "abc" },
-        failedReason: "quota exhausted",
-        stacktrace: ["Error: quota exhausted"],
-        attemptsMade: 5,
-        failedAt: "2026-09-10T10:00:00.000Z",
-      },
-      {
-        attempts: 1,
-        removeOnFail: false,
-        // A second `failed` for the same instance - a worker restarted while
-        // the job was dying - must leave one record, not two.
-        jobId: "dlq/radar.score/radar.score/abc/24h/1773000000000",
-      },
-    );
+    expect(dlq.add).toHaveBeenCalledWith("system.dlq", dlqRecord(), {
+      attempts: 1,
+      removeOnFail: false,
+      // A second `failed` for the same instance - a worker restarted while
+      // the job was dying - must leave one record, not two.
+      jobId: "dlq/radar.score/radar.score/abc/24h/1773000000000",
+    });
   });
 
+  /** The id the copy of a job created at `timestamp` is stored under. */
+  async function dlqIdOf(timestamp: number): Promise<unknown> {
+    const dlq = fakeDlq();
+    const onFailed = createFailedHandler({
+      queue: "radar.score",
+      dlq,
+      log: silent,
+      now: () => new Date("2026-09-10T10:00:00.000Z"),
+    });
+
+    await onFailed(failedJob({ timestamp }), new Error("boom"));
+
+    expect(dlq.add).toHaveBeenCalledTimes(1);
+    expect(dlq.add).toHaveBeenCalledWith(
+      "system.dlq",
+      dlqRecord(),
+      expect.objectContaining({ attempts: 1, removeOnFail: false }),
+    );
+    return dlq.add.mock.calls[0]?.at(2);
+  }
+
   it.each([
-    ["Infinity", Number.POSITIVE_INFINITY],
-    ["2**53, past the safe range", 2 ** 53],
     ["a negative", -1],
     ["NaN", Number.NaN],
   ])(
@@ -156,35 +169,39 @@ describe("createFailedHandler", () => {
       // `job.timestamp` is `parseInt` of the caller's `opts.timestamp`: the
       // builder refuses anything but a safe integer of zero or more, and a
       // refusal here would lose the copy. (A fraction never arrives.)
-      const dlq = fakeDlq();
-      const onFailed = createFailedHandler({
-        queue: "radar.score",
-        dlq,
-        log: silent,
-        now: () => new Date("2026-09-10T10:00:00.000Z"),
+      expect(await dlqIdOf(timestamp)).toEqual({
+        attempts: 1,
+        removeOnFail: false,
+        jobId: "dlq/radar.score/radar.score/abc/24h/0",
       });
+    },
+  );
 
-      await onFailed(failedJob({ timestamp }), new Error("boom"));
+  it("copies the largest safe timestamp under itself", async () => {
+    // What really arrives from Redis is narrower: BullMQ keeps 14 significant
+    // digits in Lua, so an `opts.timestamp` of `2**53` comes back as `9`, an
+    // ordinary safe integer. That path is real bullmq's, and its landing is an
+    // integration one (docs/TECH_DEBT.md, E0-12Q).
+    expect(await dlqIdOf(Number.MAX_SAFE_INTEGER)).toEqual({
+      attempts: 1,
+      removeOnFail: false,
+      jobId: "dlq/radar.score/radar.score/abc/24h/9007199254740991",
+    });
+  });
 
-      expect(dlq.add).toHaveBeenCalledTimes(1);
-      expect(dlq.add).toHaveBeenCalledWith(
-        "system.dlq",
-        {
-          queue: "radar.score",
-          jobId: "radar.score/abc/24h",
-          name: "radar.score",
-          data: { videoId: "abc" },
-          failedReason: "quota exhausted",
-          stacktrace: ["Error: quota exhausted"],
-          attemptsMade: 5,
-          failedAt: "2026-09-10T10:00:00.000Z",
-        },
-        {
-          attempts: 1,
-          removeOnFail: false,
-          jobId: "dlq/radar.score/radar.score/abc/24h/0",
-        },
-      );
+  it.each([
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["2**53, past the safe range", 2 ** 53],
+  ])(
+    "guards a timestamp of %s, which never arrives, with tail 0",
+    async (_label, timestamp) => {
+      // Unreachable from Redis (`parseInt` gives neither), kept as the guard
+      // of the rule's other side: a refusal would lose the copy.
+      expect(await dlqIdOf(timestamp)).toEqual({
+        attempts: 1,
+        removeOnFail: false,
+        jobId: "dlq/radar.score/radar.score/abc/24h/0",
+      });
     },
   );
 

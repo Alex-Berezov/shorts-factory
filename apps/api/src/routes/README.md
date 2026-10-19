@@ -8,7 +8,7 @@ as the runtime validation and as the OpenAPI document at the same time
 where web and `@sf/api-client` read the same objects; a route imports them
 and adds nothing of its own shape here.
 
-Two rules the registry cannot state on its own:
+Three rules the registry cannot state on its own:
 
 - everything is behind basic auth. The password is checked by a global hook,
   so a new route is protected the moment it is registered; publishing one is
@@ -20,16 +20,27 @@ Two rules the registry cannot state on its own:
   requestId, details? } }` - with the right status; `details` is present only
   for a whitelisted subset (validation issues, a budget failure) and absent
   otherwise. The route still declares that envelope: `...errorResponses()`
-  from `src/lib/route-schemas.ts` goes into every `schema.response` before the
-  success statuses, so the failures are in the document and the serializer
-  knows their shape. A status the route answers with a body of its own - `503`
-  on `/health` - is wrapped in `withErrorEnvelope()` from the same module:
-  an exact key wins over the wildcard for the whole status, and without the
-  wrapper a failure carrying that status is serialized against the success
-  shape and reaches the caller as a 500 from the framework. Which statuses a
-  route answers on is not a decision of the route file: `/health` takes them
-  from `HEALTH_STATUS_CODES` in `@sf/contracts`, because `@sf/api-client` has
-  to read the same list to tell an answer from a failure.
+  from `src/lib/route-schemas.ts` goes into every `schema.response` next to
+  the success statuses, so the failures are in the document and the
+  serializer knows their shape. Fastify picks the schema of a reply by its
+  exact status, then by its class (`2xx`, `4xx`), then `default`
+  (`fastify/lib/schemas.js`, `getSchemaSerializer`). With `4xx` and `5xx`
+  declared, `default` is reached by a 1xx-3xx status alone - a success or a
+  redirect, never a failure - so a route declares no `default` and names its
+  success status instead (`test/route-shape.test.ts` refuses a `default`,
+  whatever it holds). Fastify reads each key lowercased, so `4XX` and `4xx`
+  are one key and the later of the two in the object wins: a class key
+  declared after `...errorResponses()` replaces the envelope for that class
+  (`test/route-shape.test.ts` refuses such a route). A status the route
+  answers with a body of its own -
+  `503` on `/health` - is wrapped in `withErrorEnvelope()` from the same
+  module: an exact key wins over the wildcard for the whole status, and
+  without the wrapper a failure carrying that status is serialized against
+  the success shape and reaches the caller as a 500 from the framework.
+  Which statuses a route answers on is not a decision of the route file:
+  `/health` takes them from `HEALTH_STATUS_CODES` in `@sf/contracts`,
+  because `@sf/api-client` has to read the same list to tell an answer from
+  a failure.
 - a handler states what it returns, and states it from its own schema. A
   route is registered with `defineRoute(app, { method, url, responses,
   schema, ...options }, handler)` from `src/lib/route-schemas.ts` and with

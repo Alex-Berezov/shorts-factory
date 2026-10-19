@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 /**
  * The public surface of `@sf/db` is declared once, in `exports`: the package
@@ -20,19 +20,78 @@ import { describe, expect, it } from "vitest";
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const consumerDir = resolve(packageDir, "../../apps/worker");
 
-/** What Node answers for `specifier` from the consumer: a URL or `ERR <code>`. */
-function resolveFromConsumer(specifier: string): string {
-  return execFileSync(
+/** Every specifier the cases below ask about. */
+const ROOT = "@sf/db";
+const SHARED_TEST_SUPPORT: readonly (readonly [string, string])[] = [
+  ["@sf/db/test-support/stack-guard", "test-support/stack-guard.ts"],
+  ["@sf/db/test-support/fixture", "test-support/fixture.ts"],
+  [
+    "@sf/db/test-support/entry-check/postgres",
+    "test-support/entry-check/postgres.ts",
+  ],
+  [
+    "@sf/db/test-support/entry-check/migrated-stack",
+    "test-support/entry-check/migrated-stack.ts",
+  ],
+];
+const DEEP_IMPORTS: readonly string[] = [
+  "@sf/db/src/cli/migrate.ts",
+  "@sf/db/src/cli/migrate.js",
+  "@sf/db/src/cli/seed.ts",
+  "@sf/db/src/migrate.ts",
+  // The guard's old address, replaced by test-support: an import left on it
+  // must fail loudly rather than reach a second copy.
+  "@sf/db/test/local-host-guard.js",
+  "@sf/db/test-support/migration-check",
+];
+
+/**
+ * The limit on the one node process the file starts. A warm start that
+ * resolves every specifier takes about 80 ms on the development machine
+ * (five warm runs: 76-83 ms); the limit is far above that, so
+ * that only a hang, not a loaded machine, ends it.
+ */
+const RESOLVE_TIMEOUT_MS = 5_000;
+
+/**
+ * What Node answers for each specifier from the consumer: a URL or
+ * `ERR <code>`. One process for the whole file: a cold node per case was the
+ * slow part of the suite, and a timeout on a loaded machine.
+ */
+function resolveFromConsumer(
+  specifiers: readonly string[],
+): Map<string, string> {
+  const output = execFileSync(
     process.execPath,
     [
       "--input-type=module",
       "-e",
-      "try { console.log(import.meta.resolve(process.argv[1])) } catch (e) { console.log(`ERR ${e.code}`) }",
-      specifier,
+      "const answers = {}; for (const s of JSON.parse(process.argv[1])) { try { answers[s] = import.meta.resolve(s) } catch (e) { answers[s] = `ERR ${e.code}` } } console.log(JSON.stringify(answers))",
+      JSON.stringify(specifiers),
     ],
-    { cwd: consumerDir, encoding: "utf8" },
-  ).trim();
+    { cwd: consumerDir, encoding: "utf8", timeout: RESOLVE_TIMEOUT_MS },
+  );
+  const parsed: unknown = JSON.parse(output);
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error(`node answered no map of specifiers: ${output}`);
+  }
+  return new Map(
+    Object.entries(parsed).map(([specifier, answer]) => [
+      specifier,
+      String(answer),
+    ]),
+  );
 }
+
+let answers = new Map<string, string>();
+
+beforeAll(() => {
+  answers = resolveFromConsumer([
+    ROOT,
+    ...SHARED_TEST_SUPPORT.map(([specifier]) => specifier),
+    ...DEEP_IMPORTS,
+  ]);
+}, RESOLVE_TIMEOUT_MS + 1_000);
 
 function urlOf(relativePath: string): string {
   return pathToFileURL(resolve(packageDir, relativePath)).href;
@@ -40,37 +99,18 @@ function urlOf(relativePath: string): string {
 
 describe("@sf/db exports", () => {
   it("resolves the package root to the re-export module", () => {
-    expect(resolveFromConsumer("@sf/db")).toBe(urlOf("src/index.ts"));
+    expect(answers.get(ROOT)).toBe(urlOf("src/index.ts"));
   });
 
-  it.each([
-    ["@sf/db/test-support/stack-guard", "test-support/stack-guard.ts"],
-    ["@sf/db/test-support/fixture", "test-support/fixture.ts"],
-    [
-      "@sf/db/test-support/entry-check/postgres",
-      "test-support/entry-check/postgres.ts",
-    ],
-    [
-      "@sf/db/test-support/entry-check/migrated-stack",
-      "test-support/entry-check/migrated-stack.ts",
-    ],
-  ])("resolves the shared test support %s", (specifier, file) => {
-    expect(resolveFromConsumer(specifier)).toBe(urlOf(file));
-  });
+  it.each(SHARED_TEST_SUPPORT)(
+    "resolves the shared test support %s",
+    (specifier, file) => {
+      expect(answers.get(specifier)).toBe(urlOf(file));
+    },
+  );
 
-  it.each([
-    "@sf/db/src/cli/migrate.ts",
-    "@sf/db/src/cli/migrate.js",
-    "@sf/db/src/cli/seed.ts",
-    "@sf/db/src/migrate.ts",
-    // The guard's old address, replaced by test-support: an import left on it
-    // must fail loudly rather than reach a second copy.
-    "@sf/db/test/local-host-guard.js",
-    "@sf/db/test-support/migration-check",
-  ])("refuses the deep import %s", (specifier) => {
-    expect(resolveFromConsumer(specifier)).toBe(
-      "ERR ERR_PACKAGE_PATH_NOT_EXPORTED",
-    );
+  it.each(DEEP_IMPORTS)("refuses the deep import %s", (specifier) => {
+    expect(answers.get(specifier)).toBe("ERR ERR_PACKAGE_PATH_NOT_EXPORTED");
   });
 });
 

@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -46,6 +48,43 @@ function manifestOf(): z.infer<typeof ManifestSchema> {
   return ManifestSchema.parse(declared);
 }
 
+/**
+ * The names each module exports, star re-exports followed, as the compiler
+ * sees them. Read from the compiler rather than imported: `server.ts` opens
+ * with the `server-only` marker, which throws under vitest.
+ */
+function exportsOf(paths: readonly string[]): Map<string, string[]> {
+  const files = paths.map((path) =>
+    fileURLToPath(new URL(path, import.meta.url)),
+  );
+  const program = ts.createProgram(files, {
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    target: ts.ScriptTarget.ES2022,
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
+  });
+  const checker = program.getTypeChecker();
+  const result = new Map<string, string[]>();
+  paths.forEach((path, index) => {
+    const source = program.getSourceFile(files[index] ?? "");
+    const module =
+      source === undefined ? undefined : checker.getSymbolAtLocation(source);
+    if (module === undefined) {
+      throw new Error(`the compiler sees no module at ${path}`);
+    }
+    result.set(
+      path,
+      checker
+        .getExportsOfModule(module)
+        .map((symbol) => symbol.name)
+        .sort(),
+    );
+  });
+  return result;
+}
+
 describe("package exports", () => {
   it("sends a browser bundle to the server-only module", () => {
     const manifest = manifestOf();
@@ -79,9 +118,14 @@ describe("package exports", () => {
   });
 
   it("offers through the server entry exactly what the root entry offers", () => {
-    // web reaches this package only through `./server` (ADR-0001), so a
-    // hand-written list there would hide from web whatever a later epic adds
-    // to the client. Re-exporting the root entry leaves one list.
-    expect(read("../src/server.ts")).toContain('export * from "./index.js"');
+    // web reaches this package only through `./server` (ADR-0001), so an
+    // export the root entry has and the server entry lacks is hidden from web,
+    // and one only the server entry has is a second list to forget.
+    const exported = exportsOf(["../src/index.ts", "../src/server.ts"]);
+
+    expect(exported.get("../src/server.ts")).toEqual(
+      exported.get("../src/index.ts"),
+    );
+    expect(exported.get("../src/index.ts")).toContain("createApiClient");
   });
 });

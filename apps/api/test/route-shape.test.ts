@@ -34,7 +34,16 @@ import { buildTestApp } from "./helpers.js";
  *   builds, and the same thing written as `.or(ErrorBodySchema)`: an exact key
  *   wins over the wildcard for the whole status, and without the envelope a
  *   failure carrying that status is answered as a 500 by the framework;
- * - an `OK_STATUS` key, which `SuccessReply` reads the reply type from.
+ * - an `OK_STATUS` key, which `SuccessReply` reads the reply type from;
+ * - no `default` key. Fastify picks the schema of a reply by its exact status,
+ *   then by its class (`2xx`, `4xx`), then `default`
+ *   (`fastify/lib/schemas.js`, `getSchemaSerializer`); with `4xx` and `5xx`
+ *   declared, `default` is reached by a 1xx-3xx status alone - a success or a
+ *   redirect, never a failure - so it is refused, whatever it holds, and the
+ *   success status is named instead.
+ *
+ * A key is read the way Fastify reads it, lowercased (`4XX` is `4xx`), the
+ * last of a name winning.
  *
  * The envelope is recognised by its structure, not by the identity of the
  * object or by `instanceof`: a copy of its shape, or a schema built by a
@@ -46,7 +55,13 @@ function routeShapeViolations(response: unknown): string[] {
   if (typeof response !== "object" || response === null) {
     return ["no schema.response"];
   }
-  const declared = new Map<string, unknown>(Object.entries(response));
+  // By the key Fastify serializes with: it lowercases each key (`4XX` is
+  // `4xx`) and a later key of the same name replaces an earlier one
+  // (`lib/validation.js`, `compileSchemasForSerialization`).
+  const declared = new Map<string, unknown>();
+  for (const [key, schema] of Object.entries(response)) {
+    declared.set(key.toLowerCase(), schema);
+  }
   const violations: string[] = [];
   for (const wildcard of ["4xx", "5xx"]) {
     if (!isEnvelope(declared.get(wildcard))) {
@@ -56,10 +71,15 @@ function routeShapeViolations(response: unknown): string[] {
   if (!declared.has(String(OK_STATUS))) {
     violations.push(`no ${OK_STATUS}`);
   }
+  if (declared.has("default")) {
+    violations.push(
+      "default is refused: with 4xx and 5xx declared it answers 1xx-3xx only - name the success status",
+    );
+  }
   for (const [key, schema] of declared) {
     const status = Number(key);
-    if (!Number.isInteger(status) || status < 400 || status > 599) continue;
-    if (!carriesEnvelope(schema)) {
+    const failure = Number.isInteger(status) && status >= 400 && status <= 599;
+    if (failure && !carriesEnvelope(schema)) {
       violations.push(`${key} has no error envelope`);
     }
   }
@@ -287,6 +307,33 @@ describe("routeShapeViolations", () => {
     ).toEqual(["no 200"]);
   });
 
+  it("refuses a default key", () => {
+    const refused =
+      "default is refused: with 4xx and 5xx declared it answers 1xx-3xx only - name the success status";
+    // Whatever it holds: the envelope would serialize a 201 or a 204 as a
+    // failure, and a success body is still a status the route leaves unnamed.
+    for (const schema of [ErrorBodySchema, HealthResponseSchema]) {
+      expect(
+        routeShapeViolations({
+          ...errorResponses(),
+          200: HealthResponseSchema,
+          default: schema,
+        }),
+      ).toEqual([refused]);
+    }
+  });
+
+  it("reads an upper-case wildcard as the wildcard it replaces", () => {
+    // Declared after `...errorResponses()`, `4XX` is the `4xx` Fastify keeps.
+    expect(
+      routeShapeViolations({
+        ...errorResponses(),
+        200: HealthResponseSchema,
+        "4XX": HealthResponseSchema,
+      }),
+    ).toEqual(["4xx is not the error envelope"]);
+  });
+
   it("refuses a route without schema.response", () => {
     expect(routeShapeViolations(undefined)).toEqual(["no schema.response"]);
   });
@@ -365,6 +412,11 @@ async function ownRoutes(
   return registered.filter((route) => !documentation.has(routeKey(route)));
 }
 
+/** Entries in the order of their route, for a comparison as a set. */
+function byRoute<T extends { route: string }>(entries: T[]): T[] {
+  return [...entries].sort((a, b) => a.route.localeCompare(b.route));
+}
+
 function shapes(routes: RouteOptions[]) {
   return routes.map((route) => ({
     route: routeKey(route),
@@ -383,13 +435,16 @@ describe("routes of the registry", () => {
   });
 
   it("sees exactly the routes the registry declares, each in shape", async () => {
-    // A hook that saw nothing would pass on no routes: the list is exact.
-    expect(shapes(await ownRoutes())).toEqual([
-      { route: "GET /health", violations: [] },
-      { route: "HEAD /health", violations: [] },
-      { route: "GET /system/status", violations: [] },
-      { route: "HEAD /system/status", violations: [] },
-    ]);
+    // A hook that saw nothing would pass on no routes: the list is exact,
+    // and compared as a set - the order Fastify registers in is not ours.
+    expect(byRoute(shapes(await ownRoutes()))).toEqual(
+      byRoute([
+        { route: "GET /health", violations: [] },
+        { route: "HEAD /health", violations: [] },
+        { route: "GET /system/status", violations: [] },
+        { route: "HEAD /system/status", violations: [] },
+      ]),
+    );
   });
 
   it("checks an explicit HEAD route, a route of several methods and a route under /docs/", async () => {

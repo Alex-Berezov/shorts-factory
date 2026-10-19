@@ -1,12 +1,12 @@
 import { HealthResponseSchema } from "@sf/contracts";
 import { closeDb } from "@sf/db";
-import { createRequestRedis } from "@sf/runtime";
+import { connectionFailure, createRequestRedis, errorCode } from "@sf/runtime";
 import type { Redis } from "ioredis";
 import { afterEach, describe, expect, it } from "vitest";
 import { type AppInstance, buildApp } from "../src/app.js";
 import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
 import { createHealthProbes } from "../src/lib/health.js";
-import { openTestDb, openTestRedis } from "./helpers.int.js";
+import { openTestDb, openTestRedis, whenReady } from "./helpers.int.js";
 import {
   EMPTY_QUEUES,
   IDLE_BUDGET,
@@ -40,21 +40,6 @@ const FAST_FAILURE_MS = 1_000;
 
 let started: Array<{ app: AppInstance; redis: Redis; close(): Promise<void> }> =
   [];
-
-/**
- * Resolves once the client has a usable socket. A freshly created client is
- * still connecting, and with the offline queue disabled a ping issued in that
- * window fails - which is the honest answer for `/health`, but not what the
- * "both services are up" case is about.
- */
-async function whenReady(redis: Redis): Promise<void> {
-  if (redis.status === "ready") {
-    return;
-  }
-  await new Promise<void>((resolve) => {
-    redis.once("ready", resolve);
-  });
-}
 
 function startApp(redis: Redis): {
   app: AppInstance;
@@ -102,7 +87,7 @@ afterEach(async () => {
 
 describe("GET /health against live services", () => {
   it("answers 200 while Postgres and Redis are up", async () => {
-    const { app, redis } = startApp(openTestRedis());
+    const { app, redis, errors } = startApp(openTestRedis());
     await app.ready();
     await whenReady(redis);
 
@@ -112,13 +97,15 @@ describe("GET /health against live services", () => {
     expect(HealthResponseSchema.parse(JSON.parse(res.payload))).toEqual({
       status: "ok",
     });
+    // A client that is up has nothing to report.
+    expect(errors).toEqual([]);
   });
 
   it("reports a dead Redis quickly instead of waiting on retries", async () => {
     // The client defaults would queue the ping offline and reconnect forever,
     // so this case is the proof that `enableOfflineQueue` and the timeouts of
     // `createRequestRedis` hold on a real socket.
-    const { app } = startApp(
+    const { app, errors } = startApp(
       createRequestRedis(CLOSED_REDIS_URL, {
         commandTimeoutMs: DEPENDENCY_TIMEOUT_MS,
       }),
@@ -134,5 +121,12 @@ describe("GET /health against live services", () => {
       status: "degraded",
     });
     expect(elapsed).toBeLessThan(FAST_FAILURE_MS);
+    // The reason is the refused socket - a connection failure by its code,
+    // not whatever else the client might have run into.
+    expect(errors).not.toHaveLength(0);
+    expect(errors.map((err) => connectionFailure(err))).toEqual(
+      errors.map(() => "unreachable"),
+    );
+    expect(errors.map((err) => errorCode(err))).toContain("ECONNREFUSED");
   });
 });

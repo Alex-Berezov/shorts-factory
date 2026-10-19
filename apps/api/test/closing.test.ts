@@ -5,7 +5,7 @@ import {
   recordingLogger,
 } from "@sf/runtime/test-support/recording-logger";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildTestApp, parseErrorBody } from "./helpers.js";
+import { AUTH_HEADER, buildTestApp, parseErrorBody } from "./helpers.js";
 
 /**
  * The stop of the service as a caller sees it, over a real socket: Fastify
@@ -21,10 +21,15 @@ interface Answer {
 }
 
 /** One GET through the given agent, read to the end. */
-function get(agent: Agent, port: number, path: string): Promise<Answer> {
+function get(
+  agent: Agent,
+  port: number,
+  path: string,
+  headers: Record<string, string> = {},
+): Promise<Answer> {
   return new Promise((resolve, reject) => {
     const req = request(
-      { host: "127.0.0.1", port, path, agent, method: "GET" },
+      { host: "127.0.0.1", port, path, agent, method: "GET", headers },
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -179,5 +184,59 @@ describe("a request that arrives while the service is closing", () => {
 
     expect(answer.statusCode).toBe(503);
     expect(parseErrorBody(answer.body).error.code).toBe("INTERNAL_ERROR");
+  });
+});
+
+describe("a request already in its handler when the service starts closing", () => {
+  it("is let finish, and answered 200", async () => {
+    let entered = (): void => {};
+    let release = (): void => {};
+    const inHandler = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const app = buildTestApp({
+      routes: (instance) => {
+        instance.get("/test/in-flight", async () => {
+          entered();
+          await held;
+          return { finished: true };
+        });
+      },
+    });
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const address = app.server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("the test server is not listening on a tcp port");
+    }
+    const agent = new Agent({ keepAlive: false });
+    const stop: { closed?: Promise<void> } = {};
+    cleanup.push(async () => {
+      release();
+      agent.destroy();
+      await (stop.closed ?? app.close());
+    });
+
+    const answer = get(agent, address.port, "/test/in-flight", {
+      authorization: AUTH_HEADER,
+    });
+    await inHandler;
+    const closed = app.close();
+    stop.closed = closed;
+    let closedEarly = false;
+    void closed.then(() => {
+      closedEarly = true;
+    });
+    // The close waits for the request it found in flight.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closedEarly).toBe(false);
+
+    release();
+    const finished = await answer;
+    expect(finished.statusCode).toBe(200);
+    expect(JSON.parse(finished.body)).toEqual({ finished: true });
+    await closed;
   });
 });

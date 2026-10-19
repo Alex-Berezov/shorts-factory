@@ -21,11 +21,13 @@ import { recordingUsage, unusedBudget } from "./job-deps.js";
  * The connections are real objects and neither of them is ever opened:
  * `lazyConnect` keeps ioredis off the socket until a command is sent, `set` is
  * replaced before that can happen, and postgres-js connects on the first
- * query, which the handler does not make.
+ * query, which the handler does not make. The database is an address nothing
+ * listens on with no database by that name: were the handle ever queried, the
+ * refusal would say so instead of the case writing into the test database by
+ * accident.
  */
-const db: Db = createDb("postgres://sf:sf@localhost:5442/shorts_factory_test", {
-  max: 1,
-});
+const NEVER_DIALLED_DB = "postgres://sf:sf@127.0.0.1:1/never_dialled";
+const db: Db = createDb(NEVER_DIALLED_DB, { max: 1 });
 
 afterAll(async () => {
   await closeDb(db);

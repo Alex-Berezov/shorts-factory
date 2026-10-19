@@ -1,5 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type {
+  FastifyHttpOptions,
+  RawServerDefault,
+  RouteOptions,
+} from "fastify";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AppInstance } from "../src/app.js";
+import { DOCS_ROUTE, OPENAPI_ROUTE } from "../src/plugins/openapi.js";
 import {
   AUTH_HEADER,
   TEST_PASSWORD,
@@ -7,6 +13,26 @@ import {
   buildTestApp,
   parseErrorBody,
 } from "./helpers.js";
+
+/**
+ * Every route an app of this file registers, from its first one: the hook is
+ * added where the instance is created, before `buildApp` registers anything.
+ * The documentation routes are registered synchronously inside `buildApp`, so
+ * a hook added to the app `buildTestApp()` returns would never see them.
+ */
+const registered = vi.hoisted(() => ({ routes: new Array<RouteOptions>() }));
+
+vi.mock("fastify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fastify")>();
+  const recording = ((options?: FastifyHttpOptions<RawServerDefault>) => {
+    const app = actual.default(options);
+    app.addHook("onRoute", (route) => {
+      registered.routes.push(route);
+    });
+    return app;
+  }) as typeof actual.default;
+  return { ...actual, default: recording };
+});
 
 /**
  * The API carries one secret and is not published outside the internal
@@ -99,8 +125,8 @@ describe("basic auth", () => {
   );
 
   it("keeps the documentation behind the password", async () => {
-    const docs = await app.inject({ method: "GET", url: "/docs" });
-    const document = await app.inject({ method: "GET", url: "/openapi.json" });
+    const docs = await app.inject({ method: "GET", url: DOCS_ROUTE });
+    const document = await app.inject({ method: "GET", url: OPENAPI_ROUTE });
 
     expect(docs.statusCode).toBe(401);
     expect(document.statusCode).toBe(401);
@@ -109,7 +135,7 @@ describe("basic auth", () => {
   it("serves the documentation with the password", async () => {
     const document = await app.inject({
       method: "GET",
-      url: "/openapi.json",
+      url: OPENAPI_ROUTE,
       headers: { authorization: AUTH_HEADER },
     });
 
@@ -121,5 +147,66 @@ describe("basic auth", () => {
     const res = await app.inject({ method: "GET", url: "/no-such-route" });
 
     expect(res.statusCode).toBe(401);
+  });
+});
+
+/** The methods `app.inject` sends. */
+const INJECTABLE_METHODS = [
+  "GET",
+  "HEAD",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OPTIONS",
+] as const;
+
+function isInjectable(
+  method: string,
+): method is (typeof INJECTABLE_METHODS)[number] {
+  const methods: readonly string[] = INJECTABLE_METHODS;
+  return methods.includes(method);
+}
+
+/**
+ * The password over every route of the assembled app, the documentation
+ * included: a route that fell out of the global hook of `plugins/auth.ts`
+ * answers without credentials, and the shape of its schema says nothing
+ * about that.
+ */
+describe("the password over the routes of the app", () => {
+  it("is asked for on every route but the public ones", async () => {
+    registered.routes.length = 0;
+    const app = buildTestApp();
+    await app.ready();
+    const routes = registered.routes.splice(0);
+    try {
+      const answered: { route: string; status: number }[] = [];
+      for (const route of routes) {
+        // A parameter or a wildcard of the route stands for any value.
+        const url = route.url.replace(/:[^/]+/g, "x").replace(/\*/g, "x");
+        for (const method of [route.method].flat()) {
+          // A method `inject` cannot send is a route this sweep cannot
+          // vouch for: it stands as answered with nothing, which fails.
+          const status = isInjectable(method)
+            ? (await app.inject({ method, url })).statusCode
+            : 0;
+          answered.push({ route: `${method} ${route.url}`, status });
+        }
+      }
+
+      expect(answered.length).toBeGreaterThan(4);
+      // The routes an anonymous caller is answered on, spelled out: the
+      // public list of `plugins/auth.ts` (`PUBLIC_ROUTES`) and the HEAD twin
+      // of its GET - a route added to it is a change of this list too.
+      expect(
+        answered
+          .filter(({ status }) => status !== 401)
+          .map(({ route }) => route)
+          .sort(),
+      ).toEqual(["GET /health", "HEAD /health"]);
+    } finally {
+      await app.close();
+    }
   });
 });

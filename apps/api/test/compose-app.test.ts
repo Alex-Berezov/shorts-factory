@@ -1,10 +1,7 @@
 import { type Env, loadEnv } from "@sf/config";
 import { QUEUE_NAMES } from "@sf/core";
-import { buildLoggerOptions, createRequestRedis } from "@sf/runtime";
-import {
-  type Recorder,
-  recordingLogger,
-} from "@sf/runtime/test-support/recording-logger";
+import { createRequestRedis } from "@sf/runtime";
+import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +14,7 @@ import {
 } from "../src/compose-app.js";
 import { type QueueStats, createQueueStats } from "../src/lib/queue-stats.js";
 import { dependencyFailureCode } from "../src/lib/system-status.js";
+import { recordingServiceLogger } from "./helpers.js";
 
 /**
  * Nothing listens on port 1. The database client does not connect until it is
@@ -40,12 +38,6 @@ function envWith(overrides: Record<string, string> = {}): Env {
     ADMIN_PASSWORD: "testtest",
     ...overrides,
   });
-}
-
-/** A recorder on the options the service builds its logger from. */
-function recordingLog(env: Env): Recorder {
-  const { transport: _unused, ...options } = buildLoggerOptions(env);
-  return recordingLogger(options);
 }
 
 /**
@@ -112,7 +104,7 @@ describe("buildInfoFrom", () => {
 describe("composeApp", () => {
   it("writes a Redis failure raised before the app exists", () => {
     const env = envWith();
-    const { log, raw } = recordingLog(env);
+    const { log, raw } = recordingServiceLogger(env);
 
     // The failure is reported from inside the factory, before `buildApp` has
     // run: a callback that waits for the app logger has nowhere to write it.
@@ -135,7 +127,7 @@ describe("composeApp", () => {
     // The client of requests reconnects every couple of seconds while Redis
     // is down; the wiring hands it the logger, and the client fades.
     const env = envWith();
-    const { log, entries } = recordingLog(env);
+    const { log, entries } = recordingServiceLogger(env);
     let opened: Redis | undefined;
     compose(env, {
       log,
@@ -169,7 +161,7 @@ describe("composeApp", () => {
    */
   it("writes no error line per queue when a pass meets a Redis that is down", async () => {
     const env = envWith();
-    const { log, entries } = recordingLog(env);
+    const { log, entries } = recordingServiceLogger(env);
     const built: QueueStats[] = [];
     compose(env, {
       log,
@@ -196,12 +188,18 @@ describe("composeApp", () => {
       );
       expect(dependencyFailureCode(failure)).toBe("unreachable");
 
-      await vi.waitFor(() => {
-        expect(closes).toHaveBeenCalledTimes(QUEUE_NAMES.length);
-        expect(
-          entries().some((entry) => entry.msg === "redis client error"),
-        ).toBe(true);
-      });
+      // A bound of its own, not the 1 s default: on an idle machine the 29
+      // closes and the line of the client are in within 6-11 ms (ten runs),
+      // and a loaded runner must not turn that into a red run.
+      await vi.waitFor(
+        () => {
+          expect(closes).toHaveBeenCalledTimes(QUEUE_NAMES.length);
+          expect(
+            entries().some((entry) => entry.msg === "redis client error"),
+          ).toBe(true);
+        },
+        { timeout: 5_000 },
+      );
     } finally {
       closes.mockRestore();
     }
@@ -216,7 +214,7 @@ describe("composeApp", () => {
 
   it("names a build label the config dropped, without its value", () => {
     const env = envWith();
-    const { log, entries } = recordingLog(env);
+    const { log, entries } = recordingServiceLogger(env);
 
     compose(env, { log, rejectedBuildLabels: ["APP_VERSION"] });
 
@@ -228,7 +226,7 @@ describe("composeApp", () => {
 
   it("says nothing about the build labels when none was dropped", () => {
     const env = envWith();
-    const { log, raw } = recordingLog(env);
+    const { log, raw } = recordingServiceLogger(env);
 
     compose(env, { log, rejectedBuildLabels: [] });
 
@@ -237,7 +235,7 @@ describe("composeApp", () => {
 
   it("runs the app on the logger it was given, redact paths and all", () => {
     const env = envWith();
-    const { log, raw } = recordingLog(env);
+    const { log, raw } = recordingServiceLogger(env);
     const { app } = compose(env, { log, rejectedBuildLabels: [] });
 
     // The shape ioredis gives the error of a failed `AUTH`: the command it
@@ -259,7 +257,7 @@ describe("composeApp", () => {
 
   it("serializes a request the way Fastify does, with a logger of ours", () => {
     const env = envWith();
-    const { log, entries } = recordingLog(env);
+    const { log, entries } = recordingServiceLogger(env);
     const { app } = compose(env, { log, rejectedBuildLabels: [] });
 
     // Handed an instance, Fastify still puts its `req` serializer on the
@@ -293,7 +291,7 @@ describe("composeApp", () => {
    */
   it("stops cleanly with a warning when Redis is down at the stop", async () => {
     const env = envWith();
-    const { log, entries } = recordingLog(env);
+    const { log, entries } = recordingServiceLogger(env);
     const codes: number[] = [];
     const { shutdown } = composeApp(env, {
       log,
@@ -315,6 +313,45 @@ describe("composeApp", () => {
   });
 
   /**
+   * The QUIT itself refused - the socket died between the status check and
+   * the command: the stop tears the client down, stays clean, and the line
+   * of the stop carries the refusal through the wiring of the api, not only
+   * through `closeRedis` on its own (`packages/runtime/test/redis.test.ts`).
+   */
+  it("writes the refusal of a QUIT on the line of a clean stop", async () => {
+    const env = envWith();
+    const { log, entries } = recordingServiceLogger(env);
+    const codes: number[] = [];
+    const refusal = new Error("Connection is closed.");
+    const { shutdown } = composeApp(env, {
+      log,
+      rejectedBuildLabels: [],
+      createRedis: (url, options) => {
+        const client = idleRedis(url, options);
+        // Connected as far as the stop can tell, and the QUIT refused.
+        client.status = "ready";
+        vi.spyOn(client, "quit").mockRejectedValue(refusal);
+        return client;
+      },
+      subscribe: noSignals,
+      exit: (code) => codes.push(code),
+    });
+    pending.push(() => shutdown("SIGTERM"));
+
+    await shutdown("SIGTERM");
+
+    const redisLines = entries().filter((entry) => entry.target === "redis");
+    expect(redisLines).toEqual([
+      expect.objectContaining({
+        level: "warn",
+        msg: "closed by disconnect",
+        err: expect.objectContaining({ message: "Connection is closed." }),
+      }),
+    ]);
+    expect(codes).toEqual([0]);
+  });
+
+  /**
    * A compose that throws after the first connection is open: what it opened
    * is closed by the same stop as on a signal, and the process leaves with
    * the code of a failure instead of the code of a crash with sockets open.
@@ -322,7 +359,7 @@ describe("composeApp", () => {
    */
   it("closes what it opened and exits with 1 when composing fails halfway", async () => {
     const env = envWith();
-    const { log, entries } = recordingLog(env);
+    const { log, entries } = recordingServiceLogger(env);
     const codes: number[] = [];
 
     let thrown: unknown;
@@ -366,7 +403,7 @@ describe("composeApp", () => {
 
   it("says the client was not opened when Redis could not be created", async () => {
     const env = envWith();
-    const { log, entries } = recordingLog(env);
+    const { log, entries } = recordingServiceLogger(env);
     const codes: number[] = [];
 
     expect(() =>
@@ -398,7 +435,7 @@ describe("composeApp", () => {
    */
   it("hands a signal during the stop of a failed compose to that stop", async () => {
     const env = envWith();
-    const { log, entries } = recordingLog(env);
+    const { log, entries } = recordingServiceLogger(env);
     const codes: number[] = [];
     const events: string[] = [];
     let signal: (name: string) => void = () => {};
@@ -437,7 +474,7 @@ describe("composeOrFail", () => {
   it("hands back what composing returned", () => {
     const env = envWith();
     const composed: ComposedApp = compose(env, {
-      log: recordingLog(env).log,
+      log: recordingServiceLogger(env).log,
       rejectedBuildLabels: [],
     });
     const fail = vi.fn();

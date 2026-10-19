@@ -1,7 +1,11 @@
-import { HEALTH_ANSWER_STATUSES } from "@sf/contracts";
+import {
+  HEALTH_ANSWER_STATUSES,
+  SystemStatusResponseSchema,
+} from "@sf/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { AppInstance } from "../src/app.js";
+import { DOCS_ROUTE, OPENAPI_ROUTE } from "../src/plugins/openapi.js";
 import { AUTH_HEADER, buildTestApp } from "./helpers.js";
 
 /**
@@ -33,6 +37,12 @@ const DocumentSchema = z.object({
   ),
 });
 
+/** The JSON schema of an object body, as the document writes it. */
+const JsonObjectSchema = z.object({
+  properties: z.record(z.unknown()),
+  required: z.array(z.string()),
+});
+
 describe("OpenAPI document", () => {
   let app: AppInstance;
 
@@ -48,7 +58,7 @@ describe("OpenAPI document", () => {
   async function fetchDocument(): Promise<z.infer<typeof DocumentSchema>> {
     const res = await app.inject({
       method: "GET",
-      url: "/openapi.json",
+      url: OPENAPI_ROUTE,
       headers: { authorization: AUTH_HEADER },
     });
     expect(res.statusCode).toBe(200);
@@ -143,10 +153,19 @@ describe("OpenAPI document", () => {
     });
   });
 
-  it("documents /system/status", async () => {
+  it("documents the response shape of /system/status, not just its path", async () => {
+    // A schema that fell out of `jsonSchemaTransform` leaves the path listed
+    // with no body at all; the fields of the answer are what a client reads.
     const document = await fetchDocument();
+    const body = JsonObjectSchema.parse(
+      document.paths["/system/status"]?.get?.responses["200"]?.content?.[
+        "application/json"
+      ].schema,
+    );
+    const fields = Object.keys(SystemStatusResponseSchema.shape).sort();
 
-    expect(document.paths["/system/status"]?.get).toBeDefined();
+    expect(Object.keys(body.properties).sort()).toEqual(fields);
+    expect([...body.required].sort()).toEqual(fields);
   });
 
   it("declares the version of the build it was served by", async () => {
@@ -167,7 +186,7 @@ describe("OpenAPI document", () => {
     try {
       const res = await anonymous.inject({
         method: "GET",
-        url: "/openapi.json",
+        url: OPENAPI_ROUTE,
         headers: { authorization: AUTH_HEADER },
       });
 
@@ -182,13 +201,13 @@ describe("OpenAPI document", () => {
   it("does not document the route that serves the document", async () => {
     const document = await fetchDocument();
 
-    expect(document.paths["/openapi.json"]).toBeUndefined();
+    expect(document.paths[OPENAPI_ROUTE]).toBeUndefined();
   });
 
   it("serves the browsable documentation", async () => {
     const res = await app.inject({
       method: "GET",
-      url: "/docs/",
+      url: `${DOCS_ROUTE}/`,
       headers: { authorization: AUTH_HEADER },
     });
 

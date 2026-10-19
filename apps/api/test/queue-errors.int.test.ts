@@ -7,6 +7,45 @@ import type { Redis } from "ioredis";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
 
+/** How many refusals of the client the log holds so far. */
+function refusalsIn(lines: readonly { msg?: unknown }[]): number {
+  return lines.filter((line) => line.msg === "redis client error").length;
+}
+
+/** How long the verdict on the `init()` of one queue may take. */
+const VERDICT_DEADLINE_MS = 5_000;
+
+/**
+ * Waits for the verdict on the `init()` of `queue`, whichever it is, or fails
+ * naming the queue that gave none - rather than the whole case timing out.
+ */
+async function verdictOn(queue: {
+  readonly name: string;
+  waitUntilReady(): Promise<unknown>;
+}): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `no verdict on the init() of queue ${queue.name} within ${VERDICT_DEADLINE_MS} ms`,
+        ),
+      );
+    }, VERDICT_DEADLINE_MS);
+  });
+  try {
+    await Promise.race([
+      queue.waitUntilReady().then(
+        () => undefined,
+        () => undefined,
+      ),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * An error of the shared client on real BullMQ: every `RedisConnection`
  * re-emits the `error` of the client it runs on, on its own `Queue`, and the
@@ -46,19 +85,24 @@ describe("the errors of the shared client on real queues", () => {
       // Opened and kept, the way the worker opens its queues at the start: a
       // `Queue` a failed read throws away no longer hears the client, and the
       // reconnects after the first refusal are what reaches every queue.
-      for (const name of QUEUE_NAMES) {
-        factory.get(name);
-      }
+      const queues = QUEUE_NAMES.map((name) => factory.get(name));
 
-      // Two refusals at least: the first one, and one after a reconnect.
+      // The verdict on the `init()` of every queue: refused with the first
+      // refusal of the client. From here on the factory learns that verdict
+      // within microtasks of an error, so a `queue error` line for a refusal
+      // is written before the turn of the loop that brought the refusal ends
+      // - no window of the factory to wait out.
+      await Promise.all(queues.map(verdictOn));
+      const settled = refusalsIn(lines);
+
+      // Two refusals after the verdicts, each heard by every queue.
       await vi.waitFor(
         () => {
-          expect(
-            lines.filter((line) => line.msg === "redis client error").length,
-          ).toBeGreaterThanOrEqual(2);
+          expect(refusalsIn(lines)).toBeGreaterThanOrEqual(settled + 2);
         },
         { timeout: 10_000, interval: 50 },
       );
+      await new Promise((resolve) => setImmediate(resolve));
     } finally {
       // Closed whatever the wait ended with: the listeners of the queues stay
       // on the client otherwise.
@@ -72,6 +116,8 @@ describe("the errors of the shared client on real queues", () => {
         message: expect.stringContaining("WRONGPASS"),
       }),
     });
+    // Read after the close as well: what the queues write while they close
+    // counts too.
     expect(lines.map((line) => line.msg)).not.toContain("queue error");
     // The first refusal is the one `error` line; the rest fade.
     expect(lines.filter((line) => line.level === "error")).toEqual([

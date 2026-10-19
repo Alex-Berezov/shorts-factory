@@ -47,7 +47,8 @@
   `intTestConfig`, остальные - `unitTestConfig`, ключей пресета не задаёт ни голыми, ни в
   кавычках, ни сокращённой записью `{ include }`; каждый int-конфиг, загруженный как его грузит
   vitest, стоит за своей входной проверкой с `fileParallelism: false` и `setupFiles`
-  `@sf/config/vitest/setup`) и `--concurrency=1` у `test:int`.
+  `@sf/config/vitest/setup`) и граница int-наборов (см. «Граница `intTestConfig`» ниже);
+  `--concurrency=1` у `test:int` держит один кейс `test/turbo-inputs.test.ts`.
 - **Входы turbo**. `$TURBO_DEFAULT$` корневых задач `//#...` хеширует весь репозиторий, а не
   только файлы вне пакетов (`turbo run test:repo --dry=json`, turbo 2.10: 440 входов, из них 181
   под `apps/` и 139 под `packages/`), поэтому у `//#test:repo` и `//#typecheck:repo` явных glob
@@ -79,11 +80,14 @@
     (`postgres:`/`postgresql:`, `redis:`), хост, порт и база у обоих URL, URL без порта (=
     5432/6379 по умолчанию) - отказ, строка запроса (`?host=` и любые другие параметры
     драйвера) - отказ; хост - так, как его прочтёт драйвер, а не только `new URL`: postgres-js
-    3.4 берёт хост после первого `@`, раскодирует `%` и читает `,` как список хостов, `new URL` -
+    берёт хост после первого `@`, раскодирует `%` и читает `,` как список хостов, `new URL` -
     после последнего `@`, поэтому второй `@`, `,` или `%` в хосте, пробел, управляющий символ,
     `\` и `#` - отказ до разбора, а `host` из `new URL` обязан буква в букву совпасть с хостом
-    драйвера (`sf:sf@db.example.com,x@localhost:5442` - отказ; тест сверяет кейсы с
-    `sql.options.host` самого postgres-js); URL, который не разбирается, - отказ без текста URL
+    драйвера (`sf:sf@db.example.com,x@localhost:5442` - отказ). Сверка - с установленными
+    драйверами, а не с записанной версией, в одном месте: `apps/api/test/stack-guard-drivers.test.ts` -
+    одна таблица адресов против разбора postgres-js (`createDb(...).$client.options`) и ioredis
+    (`lazyConnect`), свойство «адрес, который страж пропустил, драйвер набирает на тестовом
+    стеке» (E0-12E); URL, который не разбирается, - отказ без текста URL
     (в `TypeError` от `new URL` был бы пароль); `assertTestDatabaseName(name)` - для ответа
     `current_database()`; `suiteRedisUrl(redisUrl, suite)` - сначала `assertLocalTestRedis`
     по URL окружения, затем тот же сервер в базе набора: открыть Redis набора мимо стража нельзя;
@@ -94,13 +98,21 @@
     `emptyTestDatabase` (через свой `openTestSql`; страж по URL и по `current_database()`
     перед `DROP SCHEMA`), `resetTestDatabase` (`emptyTestDatabase` и миграции), `assertMigrated()` - проверка int-набора,
     который сам не мигрирует: страж всего стека (Redis тоже - процессы воркера читают
-    `REDIS_URL` как есть), свой клиент через `openTestSql` и его закрытие, сверка миграций
+    `REDIS_URL` как есть), свой клиент `createDb(url, { max: 1 })` после стража и его
+    закрытие, наличие журнала - `tableExists` из `src/catalog.ts` (одна проверка таблицы
+    журнала на пакет, E0-12E), сверка миграций
     базы с папкой `migrationsFolder` (один экспорт пути из `src/migrate.ts`, не через баррель)
     по `when` и по `hash` (sha256 файла, как его считает `readMigrationFiles` drizzle: правка
     применённого `.sql` - отказ «edited after it was applied»; две строки одной миграции -
     отказ «applied more than once»), недоступная база - отказ с адресом из `.env.test`, а при
     `ECONNREFUSED`/`ECONNRESET`/`ETIMEDOUT`/`CONNECT_TIMEOUT` - и с подсказкой про Compose и
-    `.env.test`; `defaultQueueSwitches` (реэкспорт из `src/seed.ts`, в баррель не входит);
+    `.env.test`; `useTestDb({ beforeAll, afterAll }, { prepare?, beforeClose? })` - ручка
+    базы int-файла: открыть в `beforeAll` после `prepare` (по умолчанию `resetTestDatabase`),
+    закрыть в `afterAll`, не упасть вторично, если `beforeAll` не открыл её; хуки vitest
+    передаёт файл - модуль грузит и входная проверка (`globalSetup`), где `vitest` не
+    импортируется; `testDatabaseUrl()` - URL тестовой базы после стража, для адреса, выведенного
+    из него (реле перед тем же сервером, другая база того же сервера);
+    `defaultQueueSwitches` (реэкспорт из `src/seed.ts`, в баррель не входит);
   - **входная проверка** - `@sf/db/test-support/entry-check/postgres` и
     `.../entry-check/migrated-stack`, `globalSetup` vitest, который `intTestConfig` ставит
     безусловно (`entryCheck: "postgres"` у `@sf/db`, `"migrated-stack"` у api и worker): один
@@ -118,6 +130,23 @@
 - Старые адреса (`@sf/db/test/local-host-guard.js`, `packages/db/test/helpers.int.ts`,
   `apps/{api,worker}/test/local-stack-guard.ts`) удалены; старый подпуть отвечает
   `ERR_PACKAGE_PATH_NOT_EXPORTED` (`packages/db/test/public-surface.test.ts`).
+- **test-support в `exports`** (решение техлида 19.10.2026, Р3 E0-12E): test-support
+  экспортируется поимённо - подпуть на модуль (`@sf/db/test-support/stack-guard`,
+  `.../fixture`, `.../entry-check/*` по одному, `@sf/runtime/test-support/recording-logger`);
+  модуль без внешнего потребителя в `exports` не входит (`test-support/migration-check.ts`).
+  Шаблон `./test-support/*` и условие `development` не вводятся; рабочий код test-support не
+  импортирует - это держит замок направления `test/dependency-direction.test.ts`, а не форма
+  манифеста.
+- **Граница `intTestConfig`** (решение техлида 19.10.2026, Р4 E0-12E): по признаку, а не
+  списком. Пакет, у которого есть `**/*.int.test.ts`, обязан иметь скрипт `test:int` на
+  `intTestConfig` с `entryCheck` из `ENTRY_CHECK_OF` (`test/vitest-preset.test.ts`); пакет без
+  таких файлов не имеет ни int-конфига, ни `test:int`. Замок - кейс «gives an integration run to
+  exactly the packages with integration files»: множество пакетов с int-файлами ==
+  множество со скриптом `test:int` == ключи `ENTRY_CHECK_OF`. `ENTRY_CHECK_OF` этим решением не
+  расширяется: первый int-набор вне `packages/db`, `apps/api`, `apps/worker` - строка в нём и
+  своя входная проверка; `fileParallelism: false` и `globalSetup` безусловны. Живой кейс
+  `closeRedis` - int-набор `apps/api` (`test/close-redis.int.test.ts`), своего int-набора у
+  `@sf/runtime` нет.
 - **Границы** (решение техлида 17.10.2026, круг 2): корень репозитория пакеты берут только из
   `@sf/config/paths` (`repoRoot`, `testEnvFilePath`), корневые тесты и `scripts/*.mjs` - только
   из `scripts/lib/paths.mjs` (E0-12F); перекрёстных импортов нет. Подпуть `./paths` держит
@@ -142,6 +171,8 @@
   `test:int`, `typecheck` и корневых задач, но не `build`.
 - Новый int-набор получает входную проверку вместе с `intTestConfig`: забыть хелпер со стражем
   больше нельзя; проверка миграций идёт один раз на прогон пакета, а не на каждый int-файл.
+  Первый `*.int.test.ts` в пакете без `test:int` - красный `test/vitest-preset.test.ts`, правка
+  этого ADR не нужна.
 - Новый пакет с тестами добавляет тонкий конфиг; без пресета его поймает
   `test/vitest-preset.test.ts`.
 - Разработчик с Compose на нестандартных портах получает отказ всех int-наборов с названием

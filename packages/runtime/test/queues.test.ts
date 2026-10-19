@@ -1,6 +1,7 @@
 import { QUEUE_NAMES, type QueueName } from "@sf/core";
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { withDeadline } from "../src/deadline.js";
 import { type QueueFactory, createQueueFactory } from "../src/queues.js";
 import { recordingLogger } from "../test-support/recording-logger.js";
 
@@ -172,11 +173,30 @@ beforeEach(() => {
   state.closeOf = async () => {};
 });
 
+/**
+ * How long the clean-up waits for the factories of a case to close. A case
+ * that holds the close of a `Queue` open (`finishClose`) and fails before it
+ * lets go leaves a close that never ends; past this the clean-up fails with
+ * that reason instead of "Hook timed out".
+ */
+const CLEANUP_LIMIT_MS = 2_000;
+
 afterEach(async () => {
   vi.useRealTimers();
   // A close a case left hanging must not hold the clean-up.
   state.closeOf = async () => {};
-  await Promise.allSettled(opened.splice(0).map((factory) => factory.close()));
+  await withDeadline(
+    () =>
+      Promise.allSettled(opened.splice(0).map((factory) => factory.close())),
+    CLEANUP_LIMIT_MS,
+    {
+      unref: false,
+      error: () =>
+        new Error(
+          `a queue factory of this case did not close within ${CLEANUP_LIMIT_MS} ms: the case held the close of a queue open and failed before letting it go`,
+        ),
+    },
+  );
 });
 
 describe("createQueueFactory", () => {
@@ -305,6 +325,11 @@ describe("createQueueFactory", () => {
     Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), {
       code: "ECONNREFUSED",
     }),
+    // A resolver that did not answer: Docker's DNS before the service is up.
+    Object.assign(new Error("getaddrinfo EAI_AGAIN redis"), {
+      code: "EAI_AGAIN",
+      syscall: "getaddrinfo",
+    }),
     new Error("Connection is closed."),
     new Error("Stream isn't writeable and enableOfflineQueue options is false"),
   ])("stays silent on a connection failure: $message", async (err) => {
@@ -337,10 +362,6 @@ describe("createQueueFactory", () => {
     ),
     Object.assign(new Error("NOAUTH Authentication required."), {
       name: "ReplyError",
-    }),
-    Object.assign(new Error("getaddrinfo EAI_AGAIN redis"), {
-      code: "EAI_AGAIN",
-      syscall: "getaddrinfo",
     }),
   ])(
     "writes one error line, not one per queue, for an error of the client: $message",

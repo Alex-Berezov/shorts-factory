@@ -1,8 +1,11 @@
 import { env } from "@sf/config";
-import type { QueueName } from "@sf/core";
 import { suiteRedisUrl } from "@sf/db/test-support/stack-guard";
-import { createRequestRedis } from "@sf/runtime";
-import { Queue } from "bullmq";
+import {
+  type QueueFactory,
+  createQueueFactory,
+  createRequestRedis,
+} from "@sf/runtime";
+import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import type { Redis } from "ioredis";
 import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
 
@@ -37,11 +40,61 @@ export function openTestRedis(): Redis {
 }
 
 /**
- * A queue for a fixture to act on, opened the way the api itself opens one:
- * with `skipMetasUpdate`, so that opening it writes nothing into
- * `bull:<name>:meta` - the write the page is forbidden (ADR-0003). The caller
- * closes it.
+ * Queues for a fixture to act on, opened the way the api itself opens them:
+ * by the reader factory of `@sf/runtime`, so that opening one writes nothing
+ * into `bull:<name>:meta` - the write the page is forbidden (ADR-0003) - and
+ * the options of a queue are the ones the page reads with, not a copy of
+ * them. The caller closes the factory; the connection stays the caller's.
  */
-export function openTestQueue(name: QueueName, connection: Redis): Queue {
-  return new Queue(name, { connection, skipMetasUpdate: true });
+export function openTestQueues(connection: Redis): QueueFactory {
+  return createQueueFactory({
+    connection,
+    log: silentLogger(),
+    readOnly: true,
+  });
+}
+
+/** How long a test client gets to reach `ready` on the local stack. */
+const READY_TIMEOUT_MS = 5_000;
+
+/**
+ * Resolves once the client has a usable socket. A client with the offline
+ * queue disabled refuses a command sent while it is still connecting, so a
+ * case that needs a live command waits here first. A client that fails to
+ * connect is an error with its reason, and one that never answers fails
+ * after `READY_TIMEOUT_MS` - not a "Test timed out" that names nothing.
+ */
+export async function whenReady(redis: Redis): Promise<void> {
+  if (redis.status === "ready") {
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finish();
+      reject(
+        new Error(
+          `the test Redis client was not ready within ${READY_TIMEOUT_MS} ms (status ${redis.status})`,
+        ),
+      );
+    }, READY_TIMEOUT_MS);
+    const onReady = (): void => {
+      finish();
+      resolve();
+    };
+    const onError = (err: Error): void => {
+      finish();
+      reject(
+        new Error(`the test Redis client failed to connect: ${err.message}`, {
+          cause: err,
+        }),
+      );
+    };
+    const finish = (): void => {
+      clearTimeout(timer);
+      redis.off("ready", onReady);
+      redis.off("error", onError);
+    };
+    redis.once("ready", onReady);
+    redis.once("error", onError);
+  });
 }

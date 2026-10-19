@@ -1,7 +1,29 @@
-import { describe, expect, it } from "vitest";
-import { createDb } from "../src/client.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { clientOptions, createDb } from "../src/client.js";
 
 const URL = "postgres://sf:sf@localhost:5442/shorts_factory_test";
+
+/**
+ * The driver itself, behind a spy that only records its calls: the cases
+ * below read the options on the client it returns, and the last one checks
+ * what `createDb` handed it.
+ */
+const driver = vi.hoisted(() => ({ calls: [] as unknown[][] }));
+
+vi.mock("postgres", async (importOriginal) => {
+  const actual = await importOriginal<{
+    default: (...args: unknown[]) => unknown;
+  }>();
+  const spy = (...args: unknown[]): unknown => {
+    driver.calls.push(args);
+    return actual.default(...args);
+  };
+  return { ...actual, default: spy };
+});
+
+beforeEach(() => {
+  driver.calls = [];
+});
 
 /**
  * Options of the postgres-js client, asserted on the client itself rather than
@@ -25,4 +47,18 @@ describe("createDb", () => {
   it("keeps the pool size a caller asked for", () => {
     expect(createDb(URL, { max: 2 }).$client.options.max).toBe(2);
   });
+
+  it.each([
+    ["the defaults", undefined],
+    ["options of a caller", { max: 3, connectTimeoutSec: 4 }],
+  ])(
+    "hands the driver exactly the options every client of the package shares, with %s",
+    (_name, opts) => {
+      // The raw client of the test fixture opens with `clientOptions` too;
+      // a bound or a default set here and not there would split the two.
+      createDb(URL, opts);
+      expect(driver.calls).toHaveLength(1);
+      expect(driver.calls[0]).toEqual([URL, clientOptions(opts)]);
+    },
+  );
 });

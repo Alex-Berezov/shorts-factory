@@ -1730,8 +1730,9 @@
       "E0-12A"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-17"
+    "status": "in_progress",
+    "added_at": "2026-10-17",
+    "started_at": "2026-10-19"
   },
   {
     "id": "E0-12F",
@@ -1886,6 +1887,21 @@
     "deps": [
       "E0-13",
       "E0-12D"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-19"
+  },
+  {
+    "id": "E0-12Q",
+    "epic": "E0",
+    "title": "@sf/runtime, api, worker: форма модулей после E0-12B - стадия Redis в shutdown.ts, единая форма опций Redis-фабрик, стадия db воркера через stageOf, один источник состояния queue-stats, однопроходный обход cause",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-13",
+      "E0-12B",
+      "E0-12E"
     ],
     "doc": "TECH_DEBT.md",
     "status": "todo",

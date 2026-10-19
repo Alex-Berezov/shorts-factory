@@ -8,9 +8,9 @@ import {
   TEST_REDIS_DATABASE_OF,
   suiteRedisUrl,
 } from "@sf/db/test-support/stack-guard";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { devCommandParts } from "./dev-command.js";
-import { openTestRedis } from "./helpers.int.js";
+import { openTestRedis, whenReady } from "./helpers.int.js";
 import { basicAuthHeader } from "./helpers.js";
 
 /**
@@ -67,12 +67,58 @@ async function statusOf(port: number): Promise<unknown> {
   }
 }
 
+/** `id` and `db` of each client `CLIENT LIST` names. */
+function clientsOf(list: string): { id: number; db: string }[] {
+  return list
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => ({
+      id: Number(/\bid=(\d+)/.exec(line)?.[1] ?? Number.NaN),
+      db: /\bdb=(\d+)/.exec(line)?.[1] ?? "",
+    }));
+}
+
+/** The id the server gives the next client: one past the newest so far. */
+async function nextClientId(): Promise<number> {
+  const redis = openTestRedis();
+  try {
+    await whenReady(redis);
+    return Number(await redis.client("ID")) + 1;
+  } finally {
+    redis.disconnect();
+  }
+}
+
+/** How long the server may take to drop the connections of a dead process. */
+const CONNECTIONS_GONE_DEADLINE_MS = 5_000;
+
+/** Stops a child and waits for its end; a child already ended is left be. */
+async function stopped(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  const exited = new Promise<void>((resolve) => {
+    child.on("exit", () => {
+      resolve();
+    });
+  });
+  child.kill();
+  await exited;
+}
+
 describe("api entry point", () => {
   let child: ChildProcess;
   let output = "";
   let port: number;
+  /**
+   * Client ids are handed out in order: every client from here on is the
+   * fork's or one of this file's, and a client left by another run - a
+   * worker fork of a crashed run, in its own database - is older.
+   */
+  let firstForkClientId: number;
 
   beforeAll(async () => {
+    firstForkClientId = await nextClientId();
     port = await freePort();
     const { execArgv, script } = devCommandParts();
     child = fork(join(APP_DIR, script), [], {
@@ -99,16 +145,7 @@ describe("api entry point", () => {
   });
 
   afterAll(async () => {
-    if (child.exitCode !== null) {
-      return;
-    }
-    const exited = new Promise<void>((resolve) => {
-      child.on("exit", () => {
-        resolve();
-      });
-    });
-    child.kill();
-    await exited;
+    await stopped(child);
   });
 
   it("reports the label it was given and null for the one it dropped", async () => {
@@ -135,17 +172,33 @@ describe("api entry point", () => {
     const redis = openTestRedis();
     try {
       // No offline queue: a command before the socket is up is refused.
-      if (redis.status !== "ready") {
-        await new Promise<void>((resolve) => {
-          redis.once("ready", () => {
-            resolve();
-          });
-        });
-      }
-      const clients = String(await redis.client("LIST"));
+      await whenReady(redis);
+      // Every client between the fork's start and this one is a connection
+      // the fork opened - this file opens none in between.
+      const own = Number(await redis.client("ID"));
+      const forked = clientsOf(String(await redis.client("LIST"))).filter(
+        (client) => client.id >= firstForkClientId && client.id < own,
+      );
 
-      expect(clients).not.toMatch(
-        new RegExp(`\\bdb=${TEST_REDIS_DATABASE_OF.worker}\\b`),
+      // The fork has a connection open by now (it answered the page), and
+      // every one of them sits in the api's database.
+      expect(forked.length).toBeGreaterThan(0);
+      expect(forked.map((client) => client.db)).toEqual(
+        forked.map(() => TEST_REDIS_DATABASE_OF.api),
+      );
+
+      // And they are the fork's, not some other client's of the window: they
+      // leave with it.
+      await stopped(child);
+      const forkedIds = new Set(forked.map((client) => client.id));
+      await vi.waitFor(
+        async () => {
+          const left = clientsOf(String(await redis.client("LIST"))).filter(
+            (client) => forkedIds.has(client.id),
+          );
+          expect(left).toEqual([]);
+        },
+        { timeout: CONNECTIONS_GONE_DEADLINE_MS, interval: 50 },
       );
     } finally {
       redis.disconnect();
@@ -239,12 +292,8 @@ describe("api entry point on a port that is taken", () => {
       } finally {
         // A process that did not leave on its own - a failed assertion, a
         // stop that hung - does not outlive the case.
-        if (
-          child !== undefined &&
-          child.exitCode === null &&
-          child.signalCode === null
-        ) {
-          child.kill();
+        if (child !== undefined) {
+          await stopped(child);
         }
         await new Promise<void>((resolve) => {
           taken.close(() => {

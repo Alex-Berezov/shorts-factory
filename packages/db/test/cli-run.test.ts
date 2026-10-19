@@ -7,6 +7,7 @@ import {
   runMigrateCli,
   runSeedCli,
 } from "../src/cli/run.js";
+import { captureProcessOutput } from "./capture-output.js";
 
 /**
  * The operator-facing half of `pnpm db:migrate` / `pnpm db:seed`: what they
@@ -246,21 +247,6 @@ describe("runEntry", () => {
 describe("entry points", () => {
   const DATABASE_URL = "postgres://sf:sf@127.0.0.1:5442/entry_point_test";
   const handle = { name: "the handle createDb opened" };
-
-  /** What the entry point wrote to the real process streams. */
-  function captureProcessOutput(): { out: string[]; err: string[] } {
-    const out: string[] = [];
-    const err: string[] = [];
-    vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
-      out.push(String(chunk));
-      return true;
-    });
-    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
-      err.push(String(chunk));
-      return true;
-    });
-    return { out, err };
-  }
 
   function mockConnection() {
     const createDb = vi.fn(() => handle);

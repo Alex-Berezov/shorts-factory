@@ -118,20 +118,49 @@ describe("GET /health", () => {
 });
 
 describe("createHealthProbes", () => {
-  it("reports a dependency that never answers as down", async () => {
+  /**
+   * Both dependencies silent, on the fake clock: Redis never settles its
+   * ping, and the database answers the way `dbAnswer` does - never, unless a
+   * case hands in an answer it settles itself.
+   */
+  async function hangingDependencies(
+    dbAnswer: () => Promise<void> = () => new Promise<void>(() => {}),
+  ) {
+    const { pingDb: realPingDb } =
+      await vi.importActual<typeof import("@sf/db")>("@sf/db");
+    vi.useFakeTimers();
+    vi.mocked(pingDb).mockClear().mockImplementation(dbAnswer);
     const db = createDb(CLOSED_DB_URL);
-    const probes = createHealthProbes({
+    // A socket that is open but silent never settles the promise; without a
+    // deadline the check - and with it /health - would never return.
+    const ping = vi.fn(() => new Promise<string>(() => {}));
+    return {
       db,
-      // A socket that is open but silent never settles the promise; without a
-      // deadline this call - and with it /health - would never return.
-      redis: { ping: () => new Promise<string>(() => {}) },
-      timeoutMs: 50,
-    });
+      ping,
+      restore: async (): Promise<void> => {
+        vi.useRealTimers();
+        vi.mocked(pingDb).mockImplementation(realPingDb);
+        await closeDb(db);
+      },
+    };
+  }
+
+  it("reports a dependency that never answers as down", async () => {
+    const { db, ping, restore } = await hangingDependencies();
+    const probes = createHealthProbes({ db, redis: { ping }, timeoutMs: 50 });
 
     try {
-      expect(await probes.check()).toEqual({ db: "down", redis: "down" });
+      let report: unknown;
+      void probes.check().then((value) => {
+        report = value;
+      });
+      // The deadline, not the probe, is what ends the check.
+      await vi.advanceTimersByTimeAsync(49);
+      expect(report).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(report).toEqual({ db: "down", redis: "down" });
     } finally {
-      await closeDb(db);
+      await restore();
     }
   });
 
@@ -142,23 +171,23 @@ describe("createHealthProbes", () => {
    * each.
    */
   it("shares one pair of probes between the calls that arrive while it runs", async () => {
-    const db = createDb(CLOSED_DB_URL);
-    const ping = vi.fn(() => new Promise<string>(() => {}));
+    const { db, ping, restore } = await hangingDependencies();
     const probes = createHealthProbes({ db, redis: { ping }, timeoutMs: 50 });
-    vi.mocked(pingDb).mockClear();
 
     try {
-      const reports = await Promise.all([
-        probes.check(),
-        probes.check(),
-        probes.check(),
-      ]);
+      let reports: unknown;
+      void Promise.all([probes.check(), probes.check(), probes.check()]).then(
+        (value) => {
+          reports = value;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(50);
 
       expect(reports).toEqual(Array(3).fill({ db: "down", redis: "down" }));
       expect(ping).toHaveBeenCalledTimes(1);
       expect(pingDb).toHaveBeenCalledTimes(1);
     } finally {
-      await closeDb(db);
+      await restore();
     }
   });
 
@@ -169,20 +198,13 @@ describe("createHealthProbes", () => {
    * poll asks again.
    */
   it("keeps one hanging probe per dependency however many polls give up on it", async () => {
-    const { pingDb: realPingDb } =
-      await vi.importActual<typeof import("@sf/db")>("@sf/db");
-    vi.useFakeTimers();
-    const db = createDb(CLOSED_DB_URL);
-    const ping = vi.fn(() => new Promise<string>(() => {}));
     let answerDb: () => void = () => {};
-    vi.mocked(pingDb)
-      .mockClear()
-      .mockImplementation(
-        () =>
-          new Promise<void>((resolve) => {
-            answerDb = resolve;
-          }),
-      );
+    const { db, ping, restore } = await hangingDependencies(
+      () =>
+        new Promise<void>((resolve) => {
+          answerDb = resolve;
+        }),
+    );
     const probes = createHealthProbes({ db, redis: { ping } });
 
     try {
@@ -201,9 +223,7 @@ describe("createHealthProbes", () => {
       expect(pingDb).toHaveBeenCalledTimes(2);
       expect(ping).toHaveBeenCalledTimes(1);
     } finally {
-      vi.useRealTimers();
-      vi.mocked(pingDb).mockImplementation(realPingDb);
-      await closeDb(db);
+      await restore();
     }
   });
 });

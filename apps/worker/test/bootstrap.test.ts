@@ -1,18 +1,10 @@
 import { createDb } from "@sf/db";
-import type { ClosableRedis } from "@sf/runtime";
+import { type ClosableRedis, SIGINT_REPEAT_WINDOW_MS } from "@sf/runtime";
 import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import { pino } from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bootstrap, connectionStages } from "../src/bootstrap.js";
 import type { WorkerRuntime } from "../src/runtime.js";
-
-/**
- * How long a second Ctrl+C is still the same keypress: the window of
- * `SIGINT_REPEAT_WINDOW_MS` in packages/runtime/src/shutdown.ts, which the
- * package keeps to itself - no app reads it. A longer window there turns
- * the cases that wait this one out red.
- */
-const SIGINT_REPEAT_WINDOW_MS = 1_000;
 
 /**
  * The order the process starts and stops in. Ctrl+C cannot be delivered to a

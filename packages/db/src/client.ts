@@ -23,14 +23,27 @@ import * as schema from "./schema/index.js";
  */
 const CONNECT_TIMEOUT_SEC = 10;
 
+/**
+ * The options every postgres-js client of the package is opened with: the
+ * service handle of `createDb` and the raw client of the test fixture
+ * (`openTestSql`) share them, while the raw client keeps the driver's own
+ * parsers - drizzle installs pass-through ones on a client it wraps.
+ */
+export function clientOptions(opts?: {
+  max?: number;
+  connectTimeoutSec?: number;
+}): { max: number; connect_timeout: number } {
+  return {
+    max: opts?.max ?? 10,
+    connect_timeout: opts?.connectTimeoutSec ?? CONNECT_TIMEOUT_SEC,
+  };
+}
+
 export function createDb(
   url: string,
   opts?: { max?: number; connectTimeoutSec?: number },
 ) {
-  const client = postgres(url, {
-    max: opts?.max ?? 10,
-    connect_timeout: opts?.connectTimeoutSec ?? CONNECT_TIMEOUT_SEC,
-  });
+  const client = postgres(url, clientOptions(opts));
   return drizzle(client, { schema });
 }
 

@@ -23,21 +23,26 @@ const stub = vi.hoisted(() => {
     queries: [] as string[],
     /** The client `postgres()` handed out last. */
     last: undefined as unknown,
-    /** How many times the setup file of the thin configs was loaded. */
+    /** The options `postgres()` was called with, one entry per call. */
+    options: [] as unknown[],
+    /** How many times the setup file of the thin configs was loaded since a case reset it. */
     setupLoaded: 0,
   };
-  function fakeClient(): unknown {
+  function fakeClient(_url: string, options?: unknown): unknown {
     state.opened += 1;
-    const sql = (strings: TemplateStringsArray) => {
-      const text = strings.join("?");
+    state.options.push(options);
+    const query = (text: string): Promise<unknown> => {
       state.queries.push(text);
       return state.answer(text);
     };
+    const sql = (strings: TemplateStringsArray) => query(strings.join("?"));
     state.last = sql;
     return Object.assign(sql, {
       end: async () => {
         state.ended += 1;
       },
+      // What a drizzle query (`db.execute`, `tableExists`) runs its text with.
+      unsafe: (text: string) => query(text),
       // What drizzle's postgres-js driver touches when it wraps a client.
       options: { parsers: {}, serializers: {} },
     });
@@ -47,13 +52,17 @@ const stub = vi.hoisted(() => {
 
 vi.mock("@sf/config", () => ({ env: stub.state.env }));
 vi.mock("postgres", () => ({ default: stub.fakeClient }));
-vi.mock("@sf/config/vitest/setup", () => {
-  stub.state.setupLoaded += 1;
-  return {};
-});
+// The real setup file loads `.env.test`; the cases that count its loads
+// register their own stand-in (`vi.doMock`).
+vi.mock("@sf/config/vitest/setup", () => ({}));
 
-const { assertMigrated, emptyTestDatabase, openTestDb, openTestSql } =
-  await import("../test-support/fixture.js");
+const {
+  assertMigrated,
+  emptyTestDatabase,
+  openTestDb,
+  openTestSql,
+  useTestDb,
+} = await import("../test-support/fixture.js");
 
 const postgresEntryCheck = await import(
   "../test-support/entry-check/postgres.js"
@@ -84,6 +93,7 @@ beforeEach(() => {
   stub.state.ended = 0;
   stub.state.queries = [];
   stub.state.last = undefined;
+  stub.state.options = [];
 });
 
 describe("the fixture checks the stack before it opens anything", () => {
@@ -110,6 +120,13 @@ describe("the fixture checks the stack before it opens anything", () => {
     const sql = openTestSql();
     expect(sql).toBe(stub.state.last);
     expect(stub.state.opened).toBe(1);
+  });
+
+  it("opens the raw client with the options of the service client, one connection", () => {
+    // The bound on a connection attempt is the one `createDb` sets; the raw
+    // client is opened apart from it only to keep the driver's own parsers.
+    openTestSql();
+    expect(stub.state.options).toEqual([{ max: 1, connect_timeout: 10 }]);
   });
 
   it("checks Redis too in assertMigrated, the entry check of a suite", async () => {
@@ -214,10 +231,98 @@ describe("assertMigrated", () => {
   });
 });
 
-describe("the entry checks of the integration runs", () => {
-  it("load the setup file of the thin configs: they check what the files will see", () => {
-    expect(stub.state.setupLoaded).toBe(1);
+describe("useTestDb", () => {
+  /** File hooks that run when the case says so. */
+  function fileHooks() {
+    const before: (() => Promise<void>)[] = [];
+    const after: (() => Promise<void>)[] = [];
+    return {
+      hooks: {
+        beforeAll: (fn: () => Promise<void>) => {
+          before.push(fn);
+        },
+        afterAll: (fn: () => Promise<void>) => {
+          after.push(fn);
+        },
+      },
+      runBefore: async () => {
+        for (const fn of before) await fn();
+      },
+      runAfter: async () => {
+        for (const fn of after) await fn();
+      },
+    };
+  }
+
+  it("opens the handle after preparing the database, and closes it after the file", async () => {
+    const file = fileHooks();
+    const prepare = vi.fn(async () => {
+      expect(stub.state.opened).toBe(0);
+    });
+    const db = useTestDb(file.hooks, { prepare });
+
+    await file.runBefore();
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(stub.state.opened).toBe(1);
+    expect(db().$client).toBe(stub.state.last);
+
+    await file.runAfter();
+    expect(stub.state.ended).toBe(1);
+    expect(() => db()).toThrow(/test database is not open/);
   });
+
+  it("closes nothing and throws nothing after a beforeAll that failed", async () => {
+    const file = fileHooks();
+    const db = useTestDb(file.hooks, {
+      prepare: async () => {
+        throw new Error("database is down");
+      },
+    });
+
+    await expect(file.runBefore()).rejects.toThrow("database is down");
+    await expect(file.runAfter()).resolves.toBeUndefined();
+    expect(stub.state.opened).toBe(0);
+    expect(stub.state.ended).toBe(0);
+    expect(() => db()).toThrow(/test database is not open/);
+  });
+
+  it("closes the handle when the cleanup before closing fails", async () => {
+    const file = fileHooks();
+    useTestDb(file.hooks, {
+      prepare: async () => undefined,
+      beforeClose: async () => {
+        throw new Error("delete failed");
+      },
+    });
+
+    await file.runBefore();
+    await expect(file.runAfter()).rejects.toThrow("delete failed");
+    expect(stub.state.ended).toBe(1);
+  });
+});
+
+describe("the entry checks of the integration runs", () => {
+  it.each<[string, () => Promise<unknown>]>([
+    ["postgres", () => import("../test-support/entry-check/postgres.js")],
+    [
+      "migrated-stack",
+      () => import("../test-support/entry-check/migrated-stack.js"),
+    ],
+  ])(
+    "%s loads the setup file of the thin configs: it checks what the files will see",
+    async (_name, load) => {
+      // Each check on its own, from a fresh module graph: one counter over
+      // both stays green when only one of them stops loading the file.
+      vi.resetModules();
+      stub.state.setupLoaded = 0;
+      vi.doMock("@sf/config/vitest/setup", () => {
+        stub.state.setupLoaded += 1;
+        return {};
+      });
+      await load();
+      expect(stub.state.setupLoaded).toBe(1);
+    },
+  );
 
   it("postgres refuses a Postgres on another machine, before any client", () => {
     stub.state.env.DATABASE_URL =

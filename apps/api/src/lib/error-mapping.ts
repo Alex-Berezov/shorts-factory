@@ -209,8 +209,9 @@ function safeMessage(message: unknown, status: number): string {
  * a provider put in its error (`https://www.googleapis.com/youtube/v3?key=…`)
  * is one token, printable and under the length limit, so a filter built from
  * "not too long", "printable" and "no spaces" passes it on with the key in
- * it - proved by `test/errors.test.ts`, "refuses to send a code that is a url
- * with a key in it". An identifier is a narrow enough form to state directly.
+ * it - proved by `test/error-sanitize.test.ts`, "refuses to send a code that
+ * is a url with a key in it". An identifier is a narrow enough form to state
+ * directly.
  *
  * What the shape does not do is tell a code from a secret: a url, a sentence
  * and a Google or Gemini key (`AIza…`, lower case in it) are refused, but a

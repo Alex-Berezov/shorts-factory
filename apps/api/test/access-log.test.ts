@@ -1,10 +1,17 @@
+import { env } from "@sf/config";
 import { REQUEST_ID_HEADER } from "@sf/contracts";
 import { AppError, ValidationError } from "@sf/core";
 import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AppInstance } from "../src/app.js";
 import { AccessLogController } from "../src/lib/error-log.js";
-import { AUTH_HEADER, basicAuthHeader, buildTestApp } from "./helpers.js";
+import {
+  AUTH_HEADER,
+  TEST_PASSWORD,
+  basicAuthHeader,
+  buildTestApp,
+  recordingServiceLogger,
+} from "./helpers.js";
 
 /** Put into a url by the caller; must not reach any line of the log. */
 const MARKER = "caller-typed-marker";
@@ -365,4 +372,61 @@ describe("access log", () => {
     ]);
     expect(raw).not.toContain(MARKER);
   });
+});
+
+/**
+ * The credentials of a caller against the logger the service really runs
+ * with (`buildLoggerOptions`, as `src/server.ts` builds it): basic auth puts
+ * the only secret of the api into `authorization`, and no line of a request -
+ * answered, refused or failed - may carry it. The case reads the lines, not
+ * what keeps the header out of them: Fastify's request serializer writes no
+ * headers under `req`, the `redact` of the shared logger covers the paths it
+ * names (`packages/runtime/test/logger.test.ts`), and a line that put the
+ * headers under a key of its own would pass both.
+ */
+describe("the credentials of a caller", () => {
+  const recorder = recordingServiceLogger(env);
+  let app: AppInstance;
+
+  beforeAll(async () => {
+    app = buildTestApp({
+      logger: recorder.log,
+      routes: (instance) => {
+        instance.get("/test/fails", async () => {
+          throw new Error("handler failed");
+        });
+      },
+    });
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  const REFUSED_PASSWORD = "not-the-password";
+
+  it.each([
+    ["answered", "/system/status", TEST_PASSWORD],
+    ["refused", "/system/status", REFUSED_PASSWORD],
+    ["failed", "/test/fails", TEST_PASSWORD],
+  ])(
+    "reach no line of a request that was %s",
+    async (_outcome, url, password) => {
+      const authorization = basicAuthHeader(password);
+      recorder.clear();
+      await app.inject({ method: "GET", url, headers: { authorization } });
+
+      expect(recorder.entries().length).toBeGreaterThan(0);
+      // Encoded as the client sent it, and decoded: a line that wrote what
+      // the auth hook read out of the header would carry the password itself.
+      for (const secret of [
+        authorization.slice("Basic ".length),
+        `admin:${password}`,
+        password,
+      ]) {
+        expect(recorder.raw()).not.toContain(secret);
+      }
+    },
+  );
 });
