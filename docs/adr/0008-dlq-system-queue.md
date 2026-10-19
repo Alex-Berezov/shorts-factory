@@ -13,7 +13,7 @@
 
 - **Копия, а не перенос.** Обработчик события `failed` каждого `Worker`, то есть каждой
   очереди с процессором (`createFailedHandler` / `createDlqWriter` в `apps/worker/src/lib/dlq.ts`,
-  подключение - `apps/worker/src/runtime.ts:193-200`), при окончательном
+  подключение - `worker.on("failed", …)` в `startWorkerRuntime`, `apps/worker/src/runtime.ts`), при окончательном
   провале добавляет копию в очередь `system.dlq`. Окончательный провал - `attemptsMade >=
   opts.attempts` или `UnrecoverableError` (`isFinalFailure`); промежуточные попытки
   только пишут `warn` «job failed, will retry».

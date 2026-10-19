@@ -19,9 +19,11 @@ model: fable
 
 1. `.claude/qa-index.md`; признак совпал - полная запись по номеру.
 2. `docs/10_SYSTEM_DESIGN.md` §6 (структура и правило зависимостей: `apps → packages`;
-   `integrations → core, config`; `db → core`; `runtime → config, core`; `core` ни от чего) и §1 (модульный монолит,
+   `integrations → core, config`; `db → core`; `runtime → config, core`; `contracts → core`;
+   `api-client → contracts` и больше ни на что; `core` ни от чего) и §1 (модульный монолит,
    границы модулей ради будущего выделения).
-3. Документ эпика `docs/3x_Ex_TASKS.md` - «Архитектурные решения»: план уже принят, и
+3. Документ задачи - путь из поля `doc` трекера (`docs/<doc>`; обычно документ эпика
+   `docs/3x_Ex_TASKS.md`, у задач из долга - `docs/TECH_DEBT.md`) - «Архитектурные решения»: план уже принят, и
    отклонение от него без записи в `docs/DECISIONS.md` - находка.
 4. `docs/adr/` - принятые ADR.
 5. Дифф: `git diff --merge-base main --name-status`, `--stat`, полный дифф; **каждый затронутый
@@ -37,8 +39,13 @@ model: fable
 
 1. **Направление зависимостей.** Импорт из `apps/*` в `packages/*`; `@sf/core` тянет что-либо,
    кроме `zod`; `@sf/db` тянет интеграции; `packages/integrations/*` тянут `@sf/db` (клиент
-   не должен знать о базе - он получает `UsageLogger`); `apps/web` тянет `@sf/db`/`@sf/config`.
-   Каждый такой импорт - замечание со ссылкой на §6.
+   не должен знать о базе - он получает `UsageLogger`); `apps/web` тянет `@sf/db` или `@sf/config` (в `apps/web/src/**` разрешён только вход
+   `@sf/config/server`, помеченный `server-only`, - S11, Р5 E0-12D; вне `src/` - конфиги сборки -
+   ребро `web -> config` по таблице);
+   `@sf/contracts` тянет что-либо из `@sf/*`, кроме `@sf/core`; `@sf/api-client` тянет
+   `@sf/config`, `@sf/core` или что-либо из `@sf/*`, кроме `@sf/contracts`.
+   Каждый такой импорт - замечание со ссылкой на §6. Замок по манифестам и импортам -
+   `test/dependency-direction.test.ts` (таблица рёбер); новая строка таблицы - решение техлида.
 2. **Слои внутри приложения.** В `apps/api` роут содержит бизнес-логику или прямой SQL вместо
    вызова функции из `@sf/core`/репозитория из `@sf/db`; в `apps/worker` джоб дублирует чистую
    логику, которая должна жить в core и быть покрыта юнит-тестом (System Design §6: скоринг -

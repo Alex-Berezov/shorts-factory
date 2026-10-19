@@ -116,6 +116,39 @@
       "pattern": "\\bnew\\s+(Queue|Worker)\\s*\\(",
       "skipIf": "^\\s*(//|\\*)",
       "message": "Очереди и воркеры создаются через фабрики каркаса (defineJob / реестр очередей из E0-08), а не new Queue/new Worker в файле джоба: иначе теряются дефолты ретраев, DLQ и учёт стоимости."
+    },
+    {
+      "id": "S13",
+      "kind": "line",
+      "files": ["apps/api/src/routes/**/*.ts"],
+      "pattern": "(?<!\\bPromise\\s*)\\.\\s*(?:get|post|put|patch|delete|head|options|all)\\s*[(<]|\\.\\s*route\\s*[(<]|\\bwithTypeProvider\\b",
+      "skipIf": "^\\s*(//|\\*)",
+      "message": "Роут в apps/api/src/routes/** регистрируется только defineRoute(app, { method, url, responses, schema, ...options }, handler) из src/lib/route-schemas.ts (README роутов): помощник сам кладёт responses в schema.response и выводит тип ответа хендлера из SuccessReply<typeof responses>, так что схему и хендлер не развести. Прямой вызов .get/.post/.put/.patch/.delete/.head/.options/.all с ( или <, .route( и withTypeProvider - на любом получателе (app, server, fastify, child в register, this) - отказ. Promise.all - не роут и не ловится; прочие .get( и .delete( (Map, headers) в модуле роута тоже ловятся - такой код живёт в src/lib/. Доступ через скобки (app[\"get\"]) правило не видит."
+    },
+    {
+      "id": "S14",
+      "kind": "file",
+      "files": ["apps/api/src/routes/**/*.ts"],
+      "pattern": "\\bdefineRoute\\s*\\(",
+      "skipIf": "^\\s*(//|\\*)",
+      "absentInFile": "^(?!\\s*\\*)(?:[^/]|/(?![/*]))*\\.\\.\\.errorResponses\\(\\)",
+      "message": "defineRoute(...) в файле без ...errorResponses(): у статусов 4xx/5xx нет конверта ошибки, сбой с таким кодом сериализуется не той схемой и уходит 500 от фреймворка (apps/api/src/routes/README.md, src/lib/route-schemas.ts). Ответы роута - const responses = { ...errorResponses(), [OK_STATUS]: Schema }; точный статус со своим телом оборачивается в withErrorEnvelope(). Засчитывается только код: ...errorResponses() в комментарии (// …, /* …, строка JSDoc с *) - не в счёт. Точные статусы проверяет apps/api/test/route-shape.test.ts."
+    },
+    {
+      "id": "S15",
+      "kind": "line",
+      "files": ["packages/contracts/**"],
+      "pattern": "^(?:[^'\"`]|'[^']*'|\"[^\"]*\"|`[^`]*`)*?(?:\\bfrom\\s*|\\bimport\\s*\\(?\\s*|\\brequire\\s*\\(\\s*)['\"`]@sf/(?!(?:core|contracts)['\"`/])",
+      "skipIf": "^\\s*(//|\\*)",
+      "message": "@sf/contracts зависит только от @sf/core (System Design §6, ADR-0007): контракты читают и web, и @sf/api-client, импорт @sf/config, @sf/db или интеграций потащит сервер в браузерный бандл. Нужное - в @sf/core или в самом контракте. Импорт пакетом самого себя (@sf/contracts, @sf/contracts/<подпуть>) - не ребро и не ловится, как и в test/dependency-direction.test.ts. Правило строчное: видит from, побочный import, import(\"…\") и require(\"…\"), когда имя пакета на той же строке и вне строкового литерала (текст '… from \"@sf/x\"' в строке - не импорт и не ловится). Не видит from и кавычку на разных строках и импорт после непарной кавычки в той же строке; все формы, включая vi.mock и require.resolve, и манифест проверяет test/dependency-direction.test.ts."
+    },
+    {
+      "id": "S16",
+      "kind": "line",
+      "files": ["packages/api-client/**"],
+      "pattern": "^(?:[^'\"`]|'[^']*'|\"[^\"]*\"|`[^`]*`)*?(?:\\bfrom\\s*|\\bimport\\s*\\(?\\s*|\\brequire\\s*\\(\\s*)['\"`]@sf/(?!(?:contracts|api-client)['\"`/])",
+      "skipIf": "^\\s*(//|\\*)",
+      "message": "@sf/api-client зависит только от @sf/contracts, и больше ни от чего из @sf/* (System Design §6, ADR-0007): клиент живёт в web, @sf/core и @sf/config в нём - лишний код или секреты в бандле. Нужный тип берётся из @sf/contracts. Импорт пакетом самого себя (@sf/api-client, @sf/api-client/server) - не ребро и не ловится, как и в test/dependency-direction.test.ts. Правило строчное: видит from, побочный import, import(\"…\") и require(\"…\"), когда имя пакета на той же строке и вне строкового литерала (текст '… from \"@sf/x\"' в строке - не импорт и не ловится). Не видит from и кавычку на разных строках и импорт после непарной кавычки в той же строке; все формы, включая vi.mock и require.resolve, и манифест проверяет test/dependency-direction.test.ts."
     }
   ],
   "gates": [
@@ -165,13 +198,13 @@
       "id": "tracker",
       "cmd": "node scripts/tasks.mjs render --check",
       "when": "glob:{docs/tasks/**,docs/00_STATUS.md,scripts/tasks.mjs,scripts/lib/**}",
-      "note": "docs/00_STATUS.md соответствует tasks.json; выбирается и на самом scripts/tasks.mjs и на scripts/lib/** (корень репозитория скрипт берёт из scripts/lib/paths.mjs, E0-12F)"
+      "note": "docs/00_STATUS.md соответствует tasks.json, а doc каждой задачи - файл в docs/, записанный без префикса docs/ (scripts/lib/tracker-doc.mjs, E0-12D); выбирается и на самом scripts/tasks.mjs и на scripts/lib/** (корень репозитория скрипт берёт из scripts/lib/paths.mjs, E0-12F)"
     },
     {
       "id": "harness-selftest",
       "cmd": "node .claude/hooks/harness-selftest.js",
-      "when": "glob:{.claude/**,package.json,apps/**/package.json,packages/**/package.json,apps/**/next.config.*,packages/**/next.config.*,pnpm-workspace.yaml,apps/**/vitest.int.config.*,packages/**/vitest.int.config.*,packages/config/src/paths.ts,packages/config/vitest/**,.env.test,test/compose-rules.test.ts,test/container.test.ts}",
-      "note": "самопроверка обвязки: синтаксис хуков, правила, шапки агентов, пути в settings.json, живые пробы замков. Кроме .claude/** выбирается на корневом package.json (проба требует scripts.build = turbo run build), манифестах пакетов workspace, next.config.* в apps/** и packages/** и pnpm-workspace.yaml: проба графа сборки сверяет их с glob гейта build; на vitest.int.config.* пакетов, packages/config/src/paths.ts (testEnvFilePath), packages/config/vitest/** (setupFiles) и корневом .env.test (фикстура): проба графа test:int читает их же, и проба требует, чтобы каждый прочитанный ею файл выбирал этот гейт (E0-02A, docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «гейт harness-selftest не выбирается на файлах, которые читает проба графа test:int»); turbo.json ни одна проба не читает, на нём не выбирается (E0-01A, docs/DECISIONS.md 11.10.2026); на файлах, названных в note гейтов compose и tracker, которых нет в when и cmd самого гейта (test/compose-rules.test.ts, test/container.test.ts): проба сверяет пути из note с диском, и переименование такого файла должно краснеть локально, а не только в CI; пути из when или cmd гейта-владельца (scripts/compose-rules.mjs, scripts/tasks.mjs, scripts/lib/**, docs/00_STATUS.md) этот гейт не выбирают - иначе selftest шёл бы на каждой задаче (E0-12F, решение техлида к кругу 3); проба требует, чтобы каждый путь из note вне when и cmd гейта-владельца выбирал этот гейт"
+      "when": "glob:{.claude/**,package.json,apps/**/package.json,packages/**/package.json,apps/**/next.config.*,packages/**/next.config.*,pnpm-workspace.yaml,apps/**/vitest.int.config.*,packages/**/vitest.int.config.*,packages/config/src/paths.ts,packages/config/vitest/**,.env.test,test/compose-rules.test.ts,test/container.test.ts,apps/api/src/routes/health/index.ts,apps/api/src/routes/system/index.ts}",
+      "note": "самопроверка обвязки: синтаксис хуков, правила, шапки агентов, пути в settings.json, живые пробы замков. Кроме .claude/** выбирается на корневом package.json (проба требует scripts.build = turbo run build), манифестах пакетов workspace, next.config.* в apps/** и packages/** и pnpm-workspace.yaml: проба графа сборки сверяет их с glob гейта build; на vitest.int.config.* пакетов, packages/config/src/paths.ts (testEnvFilePath), packages/config/vitest/** (setupFiles) и корневом .env.test (фикстура): проба графа test:int читает их же, и проба требует, чтобы каждый прочитанный ею файл выбирал этот гейт (E0-02A, docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «гейт harness-selftest не выбирается на файлах, которые читает проба графа test:int»); turbo.json ни одна проба не читает, на нём не выбирается (E0-01A, docs/DECISIONS.md 11.10.2026); на файлах, названных в note гейтов compose и tracker, которых нет в when и cmd самого гейта (test/compose-rules.test.ts, test/container.test.ts): проба сверяет пути из note с диском, и переименование такого файла должно краснеть локально, а не только в CI; пути из when или cmd гейта-владельца (scripts/compose-rules.mjs, scripts/tasks.mjs, scripts/lib/**, docs/00_STATUS.md) этот гейт не выбирают - иначе selftest шёл бы на каждой задаче (E0-12F, решение техлида к кругу 3); проба требует, чтобы каждый путь из note вне when и cmd гейта-владельца выбирал этот гейт; на apps/api/src/routes/health/index.ts и apps/api/src/routes/system/index.ts: пробы S13/S14 берут их как боевые формы роута на пропуск, и проба требует, чтобы каждый из них выбирал этот гейт (E0-12D)"
     }
   ]
 }

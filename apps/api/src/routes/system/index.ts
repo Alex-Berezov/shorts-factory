@@ -4,7 +4,7 @@ import type { AppInstance } from "../../app.js";
 import type { AppDeps } from "../../deps.js";
 import {
   OK_STATUS,
-  type SuccessReply,
+  defineRoute,
   errorResponses,
 } from "../../lib/route-schemas.js";
 import { collect, dependencyCheck } from "../../lib/system-status.js";
@@ -16,18 +16,20 @@ export function registerRoutes(app: AppInstance, deps: AppDeps): void {
   };
 
   // Reply type read off the responses above, for the reason spelled out in
-  // `SuccessReply`: the declared failures are responses too, and an inferred
+  // `defineRoute`: the declared failures are responses too, and an inferred
   // reply type would accept an error envelope in place of the status of the
   // service.
-  app.get<{ Reply: SuccessReply<typeof responses> }>(
-    "/system/status",
+  defineRoute(
+    app,
     {
+      method: "GET",
+      url: "/system/status",
+      responses,
       schema: {
         summary: "Build, uptime, queues, worker liveness and budget spend",
         description:
           "Requires basic auth. Always 200: a section that could not be read is null and `checks` says why.",
         tags: ["system"],
-        response: responses,
       },
     },
     async (request): Promise<SystemStatusResponse> => {

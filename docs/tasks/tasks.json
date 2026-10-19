@@ -1681,8 +1681,9 @@
       "E0-13"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-10"
+    "status": "in_progress",
+    "added_at": "2026-10-10",
+    "started_at": "2026-10-19"
   },
   {
     "id": "E0-11B",
@@ -1817,5 +1818,75 @@
     "doc": "TECH_DEBT.md",
     "status": "todo",
     "added_at": "2026-10-18"
+  },
+  {
+    "id": "E0-12L",
+    "epic": "E0",
+    "title": "harness-selftest: граф turbo/pnpm вместо ручного разбора, разрез раздела гейтов",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-13",
+      "E0-12D"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-19"
+  },
+  {
+    "id": "E0-12M",
+    "epic": "E0",
+    "title": "gates.js и rules.sf.json: timeout гейтов, --only с glob, формула серверного пакета S07/S11, замок zod, glob test:int/tracker/selftest/S04",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13",
+      "E0-12D"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-19"
+  },
+  {
+    "id": "E0-12N",
+    "epic": "E0",
+    "title": "Корневые тесты и скрипты: repo-files, turbo-inputs, ci-config, dockerfile, probe-image, no-search-list, общий test-support приложений",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13",
+      "E0-12F"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-19"
+  },
+  {
+    "id": "E0-12O",
+    "epic": "E0",
+    "title": "CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-13",
+      "E0-12F"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-19"
+  },
+  {
+    "id": "E0-12P",
+    "epic": "E0",
+    "title": "apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13",
+      "E0-12D"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-19"
   }
 ]

@@ -24,12 +24,18 @@ export function readRepoJson(path: string): unknown {
   return JSON.parse(readRepoFile(path));
 }
 
-/** The fields of a `package.json` the root tests read. */
+/**
+ * The fields of a `package.json` the root tests read: all four dependency
+ * fields, since each of them makes an edge between packages
+ * (`test/dependency-direction.ts`).
+ */
 export const ManifestSchema = z.object({
   name: z.string(),
   scripts: z.record(z.string()).optional(),
   dependencies: z.record(z.string()).optional(),
   devDependencies: z.record(z.string()).optional(),
+  peerDependencies: z.record(z.string()).optional(),
+  optionalDependencies: z.record(z.string()).optional(),
 });
 export type Manifest = z.infer<typeof ManifestSchema>;
 

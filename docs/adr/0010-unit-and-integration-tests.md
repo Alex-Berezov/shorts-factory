@@ -48,7 +48,7 @@
   безусловно в `intTestConfig` пресета (ADR-0011), у всех трёх int-наборов.
 - **Подготовка**: схема тестовой базы - миграция с `.env.test`; в CI шаг
   `node --env-file=../../.env.test --import tsx src/cli/migrate.ts` в `packages/db`
-  (`.github/workflows/ci.yml:82-83`). Testcontainers не используем.
+  (шаг с `working-directory: packages/db` перед `pnpm test:int` в `.github/workflows/ci.yml`). Testcontainers не используем.
 
 ## Альтернативы
 

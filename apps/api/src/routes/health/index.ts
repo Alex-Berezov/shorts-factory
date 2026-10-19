@@ -2,7 +2,7 @@ import { HEALTH_STATUS_CODES, HealthResponseSchema } from "@sf/contracts";
 import type { AppInstance } from "../../app.js";
 import type { AppDeps } from "../../deps.js";
 import {
-  type SuccessReply,
+  defineRoute,
   errorResponses,
   withErrorEnvelope,
 } from "../../lib/route-schemas.js";
@@ -25,16 +25,18 @@ export function registerRoutes(app: AppInstance, deps: AppDeps): void {
   };
 
   // The reply type is read off the object above rather than written out: see
-  // `SuccessReply`.
-  app.get<{ Reply: SuccessReply<typeof responses> }>(
-    "/health",
+  // `defineRoute`.
+  defineRoute(
+    app,
     {
+      method: "GET",
+      url: "/health",
+      responses,
       schema: {
         summary: "Liveness of the service and its dependencies",
         description:
           "Public. 200 while Postgres and Redis both answer, 503 otherwise.",
         tags: ["health"],
-        response: responses,
       },
       // A verdict about this moment: a proxy or a browser that kept it would
       // answer "up" for a database that has since gone away, or the other way

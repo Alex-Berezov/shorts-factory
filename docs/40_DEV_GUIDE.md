@@ -19,13 +19,23 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
 2. **Модуль роутов** - `apps/api/src/routes/<модуль>/index.ts`, экспорт
    `registerRoutes(app: AppInstance, deps: AppDeps)`. Внутри:
    `const responses = { ...errorResponses(), [OK_STATUS]: Schema }` и
-   `app.get<{ Reply: SuccessReply<typeof responses> }>(path, { schema: { response: responses } }, handler)`
-   (`errorResponses`, `OK_STATUS`, `SuccessReply` - из `apps/api/src/lib/route-schemas.ts`;
-   образец - `apps/api/src/routes/system/index.ts`).
+   `defineRoute(app, { method, url, responses, schema: { summary, tags, params, body }, ...options }, handler)`
+   (`errorResponses`, `OK_STATUS`, `defineRoute` - из `apps/api/src/lib/route-schemas.ts`;
+   образец - `apps/api/src/routes/system/index.ts`). Прямых `app.get`/`app.route` в модуле роутов нет:
+   помощник сам кладёт `responses` в `schema.response` и выводит тип ответа хендлера
+   (`SuccessReply<typeof responses>`), а `schema` с собственным `response` не компилируется.
    _Почему:_ конверт ошибки попадает в OpenAPI и в сериализатор, а тип ответа читается с той же
    схемы - обработчик не может вернуть конверт ошибки вместо ответа
    (`apps/api/src/routes/README.md`). Штатный не-2xx статус со своим телом - через
    `withErrorEnvelope()` из того же модуля.
+   _Замки:_ стандарты S13/S14 (`.claude/hooks/rules.sf.json`) при записи файла в
+   `apps/api/src/routes/` ловят регистрацию роута мимо `defineRoute` (`.get`/`.post`/… с `(` или `<`,
+   `.route(`, `withTypeProvider` на любом получателе) и `defineRoute(` в файле без
+   `...errorResponses()` в коде (упоминание в комментарии не в счёт); `apps/api/test/define-route.test.ts`
+   держит типы помощника под `tsc`; `apps/api/test/route-shape.test.ts` в
+   `pnpm test` проверяет каждый зарегистрированный роут: `4xx`/`5xx` и каждый точный статус
+   400-599 несут конверт ошибки, ключ `200` есть. Новый роут попадает в его список «ровно эти
+   роуты» отдельной строкой.
 3. **Ошибки** - бросать `AppError` из `@sf/core` (`ValidationError`, `NotFoundError` и т.п.),
    а не собирать ответ руками: конверт `{ error: { code, message, requestId, details? } }`
    строит обработчик ошибок api.
@@ -171,7 +181,7 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
   читают через `test/repo-files.ts` - только те, что входят в хеш: отслеживаемые git и
   неотслеживаемые, но не игнорируемые (`git ls-files --cached --others --exclude-standard`,
   `repoFilesUnder`); перечисляют - тоже через него, а не `readdirSync` (пока исключение -
-  `workspacePackageDirs`: пакеты по `pnpm-workspace.yaml` через `readdirSync`, долг E0-12D
+  `workspacePackageDirs`: пакеты по `pnpm-workspace.yaml` через `readdirSync`, долг E0-12N
   в `docs/TECH_DEBT.md`). Игнорируемый файл
   (`coverage/`, сборка) в хеш `//#test:repo` не попадает, и чтение его переиграло бы старый
   результат из кэша. Ответ «путь исчез» у корневых скриптов один - `isGone` из

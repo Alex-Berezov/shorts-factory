@@ -11,7 +11,8 @@ Experiment Engine -> Localization/TTS -> Publishing). Один репозито�
 ## Что читать перед любой работой
 
 0. `docs/00_STATUS.md` - где мы: текущая задача, что следующее (генерируется, руками не править).
-1. `docs/3x_E?_TASKS.md` того эпика, к которому относится задача, - раздел `### <id>`
+1. Документ задачи - путь из поля `doc` трекера (`docs/<doc>`; обычно `docs/3x_E?_TASKS.md`
+   того эпика, к которому относится задача, у задач из долга - `docs/TECH_DEBT.md`) - раздел `### <id>`
    (цель, «Сделать», DoD) и разделы «Архитектурные решения», «Изменения схемы», «Вне скоупа».
 2. `docs/20_TZ_HIGH_LEVEL.md` - эпики E0–E13, критерии приёмки, «вне скоупа MVP».
 3. `docs/10_SYSTEM_DESIGN.md` - стек, очереди, модель данных, направление зависимостей (§6).
@@ -51,7 +52,7 @@ Experiment Engine -> Localization/TTS -> Publishing). Один репозито�
 Ручной режим: `/task` (план) -> `/go` (реализация) -> `/qa` -> `/fix` -> `/done`.
 Вопрос PM/техлиду руками: `/ask`. Где мы: `/status`. Проверки: `/gates`.
 
-Трекер задач - `docs/tasks/tasks.json` через `node scripts/tasks.mjs next|start|done|block|add`;
+Трекер задач - `docs/tasks/tasks.json` через `node scripts/tasks.mjs next|start|done|block|add|set` (`set <id> --title/--doc` - правка полей; `doc` - путь от `docs/`, `render --check` гейта `tracker` его сверяет с диском);
 руками файл и `docs/00_STATUS.md` не правятся.
 
 ## Что остаётся за владельцем
@@ -80,7 +81,8 @@ Experiment Engine -> Localization/TTS -> Publishing). Один репозито�
 
 - TypeScript strict везде; `any` запрещён во всех формах (замок `S01`), клапан `// any-ok: причина (E?-??)`.
 - Направление зависимостей: `apps -> packages`; `integrations -> core, config`; `db -> core`;
-  `runtime -> config, core`; `@sf/core` не зависит ни от чего, кроме `zod`.
+  `runtime -> config, core`; `contracts -> core`; `api-client -> contracts` (и больше ни на что);
+  `@sf/core` не зависит ни от чего, кроме `zod`. Замок - `test/dependency-direction.test.ts`, S15/S16.
 - Всё асинхронное - идемпотентные BullMQ-джобы с детерминированным `jobId`, ретраями, DLQ;
   каждый внешний вызов пишет стоимость (units/tokens/USD) в `api_usage_log` до возврата.
 - YouTube Data API: `search.list` **никогда** (100 units). Синк - uploads playlist, снапшоты -

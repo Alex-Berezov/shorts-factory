@@ -1,5 +1,17 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { ErrorBodySchema } from "@sf/contracts";
+import type {
+  ContextConfigDefault,
+  FastifyBaseLogger,
+  FastifySchema,
+  HTTPMethods,
+  RawServerDefault,
+  RouteHandlerMethod,
+  RouteShorthandOptions,
+} from "fastify";
+import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import type { AppInstance } from "../app.js";
 
 /** The status a route answers with when nothing went wrong. */
 export const OK_STATUS = 200;
@@ -14,19 +26,19 @@ export const OK_STATUS = 200;
  * `Reply` in the route generic replaces the inferred type rather than
  * narrowing it (`fastify/types/type-provider.d.ts`, "can be explicitly
  * overridden"), so what is stated has to come from the same object the schema
- * is built from - `SuccessReply<typeof responses>`, not a type name written
- * out a second time next to it. There is then one declaration and no pair to
- * drift apart: the schema at `OK_STATUS` decides both what is serialized and
- * what the handler is allowed to return, and a route whose responses have no
- * `OK_STATUS` key does not compile.
+ * is built from - `SuccessReply<Responses>`, not a type name written out a
+ * second time next to it. `defineRoute` below does both from the one object
+ * it is given, so there is one declaration and no pair to drift apart: the
+ * schema at `OK_STATUS` decides both what is serialized and what the handler
+ * is allowed to return, and a route whose responses have no `OK_STATUS` key
+ * does not compile.
  *
  * What this does not do is check the other statuses: a body returned with
  * `reply.status(503).send(...)` is outside the reply type, and nothing but
  * the serializer reads the schema declared there.
  */
-export type SuccessReply<
-  Responses extends Record<typeof OK_STATUS, z.ZodTypeAny>,
-> = z.infer<Responses[typeof OK_STATUS]>;
+type SuccessReply<Responses extends Record<typeof OK_STATUS, z.ZodTypeAny>> =
+  z.infer<Responses[typeof OK_STATUS]>;
 
 /**
  * The failure half of every route's `schema.response`.
@@ -69,4 +81,140 @@ export function withErrorEnvelope<Schema extends z.ZodTypeAny>(
   schema: Schema,
 ): z.ZodUnion<[Schema, typeof ErrorBodySchema]> {
   return z.union([schema, ErrorBodySchema]);
+}
+
+/** The responses of a route: `OK_STATUS` and whatever else it declares. */
+type RouteResponses = Record<typeof OK_STATUS, z.ZodTypeAny>;
+
+/**
+ * The schema of a route without its responses: those come in `responses`
+ * of `defineRoute`, and a second place to declare them is refused by type.
+ */
+type RouteSchema = Omit<FastifySchema, "response"> & {
+  response?: never;
+};
+
+/** The reply a route generic states: the body at `OK_STATUS` and nothing else. */
+interface SuccessGeneric<Responses extends RouteResponses> {
+  Reply: SuccessReply<Responses>;
+}
+
+/** The schema Fastify gets: the route's own, with its responses. */
+type DeclaredSchema<
+  Schema extends RouteSchema,
+  Responses extends RouteResponses,
+> = Schema & { response: Responses };
+
+/**
+ * The options of a route the error envelope rests on: they belong to the app.
+ * `RouteExtras` leaves them out, so a literal that passes one does not
+ * compile, and `defineRoute` throws on one that comes in past the type (a
+ * spread, a cast).
+ */
+const APP_OPTIONS = [
+  "errorHandler",
+  "serializerCompiler",
+  "validatorCompiler",
+  "schemaErrorFormatter",
+  "attachValidation",
+] as const;
+
+/**
+ * The options Fastify takes for the route, typed with the same generic and
+ * schema as the handler: the hooks (`onSend` of `/health`), `bodyLimit`,
+ * `config` and the rest, without `schema`, which `defineRoute` assembles,
+ * and without `APP_OPTIONS`.
+ */
+type RouteExtras<
+  Schema extends RouteSchema,
+  Responses extends RouteResponses,
+> = Omit<
+  RouteShorthandOptions<
+    RawServerDefault,
+    IncomingMessage,
+    ServerResponse,
+    SuccessGeneric<Responses>,
+    ContextConfigDefault,
+    DeclaredSchema<Schema, Responses>,
+    ZodTypeProvider,
+    FastifyBaseLogger
+  >,
+  "schema" | (typeof APP_OPTIONS)[number]
+>;
+
+/** What a route module says about one route, besides its handler. */
+type RouteDefinition<
+  Schema extends RouteSchema,
+  Responses extends RouteResponses,
+> = RouteExtras<Schema, Responses> & {
+  method: HTTPMethods | HTTPMethods[];
+  url: string;
+  /** `{ ...errorResponses(), [OK_STATUS]: Schema, ... }` - `schema.response` of the route. */
+  responses: Responses;
+  /** The rest of the schema: summary, tags, params, body, querystring. */
+  schema: Schema;
+};
+
+/** The handler of a route: request typed from the schema, reply from `SuccessReply`. */
+type RouteHandler<
+  Schema extends RouteSchema,
+  Responses extends RouteResponses,
+> = RouteHandlerMethod<
+  RawServerDefault,
+  IncomingMessage,
+  ServerResponse,
+  SuccessGeneric<Responses>,
+  ContextConfigDefault,
+  DeclaredSchema<Schema, Responses>,
+  ZodTypeProvider,
+  FastifyBaseLogger
+>;
+
+/**
+ * The one way a module of `src/routes` registers a route.
+ *
+ * The responses come in as one object, go into `schema.response`, and the
+ * reply type of the handler is read off that same object (`SuccessReply`), so
+ * the two cannot drift apart and a handler returning the error envelope - a
+ * declared response too - does not compile. `Params`, `Body` and
+ * `Querystring` of the request still come from the zod schemas through the
+ * type provider. The options the error envelope rests on - `errorHandler`,
+ * the serializer and validator compilers, `schemaErrorFormatter`,
+ * `attachValidation` - belong to the app: one written in the definition does
+ * not compile, and one that gets past the type (a spread, a cast) is thrown
+ * on before the route is registered. A module of `src/routes` calls nothing
+ * else on the instance to register a route: the rule S13 of
+ * `.claude/hooks/rules.sf.json` refuses `.get(`, `.route(` and
+ * `withTypeProvider` there.
+ */
+export function defineRoute<
+  Schema extends RouteSchema,
+  Responses extends RouteResponses,
+>(
+  app: AppInstance,
+  definition: RouteDefinition<Schema, Responses>,
+  handler: RouteHandler<Schema, Responses>,
+): void {
+  const { method, url, responses, schema, ...options } = definition;
+  const taken = APP_OPTIONS.filter((key) => Object.hasOwn(options, key));
+  if (taken.length > 0) {
+    throw new Error(
+      `route ${String(method)} ${url}: options of the app in a route (${taken.join(", ")}) - the error envelope rests on them`,
+    );
+  }
+  const declared: DeclaredSchema<Schema, Responses> = {
+    ...schema,
+    response: responses,
+  };
+  app.route<
+    SuccessGeneric<Responses>,
+    ContextConfigDefault,
+    DeclaredSchema<Schema, Responses>
+  >({
+    ...options,
+    method,
+    url,
+    schema: declared,
+    handler,
+  });
 }

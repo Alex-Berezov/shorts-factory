@@ -21,9 +21,11 @@ model: fable
 ## Что прочитать прежде, чем отвечать
 
 1. `docs/10_SYSTEM_DESIGN.md` - стек, направление зависимостей (§6: apps → packages,
-   integrations → core+config, db → core, runtime → config+core, core ни от чего), очереди §4, модель данных §5,
+   integrations → core+config, db → core, runtime → config+core, contracts → core,
+   api-client → contracts и больше ни на что, core ни от чего), очереди §4, модель данных §5,
    интеграции §7, нефункциональные требования §8.
-2. `docs/3x_Ex_TASKS.md` текущего эпика - раздел «Архитектурные решения» и DoD задачи:
+2. Документ задачи - путь из поля `doc` трекера (`docs/<doc>`; обычно `docs/3x_Ex_TASKS.md`
+   текущего эпика, у задач из долга - `docs/TECH_DEBT.md`) - раздел «Архитектурные решения» и DoD задачи:
    решения там уже приняты по умолчанию, и менять их можно только осознанно с объяснением.
 3. `docs/DECISIONS.md` и `docs/adr/` - что решили до тебя.
 4. `.claude/qa-index.md` - уроки прошлых ревью; признак совпал - открой полную запись

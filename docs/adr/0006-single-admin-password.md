@@ -11,8 +11,8 @@
 
 ## Решение
 
-- **Один секрет `ADMIN_PASSWORD`** из `@sf/config` (не короче 8 символов - `packages/config/src/schema.ts:96`,
-  и не короче 16 вне `development`/`test` - `packages/config/src/load-env.ts:6`). Имя пользователя не проверяется
+- **Один секрет `ADMIN_PASSWORD`** из `@sf/config` (не короче 8 символов - ключ `ADMIN_PASSWORD` в `EnvSchema`, `packages/config/src/schema.ts`,
+  и не короче 16 вне `development`/`test` - `PRODUCTION_ADMIN_PASSWORD_MIN` в `packages/config/src/load-env.ts`). Имя пользователя не проверяется
   (`docs/DECISIONS.md`, 08.09.2026).
 - **web**: `apps/web/src/middleware.ts` - HTTP Basic на всех путях, кроме `_next/static/`,
   `_next/image` и `favicon.ico` (`config.matcher`). Middleware работает в Node-runtime

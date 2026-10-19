@@ -19,7 +19,8 @@
 - **api** валидирует и сериализует по тем же схемам через `fastify-type-provider-zod`:
   `validatorCompiler`/`serializerCompiler` и `transform: jsonSchemaTransform` для OpenAPI
   в `apps/api/src/plugins/openapi.ts`, `ZodTypeProvider` в `apps/api/src/app.ts`. Правила роута
-  (`...errorResponses()` до статусов успеха, `SuccessReply<typeof responses>` в generic,
+  (`...errorResponses()` до статусов успеха, `SuccessReply<typeof responses>` как тип ответа -
+  с 19.10.2026 его ставит помощник `defineRoute`, E0-12D,
   `withErrorEnvelope()` для статуса, который роут отдаёт штатно) - в `apps/api/src/routes/README.md`
   и `apps/api/src/lib/route-schemas.ts`.
 - **web** читает api через `@sf/api-client` (`packages/api-client/src/client.ts`,

@@ -89,7 +89,7 @@
     по URL окружения, затем тот же сервер в базе набора: открыть Redis набора мимо стража нельзя;
   - `@sf/db/test-support/fixture` - только для int-наборов (читает `env` из `@sf/config`: ребро
     `db -> config` у `test-support/**` - то же исключение, что у `test/**`, записано в §6 System
-    Design и ADR-0002; из `src/**` фикстура не импортируется, замок - E0-12D): `openTestDb`,
+    Design и ADR-0002; из `src/**` фикстура не импортируется, замок - `test/dependency-direction.test.ts`): `openTestDb`,
     `openTestSql` (оба сначала зовут Postgres-половину стража; Redis-URL их не касается),
     `emptyTestDatabase` (через свой `openTestSql`; страж по URL и по `current_database()`
     перед `DROP SCHEMA`), `resetTestDatabase` (`emptyTestDatabase` и миграции), `assertMigrated()` - проверка int-набора,

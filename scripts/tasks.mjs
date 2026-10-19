@@ -14,6 +14,15 @@
  *   node scripts/tasks.mjs list [epic]         table of tasks
  *   node scripts/tasks.mjs render              regenerate docs/00_STATUS.md only
  *   node scripts/tasks.mjs add <id> "<title>"  new task [--epic E?] [--est "1 д"] [--deps a,b] [--doc f.md]
+ *   node scripts/tasks.mjs set <id> [--title "<title>"] [--doc f.md]
+ *                                              change the title or the document of a task
+ *
+ * `--doc` is a path from docs/ (`TECH_DEBT.md`, not `docs/TECH_DEBT.md`) and
+ * must name a file there; `render --check` holds every task to the same.
+ *
+ *   node scripts/tasks.mjs --root=<dir> <command> ...
+ *                                              the same on the tracker, docs/ and journal
+ *                                              under <dir> (the tests of the CLI run on a copy)
  */
 import {
   appendFileSync,
@@ -23,10 +32,36 @@ import {
 } from "node:fs";
 import { resolve } from "node:path";
 import { repoRoot } from "./lib/paths.mjs";
+import { badDocs, docProblem } from "./lib/tracker-doc.mjs";
 
-const TASKS_PATH = resolve(repoRoot, "docs/tasks/tasks.json");
-const STATUS_PATH = resolve(repoRoot, "docs/00_STATUS.md");
-const WORKLOG_PATH = resolve(repoRoot, "docs/90_WORKLOG.md");
+/**
+ * `--root=<dir>` as the first argument: the tree whose `docs/` the CLI reads
+ * and writes - the repository unless a test points it at a copy, so that a
+ * case which writes, or a regression that writes where it should refuse,
+ * never touches the tracker of the repository. Given anywhere else - or as
+ * `--root <dir>` - it is refused before anything is read: taken as an
+ * ordinary argument it would be ignored, and the command would run on the
+ * tracker of the repository.
+ */
+const ROOT_FLAG = "--root=";
+const argv = process.argv.slice(2);
+const rootArg = argv[0]?.startsWith(ROOT_FLAG) ? argv.shift() : undefined;
+const strayRoot = argv.find(
+  (arg) => arg === "--root" || arg.startsWith(ROOT_FLAG),
+);
+if (strayRoot !== undefined || rootArg === ROOT_FLAG) {
+  console.error(
+    `error: ${strayRoot ?? rootArg} - give the tree as --root=<dir>, once, before the command`,
+  );
+  process.exit(1);
+}
+const root =
+  rootArg === undefined ? repoRoot : resolve(rootArg.slice(ROOT_FLAG.length));
+
+const TASKS_PATH = resolve(root, "docs/tasks/tasks.json");
+const STATUS_PATH = resolve(root, "docs/00_STATUS.md");
+const WORKLOG_PATH = resolve(root, "docs/90_WORKLOG.md");
+const DOCS_DIR = resolve(root, "docs");
 
 /** Implementation order of epics (from docs/20_TZ_HIGH_LEVEL.md, "Сводка декомпозиции"). */
 const EPIC_ORDER = [
@@ -99,6 +134,7 @@ const COMMANDS = [
   "list",
   "render",
   "add",
+  "set",
 ];
 
 // ---------- io ----------
@@ -309,6 +345,17 @@ function render(tasks, opts = {}) {
     } catch {
       cur = "";
     }
+    const broken = badDocs(tasks, DOCS_DIR);
+    if (broken.length) {
+      console.error(
+        [
+          "docs/tasks/tasks.json names documents that are not there:",
+          ...broken.map((line) => `  ${line}`),
+          "fix with `node scripts/tasks.mjs set <id> --doc <file in docs/>`",
+        ].join("\n"),
+      );
+      process.exit(1);
+    }
     if (strip(cur) !== strip(out)) {
       console.error(
         "docs/00_STATUS.md is stale: run `node scripts/tasks.mjs render`",
@@ -333,8 +380,31 @@ function worklog(line) {
 }
 
 // ---------- commands ----------
-const [, , cmd = "next", ...args] = process.argv;
+const [cmd = "next", ...args] = argv;
 const tasks = load();
+/** @type {(name: string) => string | undefined} */
+const opt = (name) => {
+  const i = args.indexOf(name);
+  return i !== -1 ? args[i + 1] : undefined;
+};
+/** @type {(doc: string) => void} */
+const checkDoc = (doc) => {
+  const problem = docProblem(doc, DOCS_DIR);
+  if (problem !== undefined) die(problem);
+};
+/**
+ * A title is one line with text in it: a row of docs/00_STATUS.md and a line
+ * of the journal take it as it is.
+ * @type {(title: string) => void}
+ */
+const checkTitle = (title) => {
+  if (title.trim() === "") die("title is empty");
+  if (/[\r\n]/.test(title)) {
+    die(
+      "title has a line break: a row of docs/00_STATUS.md and a line of the journal take it on one line",
+    );
+  }
+};
 
 switch (cmd) {
   case "render":
@@ -437,12 +507,12 @@ switch (cmd) {
     // add <id> "<title>" [--epic E?] [--est "1 д"] [--deps E0-01,E0-02] [--doc file.md]
     const id = (args[0] ?? die("task id required")).toUpperCase();
     const title = args[1] ?? die("title required");
+    checkTitle(title);
+    const doc = opt("--doc") ?? "00_STATUS.md";
+    // Before anything else: a doc the readers cannot open is refused even
+    // for a task that turns out to exist.
+    checkDoc(doc);
     if (tasks.some((t) => t.id === id)) die(`${id} already exists`);
-    /** @type {(name: string) => string | undefined} */
-    const opt = (name) => {
-      const i = args.indexOf(name);
-      return i !== -1 ? args[i + 1] : undefined;
-    };
     const epic = opt("--epic") ?? id.match(/^E\d+/)?.[0] ?? "ADHOC";
     const estimate = opt("--est") ?? "?";
     const nums = [...estimate.matchAll(/\d+(?:\.\d+)?/g)].map((m) =>
@@ -458,7 +528,7 @@ switch (cmd) {
         .split(",")
         .map((s) => s.trim().toUpperCase())
         .filter(Boolean),
-      doc: opt("--doc") ?? "00_STATUS.md",
+      doc,
       status: "todo",
       added_at: today(),
     });
@@ -466,6 +536,36 @@ switch (cmd) {
     worklog(`- ${today()} ➕ **${id}** ${title} (добавлена в трекер)`);
     render(tasks);
     console.log(`➕ ${id} added (epic ${epic})`);
+    break;
+  }
+
+  case "set": {
+    // set <id> [--title "..."] [--doc file.md]
+    const title = opt("--title");
+    const doc = opt("--doc");
+    if (title === undefined && doc === undefined)
+      die("nothing to set: give --title and/or --doc");
+    if (title !== undefined) checkTitle(title);
+    // The values first, the task second: a bad value is refused whatever
+    // the id.
+    if (doc !== undefined) checkDoc(doc);
+    const t = find(tasks, args[0] ?? die("task id required"));
+    /** @type {string[]} */
+    const changed = [];
+    if (title !== undefined) {
+      t.title = title;
+      changed.push("заголовок");
+    }
+    if (doc !== undefined) {
+      t.doc = doc;
+      changed.push(`doc → docs/${doc}`);
+    }
+    save(tasks);
+    worklog(
+      `- ${today()} ✎ **${t.id}** ${t.title} (изменена в трекере: ${changed.join(", ")})`,
+    );
+    render(tasks);
+    console.log(`✎ ${t.id}: ${t.title} → docs/${t.doc}`);
     break;
   }
 

@@ -35,7 +35,7 @@
   фикстура int-наборов (`fixture.ts`) читает `env.DATABASE_URL`/`env.REDIS_URL` из
   `@sf/config` на тех же основаниях, что `test/**`, и отдаётся int-тестам api/worker
   подпутём `@sf/db/test-support/fixture`. Импортируется только из тестов; импорт из `src/**`
-  - нарушение этого ADR (замок - E0-12D).
+  - нарушение этого ADR (замок - `test/dependency-direction.test.ts`).
 - Соединение открывается вызовом, а не импортом: у пакета больше нет модульного синглтона
   `db` (D3). Посадка - `test/no-side-effects.test.ts`: импорт `src/index.ts` не создаёт
   клиента и не падает без `DATABASE_URL`.
@@ -98,3 +98,21 @@ M already applied`; `app settings seeded`), отказ - одну строку �
   `onReleaseError` (CLI пишет строку в stderr); при применённых миграциях раннер возвращает
   результат, а лок уходит вместе с сессией при закрытии соединения. Ожидание лока ограничено
   `lock_timeout` (`MIGRATION_LOCK_WAIT_MS`, 120 с) с понятным текстом отказа.
+
+## Дополнение (дополнено 19.10.2026, E0-12D): `@sf/config` в манифесте `@sf/db`
+
+Граница «Решения» проходит по импортам, а не по манифесту: `@sf/config` стоит в `dependencies`
+`packages/db/package.json`, а не в `devDependencies`, и это не нарушение направления `db -> core`,
+а его именованное исключение.
+
+- Зачем `dependencies`: образ `migrate` (`infra/docker/migrate.Dockerfile`) ставит пакеты
+  `pnpm install --prod --filter @sf/db...` и запускает `src/cli/**`, которым нужна схема
+  окружения из `@sf/config`. В `devDependencies` пакет в образ не попадёт, и `db:migrate`
+  упадёт на первом импорте. Перенос `@sf/config` в `devDependencies` «по этому ADR» - регресс,
+  а не исправление.
+- Что держит границу: корневой тест `test/dependency-direction.test.ts`. По манифесту ребро
+  `@sf/db -> @sf/config` разрешено как исключение этого ADR (`DB_CONFIG_EXCEPTION`); по
+  импортам `@sf/config` в `@sf/db` проходит только в `src/cli/**`, `test/**`,
+  `test-support/**` и `vitest*.config.{ts,mts,cts}` - ровно четыре места из «Последствий»;
+  импорт в библиотечной части, в `drizzle.config.ts` или упоминание, ставшее импортом, -
+  красный тест.

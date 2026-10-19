@@ -72,16 +72,118 @@ function liveBytes() {
   }
 }
 const LIVE_BYTES = liveBytes();
+/**
+ * Снимок рабочего дерева до первой пробы: последняя проба сверяет с ним текущий. Файлы проб
+ * живут во временных папках (withScratchTree), и любая разница - проба, которая пишет мимо них
+ * или не убрала за собой. В снимке три вещи (E0-12D, B8 круга 1):
+ *   - каждая запись git status (новый, изменённый, удалённый файл) с отпечатком содержимого:
+ *     перезапись файла, который уже был `M` или `??`, меняет отпечаток, а не строку status;
+ *   - игнорируемые записи (`!!`, по одной на каталог - node_modules/, .turbo/): новый файл
+ *     под .gitignore status без --ignored не показывает;
+ *   - ничего больше: новый файл внутри уже игнорируемого каталога снимок не видит (TECH_DEBT, E0-12L).
+ * Правка руками или другой процесс в то же время даёт ту же красную строку - тогда перезапуск.
+ * root - корень рабочего дерева (по умолчанию репозиторий; проба сверки берёт временный).
+ * Возвращает Map<запись, отпечаток>; сбой git - исключение (его ловит проба, не верхний уровень).
+ */
+function repoSnapshot(root = ROOT) {
+  const status = (extra) => {
+    // core.fsmonitor=false: глобальный fsmonitor - внешняя команда, status её бы исполнил.
+    const r = run('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain=v1', '-z'].concat(extra), { cwd: root });
+    if (r.error || r.status !== 0) throw new Error('git status: ' + String((r.error && r.error.message) || r.stderr || 'код ' + r.status).slice(0, 160));
+    return String(r.stdout).split('\0');
+  };
+  const crypto = require('crypto');
+  const fingerprint = (rel) => {
+    try {
+      const abs = path.join(root, rel);
+      return fs.statSync(abs).isFile() ? crypto.createHash('sha1').update(fs.readFileSync(abs)).digest('hex') : 'не файл';
+    } catch (e) {
+      if (e && e.code === 'ENOENT') return 'нет на диске';
+      throw e;
+    }
+  };
+  const snap = new Map();
+  const tracked = status(['--untracked-files=all']);
+  for (let i = 0; i < tracked.length; i++) {
+    const e = tracked[i];
+    if (!e) continue;
+    const xy = e.slice(0, 2);
+    const rel = e.slice(3);
+    // у переименования и копии за записью идёт прежний путь отдельным полем -z
+    if (/[RC]/.test(xy)) i++;
+    snap.set(xy + ' ' + rel, fingerprint(rel));
+  }
+  for (const e of status(['--ignored=traditional', '--untracked-files=normal'])) {
+    if (e.startsWith('!! ')) snap.set(e, '');
+  }
+  return snap;
+}
+/** Разница двух снимков repoSnapshot строками «появилось / изменилось содержимое / пропало <запись>». */
+function treeDiff(before, now) {
+  const diff = [];
+  for (const [entry, print] of now) {
+    if (!before.has(entry)) diff.push('появилось ' + entry);
+    else if (before.get(entry) !== print) diff.push('изменилось содержимое ' + entry);
+  }
+  for (const entry of before.keys()) if (!now.has(entry)) diff.push('пропало ' + entry);
+  return diff;
+}
+let LIVE_TREE = null;
+let LIVE_TREE_ERROR = '';
+try {
+  LIVE_TREE = repoSnapshot();
+} catch (e) {
+  LIVE_TREE_ERROR = (e && e.message) || String(e);
+}
 const PROBE_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-state-'));
 process.env.SF_HOOK_STATE_DIR = PROBE_STATE_DIR;
 process.on('exit', () => fs.rmSync(PROBE_STATE_DIR, { recursive: true, force: true }));
 process.on('SIGINT', () => process.exit(130));
 
-/** Запуск хука с JSON на stdin. Возвращает { code, out, err }. */
-function probe(hook, input, cwd) {
-  const env = Object.assign({}, process.env, { SF_HOOK_STATE_DIR: PROBE_STATE_DIR });
-  const r = run(process.execPath, [path.join(HOOKS, hook)], { input: JSON.stringify(input), cwd: cwd || ROOT, env });
+/**
+ * Запуск хука с JSON на stdin (hooksDir - каталог хуков, по умолчанию боевой; extraEnv -
+ * добавка к окружению). Возвращает { code, out, err }.
+ */
+function probe(hook, input, cwd, hooksDir, extraEnv) {
+  const env = Object.assign({}, process.env, { SF_HOOK_STATE_DIR: PROBE_STATE_DIR }, extraEnv || {});
+  const r = run(process.execPath, [path.join(hooksDir || HOOKS, hook)], { input: JSON.stringify(input), cwd: cwd || ROOT, env });
   return { code: r.status, out: String(r.stdout || ''), err: String(r.stderr || '') };
+}
+
+/** Строка, которую L.guard пишет в stderr при CLAUDE_HOOK_DEBUG, поймав исключение хука. */
+const HOOK_ERROR = 'hook error:';
+
+/**
+ * Пробы standards.js не пишут в боевые src (E0-12D, TECH_DEBT: прерванный прогон оставлял
+ * zz_selftest_* под git add -A). Дерево пробы - временная папка с копией .claude/hooks
+ * (*.js и *.json байт в байт, repos.json тот же: репозиторий sf - корень копии) и файлами
+ * пробы по их путям от корня репозитория, так что glob правил и rules.sf.json те же, что
+ * у боевого хука. Папка убирается в finally, в том числе после красной строки.
+ *   tree.write(rel, body) - пишет файл пробы и отдаёт абсолютный путь;
+ *   tree.standards(rel)   - запуск копии standards.js на этом файле ({ code, out, err }).
+ * Хук идёт с CLAUDE_HOOK_DEBUG: исключение внутри L.guard без failClosed даёт код 0 и пустой
+ * stdout - ровно как пропуск, - и отличить их можно только по строке HOOK_ERROR в stderr.
+ */
+function withScratchTree(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-tree-'));
+  try {
+    const hooks = path.join(dir, '.claude', 'hooks');
+    fs.mkdirSync(hooks, { recursive: true });
+    for (const f of fs.readdirSync(HOOKS)) {
+      if (/\.(?:js|json)$/.test(f)) fs.copyFileSync(path.join(HOOKS, f), path.join(hooks, f));
+    }
+    const abs = (rel) => path.join(dir, ...rel.split('/'));
+    return fn({
+      write: (rel, body) => {
+        fs.mkdirSync(path.dirname(abs(rel)), { recursive: true });
+        fs.writeFileSync(abs(rel), body);
+        return abs(rel);
+      },
+      standards: (rel) => probe('standards.js', { tool_input: { file_path: abs(rel) } }, dir, hooks, { CLAUDE_HOOK_DEBUG: '1' }),
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
@@ -154,44 +256,106 @@ check('у каждого гейта есть id, cmd и when', () => {
   return { note: gates.map((g) => g.id).join(', ') };
 });
 /**
- * selectGates из самого gates.js, а не её повтор (L-008): правка обработки when там
- * обязана краснеть здесь. gates.js - скрипт: main() исполняется при загрузке и выходит
- * через process.exit, функции он не экспортирует. Поэтому исходник исполняется в
- * отдельном контексте vm: argv - `--help` (main() печатает справку в заглушённую консоль
- * и возвращает ran:false - отметки о прогоне нет, гейты не запускаются), process.exit -
- * заглушка. Объявления функций верхнего уровня скрипта становятся свойствами контекста.
+ * gates.js - модуль для проб и скрипт для человека: main() под require.main === module.
+ * Проба грузит его require в отдельном процессе, где всё, что main() сделал бы при загрузке,
+ * безопасно и видно: argv - полный прогон (без --list), список изменённых файлов подменён
+ * (L.allChanged - один репозиторий с одним гейтом always), каждый запуск child_process
+ * (spawn, spawnSync, exec, execSync, execFile, execFileSync, fork - с shell и без) подменён
+ * счётчиком с пустым ответом, process.exit - записью кода. Без стража main() дошёл бы до
+ * конца: «прогнал» бы гейт, поставил бы отметку lastGates (markGates - только после
+ * настоящего полного прогона, поэтому --list её не проверял бы) и вызвал бы process.exit.
+ * Ждём код 0, пустой stderr, в stdout ровно строку итога пробы, ноль запусков, ни одного
+ * process.exit и ни одной отметки в состоянии пробы (своя временная папка,
+ * SF_HOOK_STATE_DIR). Каждое - своя причина отказа. Положительный контроль: настоящий
+ * markGates из diff-hash.js в другой временной папке с тем же SF_HOOK_STATE_DIR ставит
+ * отметку, и та же проверка состояния её видит - иначе проба смотрела бы не туда и молчала.
+ * Пока проба не зелёная, gateProbe не грузит gates.js в этот процесс: без стража require
+ * отсюда прогнал бы все гейты.
  */
-function loadSelectGates() {
-  const vm = require('vm');
-  const file = path.join(HOOKS, 'gates.js');
-  // шебанг заменяется пустой строкой, номера строк в стеке не сдвигаются
-  const src = fs.readFileSync(file, 'utf8').replace(/^#!.*/, '');
-  const silent = { log() {}, error() {}, warn() {} };
-  const sandbox = {
-    require,
-    console: silent,
-    process: { argv: [process.execPath, file, '--help'], env: process.env, exit() {} },
-    __dirname: HOOKS,
-    __filename: file,
-  };
-  vm.runInNewContext(src, sandbox, { filename: file });
-  if (typeof sandbox.selectGates !== 'function') throw new Error('в gates.js нет функции selectGates');
-  return sandbox.selectGates;
+const CHILD_PROCESS_LAUNCHERS = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'];
+/** Отметка lastGates в состоянии хуков, записанном в dir (SF_HOOK_STATE_DIR). */
+function lastGatesIn(dir) {
+  const st = path.join(dir, '.qa-state');
+  return fs.existsSync(st) && Boolean(JSON.parse(fs.readFileSync(st, 'utf8')).lastGates);
 }
+let gatesModuleSafe = false;
+check('gates.js: require не запускает гейты, не пишет отметку и не выходит из процесса', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-require-'));
+  const control = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-mark-'));
+  const file = path.join(HOOKS, 'gates.js');
+  try {
+    const mark = run(process.execPath, ['-e', 'require(' + JSON.stringify(path.join(HOOKS, 'diff-hash.js')) + ').markGates(0);'], {
+      cwd: ROOT,
+      env: Object.assign({}, process.env, { SF_HOOK_STATE_DIR: control }),
+    });
+    if (mark.status !== 0 || !lastGatesIn(control)) {
+      return 'проверка состояния не видит отметку настоящего markGates (код ' + mark.status + ' ' + String(mark.stderr || '').slice(0, 120) + ') - проба ниже смотрела бы не туда';
+    }
+    const code = [
+      "const cp = require('child_process');",
+      "const { EventEmitter } = require('events');",
+      'const launched = {};',
+      'for (const name of ' + JSON.stringify(CHILD_PROCESS_LAUNCHERS) + ') {',
+      '  cp[name] = function () {',
+      '    launched[name] = (launched[name] || 0) + 1;',
+      "    if (name === 'spawnSync') return { pid: 0, output: [null, '', ''], stdout: '', stderr: '', status: 0, signal: null };",
+      "    if (name.endsWith('Sync')) return '';",
+      '    const child = new EventEmitter();',
+      '    child.stdout = new EventEmitter();',
+      '    child.stderr = new EventEmitter();',
+      '    child.kill = () => true;',
+      '    return child;',
+      '  };',
+      '}',
+      'const L = require(' + JSON.stringify(path.join(HOOKS, 'lib.js')) + ');',
+      "L.allChanged = () => [{ repo: { name: 'probe', path: process.cwd() }, rules: { gates: [{ id: 'probe', cmd: 'probe', when: 'always' }] }, files: ['probe.txt'] }];",
+      'let exited = null;',
+      'const exit = process.exit;',
+      'process.exit = (c) => { exited = c === undefined ? 0 : c; };',
+      'process.argv = [process.execPath, ' + JSON.stringify(file) + '];',
+      'const g = require(' + JSON.stringify(file) + ');',
+      'process.exit = exit;',
+      "process.stdout.write('probe ' + JSON.stringify({ launched, exited, selectGates: typeof g.selectGates }));",
+    ].join('\n');
+    const env = Object.assign({}, process.env, { SF_HOOK_STATE_DIR: dir });
+    const r = run(process.execPath, ['-e', code], { cwd: ROOT, env });
+    const out = String(r.stdout || '');
+    if (r.status !== 0) return 'require gates.js: код ' + r.status + ' ' + String(r.stderr || out).slice(0, 160);
+    const m = /(?:^|\n)probe (\{.*\})$/.exec(out);
+    if (!m) return 'require gates.js не дошёл до итога пробы: ' + JSON.stringify(out.slice(0, 160));
+    const seen = JSON.parse(m[1]);
+    const why = [];
+    if (out !== 'probe ' + m[1]) why.push('main() печатал при загрузке: ' + JSON.stringify(out.slice(0, 80)));
+    const calls = Object.keys(seen.launched).map((name) => name + ' x' + seen.launched[name]);
+    if (calls.length) why.push('запуски child_process: ' + calls.join(', '));
+    if (seen.exited !== null) why.push('вызван process.exit(' + seen.exited + ')');
+    if (lastGatesIn(dir)) why.push('поставлена отметка lastGates');
+    if (seen.selectGates !== 'function') why.push('selectGates не экспортирован: ' + seen.selectGates);
+    if (String(r.stderr || '')) why.push('stderr: ' + String(r.stderr).slice(0, 120));
+    if (why.length) return 'require gates.js: ' + why.join('; ');
+    gatesModuleSafe = true;
+    return true;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(control, { recursive: true, force: true });
+  }
+});
 
 /**
- * Гейт id из rules.sf.json и runs(file) - выбирает ли его настоящий selectGates на одном
- * изменённом файле при полном прогоне (без --only). Вызов selectGates в пробах - только здесь. gates.js загружается в vm один раз
- * на весь прогон, проба каждого гейта - тоже. Нет гейта - исключение (красная строка check).
+ * Гейт id из rules.sf.json и runs(file) - выбирает ли его selectGates из самого gates.js
+ * (экспорт модуля, а не повтор функции, L-008: правка обработки when там обязана краснеть
+ * здесь) на одном изменённом файле при полном прогоне (без --only). Вызов selectGates в
+ * пробах - только здесь. Нет гейта или gates.js не прошёл пробу require выше - исключение
+ * (красная строка check).
  */
-let loadedSelectGates = null;
 const gateProbes = new Map();
 function gateProbe(id) {
   if (gateProbes.has(id)) return gateProbes.get(id);
   const gate = ((repoRules && repoRules.gates) || []).find((g) => g.id === id);
   if (!gate) throw new Error('гейта ' + id + ' нет в правилах');
-  if (!loadedSelectGates) loadedSelectGates = loadSelectGates();
-  const selectGates = loadedSelectGates;
+  if (!gatesModuleSafe) throw new Error('gates.js не прошёл пробу require - selectGates не загружается');
+  const { selectGates } = require('./gates.js');
+  if (typeof selectGates !== 'function') throw new Error('gates.js не экспортирует функцию selectGates');
   const runs = (file) => {
     const picked = selectGates([gate], [file], null);
     return Boolean(picked && picked[0] && picked[0].run);
@@ -210,6 +374,12 @@ function notePaths(gate) {
 
 /** Гейты, чьи пути из note сверяются с диском (notePathsOnDisk). */
 const NOTE_CHECKED_GATES = ['compose', 'tracker'];
+
+/**
+ * Боевые формы роута: пробы S13/S14 читают эти файлы как пропуск, поэтому каждый из них
+ * выбирает гейт harness-selftest (сверка - в его пробе выбора ниже).
+ */
+const ROUTE_FORMS = ['apps/api/src/routes/health/index.ts', 'apps/api/src/routes/system/index.ts'];
 
 /**
  * Пути файлов, названные в note гейта (`test/x.test.ts`, `scripts/x.mjs`, ...), есть на
@@ -795,11 +965,14 @@ checkGateSelection('test:int', {
   ],
 });
 
-// Проба графа test:int выше читает не только .claude/**, но и файлы проекта (манифесты, конфиги
-// int-тестов, setup, фикстуру): гейт самопроверки обязан выбираться на каждом из них, иначе
-// устаревший glob test:int уйдёт молча. Файлы пробы build (манифесты, конфиги сборки) здесь
-// перечислены как есть, но сверки "каждый прочитанный файл" для build нет - долг E0-12D (docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «гейт harness-selftest не выбирается на файлах, которые читает проба графа test:int»).
+// Проба графа test:int выше читает не только .claude/**, но и файлы проекта: манифесты, конфиги
+// int-тестов, setup, фикстуру. Гейт самопроверки обязан выбираться на каждом из них, иначе
+// устаревший glob test:int уйдёт молча. Основание - docs/DECISIONS.md, 11.10.2026, E0-02A,
+// вопрос «гейт harness-selftest не выбирается на файлах, которые читает проба графа test:int».
+// Файлы пробы build (манифесты, конфиги сборки) перечислены ниже как есть: сверки «каждый
+// прочитанный файл» для build нет. Долг - E0-12L (переадресован решением Р3 E0-12D, 19.10.2026).
 // turbo.json ни одна проба не читает - выбор на нём обещал бы сверку, которой нет.
+// Боевые формы роута (ROUTE_FORMS) читают пробы S13/S14 - их сверка здесь же (E0-12D).
 checkGateSelection('harness-selftest', {
   runWhat: '.claude/**, файлах проекта, которые читают пробы build и test:int, и путях из note вне when',
   skipWhat: 'исходниках, lockfile, turbo.json, docs и путях из when и cmd гейтов-владельцев note',
@@ -840,6 +1013,8 @@ checkGateSelection('harness-selftest', {
     'packages/core/src/index.ts',
     'pnpm-lock.yaml',
     'apps/api/src/server.ts',
+    'apps/api/src/routes/index.ts',
+    'apps/api/src/routes/README.md',
     'docs/30_E0_TASKS.md',
     'README.md',
     'scripts/check-no-search-list.mjs',
@@ -862,6 +1037,14 @@ checkGateSelection('harness-selftest', {
         const stray = named.filter((f) => !runs(f));
         if (stray.length) return 'пути из note вне glob harness-selftest: ' + stray.join(', ');
         return { note: named.length + ' путей' };
+      },
+    },
+    {
+      name: 'его выбирает каждая боевая форма роута, которую читают пробы S13/S14',
+      fn: ({ runs }) => {
+        const stray = ROUTE_FORMS.filter((f) => !runs(f));
+        if (stray.length) return 'пробы S13/S14 читают вне glob harness-selftest: ' + stray.join(', ');
+        return { note: ROUTE_FORMS.length + ' файла' };
       },
     },
     {
@@ -957,78 +1140,111 @@ check('commit-gate: bash -c обёртка не обходит замок', () =
   const r = probe('commit-gate.js', { tool_input: { command: 'bash -c "git commit -n -m \'feat: x\'"' } }, CWD);
   return /deny/.test(r.out) ? true : 'обёртка прошла';
 });
+/**
+ * Временный репозиторий пробы не берёт из настроек машины ничего, что исполняет код, - как в
+ * пробе сверки дерева: init без шаблонов (`--template=`), коммит с core.hooksPath на пустой
+ * каталог. Иначе глобальный pre-commit красит пробу или исполняется в ней.
+ */
 check('commit-gate: isBootstrap - true без коммитов, false после первого', () => {
   const { isBootstrap } = require('./commit-gate.js');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-boot-'));
+  const noHooks = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-boot-nohooks-'));
   const env = Object.assign({}, process.env, { GIT_AUTHOR_NAME: 'p', GIT_AUTHOR_EMAIL: 'p@x', GIT_COMMITTER_NAME: 'p', GIT_COMMITTER_EMAIL: 'p@x' });
+  const git = (args) => {
+    const r = run('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=' + noHooks].concat(args), { cwd: tmp, env });
+    if (r.error || r.status !== 0) throw new Error('git ' + args[0] + ': ' + String((r.error && r.error.message) || r.stderr).slice(0, 160));
+  };
   try {
-    run('git', ['init', '-q', '-b', 'main'], { cwd: tmp });
+    git(['init', '-q', '--template=', '-b', 'main']);
     if (!isBootstrap(tmp)) return 'репозиторий без коммитов не опознан как bootstrap';
     fs.writeFileSync(path.join(tmp, 'a.txt'), 'a');
-    run('git', ['add', 'a.txt'], { cwd: tmp, env });
-    run('git', ['commit', '-q', '-m', 'chore: init'], { cwd: tmp, env });
+    git(['add', 'a.txt']);
+    git(['commit', '-q', '-m', 'chore: init']);
     if (isBootstrap(tmp)) return 'репозиторий с коммитом всё ещё bootstrap';
     return true;
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(noHooks, { recursive: true, force: true });
   }
 });
 check('commit-gate: пропуск не-git команды', () => {
   const r = probe('commit-gate.js', { tool_input: { command: 'pnpm typecheck && ls -la' } }, CWD);
   return r.code === 0 && !r.out ? true : 'неожиданный ответ: ' + (r.out || r.err).slice(0, 120);
 });
+/** Каталоги репозитория, в которых живут файлы пробы: правило по glob пути, которого нет, ничего не сторожит. */
+function missingDirs(rels) {
+  const gone = rels.filter((rel) => !fs.existsSync(path.join(ROOT, rel)));
+  return gone.length ? 'нет ' + gone.join(', ') : '';
+}
+
 check('standards: замечание на any и console в новом файле, тишина на чистом', () => {
-  const dir = path.join(ROOT, 'packages/core/src');
-  const bad = path.join(dir, 'zz_selftest_bad.ts');
-  const good = path.join(dir, 'zz_selftest_good.ts');
-  fs.writeFileSync(bad, 'export const x: any = 1;\nconsole.log(x);\n');
-  fs.writeFileSync(good, 'export const y: number = 1;\n');
-  try {
-    const r1 = probe('standards.js', { tool_input: { file_path: bad } }, CWD);
-    const r2 = probe('standards.js', { tool_input: { file_path: good } }, CWD);
+  const gone = missingDirs(['packages/core/src']);
+  if (gone) return gone;
+  return withScratchTree((tree) => {
+    tree.write('packages/core/src/zz_selftest_bad.ts', 'export const x: any = 1;\nconsole.log(x);\n');
+    tree.write('packages/core/src/zz_selftest_good.ts', 'export const y: number = 1;\n');
+    const r1 = tree.standards('packages/core/src/zz_selftest_bad.ts');
+    const r2 = tree.standards('packages/core/src/zz_selftest_good.ts');
     if (r1.code !== 2 || !/S01/.test(r1.err) || !/S03/.test(r1.err)) return 'any/console не пойманы: код ' + r1.code + ' ' + r1.err.slice(0, 160);
     if (r2.code !== 0 || r2.err) return 'чистый файл получил замечание: ' + r2.err.slice(0, 120);
     return true;
-  } finally {
-    fs.unlinkSync(bad);
-    fs.unlinkSync(good);
-  }
+  });
 });
 /**
  * @sf/runtime (E0-12B, ADR-0012) - код процессов api и worker: console и process.env в его src
  * ловятся так же, как в apps; тесты пакета не ловятся (L-008: отказ и пропуск на боевом пути).
+ * Крах standards.js - красный на обеих сторонах, как в standardsCases: код вне 0/2 или HOOK_ERROR.
  */
 check('standards: console и process.env в packages/runtime/src пойманы, в его test - нет', () => {
-  const srcDir = path.join(ROOT, 'packages/runtime/src');
-  const testDir = path.join(ROOT, 'packages/runtime/test');
-  if (!fs.existsSync(srcDir) || !fs.existsSync(testDir)) return 'нет packages/runtime/src или packages/runtime/test';
+  const gone = missingDirs(['packages/runtime/src', 'packages/runtime/test']);
+  if (gone) return gone;
   const body = 'export const u = process.env.SF_X;\nconsole.log(u);\n';
-  const bad = path.join(srcDir, 'zz_selftest_bad.ts');
-  const good = path.join(testDir, 'zz_selftest.test.ts');
-  fs.writeFileSync(bad, body);
-  fs.writeFileSync(good, body);
-  try {
-    const r1 = probe('standards.js', { tool_input: { file_path: bad } }, CWD);
-    const r2 = probe('standards.js', { tool_input: { file_path: good } }, CWD);
+  return withScratchTree((tree) => {
+    tree.write('packages/runtime/src/zz_selftest_bad.ts', body);
+    tree.write('packages/runtime/test/zz_selftest.test.ts', body);
+    const r1 = tree.standards('packages/runtime/src/zz_selftest_bad.ts');
+    const r2 = tree.standards('packages/runtime/test/zz_selftest.test.ts');
+    if (r1.err.includes(HOOK_ERROR)) return 'src: standards.js упал внутри guard - ' + r1.err.slice(0, 160);
     if (r1.code !== 2 || !/S03/.test(r1.err) || !/S05/.test(r1.err)) return 'console/process.env в src не пойманы: код ' + r1.code + ' ' + r1.err.slice(0, 160);
+    if (r2.code !== 0 && r2.code !== 2) return 'тест пакета: standards.js упал, код ' + r2.code + ' ' + r2.err.slice(0, 160);
+    if (r2.err.includes(HOOK_ERROR)) return 'тест пакета: standards.js упал внутри guard - ' + r2.err.slice(0, 160);
     if (/S03|S05/.test(r2.err)) return 'тест пакета получил S03/S05: ' + r2.err.slice(0, 160);
     return true;
-  } finally {
-    fs.unlinkSync(bad);
-    fs.unlinkSync(good);
-  }
+  });
 });
+
 /**
- * S11 (E0-12B): web не тянет серверные пакеты - ни корнем, ни подпутём (`@sf/runtime/redis` грузит
- * ioredis, `@sf/config/redis-url` читает REDIS_URL, `@sf/db/test-support/*` - Postgres), ни побочным
- * `import "@sf/..."`, ни реэкспортом. Пропуск - на том, чем web пользуется: `@sf/config/server`
- * (помечен server-only), `@sf/api-client/server`, `@sf/contracts`, побочный `import "server-only"`
- * (L-008: отказ каждой формы и пропуск на боевом пути).
+ * Отказ и пропуск одного правила standards на файле rel дерева пробы (L-008). refused / allowed -
+ * тексты файлов целиком; отказ - код 2 и [id] в замечаниях, пропуск - код 0 или 2 и ни одного [id].
+ * Крах standards.js - красный, а не пропуск: и код вне 0/2, и исключение, пойманное L.guard
+ * (код 0, в stderr HOOK_ERROR - см. withScratchTree). Засчитывается
+ * только своё правило (L-020): соседнее правило на том же тексте строку не красит и не зеленит.
  */
+function standardsCases(id, rel, refused, allowed) {
+  const tag = '[' + id + ']';
+  return withScratchTree((tree) => {
+    for (const body of refused) {
+      tree.write(rel, body);
+      const r = tree.standards(rel);
+      if (r.err.includes(HOOK_ERROR)) return id + ' на запрещённом: standards.js упал внутри guard - ' + r.err.slice(0, 160);
+      if (r.code !== 2 || !r.err.includes(tag)) return 'не пойман ' + id + ': ' + JSON.stringify(body.slice(0, 120)) + ' - код ' + r.code + ' ' + r.err.slice(0, 160);
+    }
+    for (const body of allowed) {
+      tree.write(rel, body);
+      const r = tree.standards(rel);
+      if (r.code !== 0 && r.code !== 2) return id + ' на разрешённом: standards.js упал, код ' + r.code + ' ' + r.err.slice(0, 160);
+      if (r.err.includes(HOOK_ERROR)) return id + ' на разрешённом: standards.js упал внутри guard - ' + r.err.slice(0, 160);
+      if (r.err.includes(tag)) return id + ' на разрешённом: ' + JSON.stringify(body.slice(0, 120)) + ' - ' + r.err.slice(0, 160);
+    }
+    return { note: refused.length + ' отказ, ' + allowed.length + ' пропуск' };
+  });
+}
+
 check('standards: серверные пакеты в apps/web/src (корень, подпуть, побочный импорт) пойманы S11, вход web - нет', () => {
-  const webDir = path.join(ROOT, 'apps/web/src/lib');
-  if (!fs.existsSync(webDir)) return 'нет apps/web/src/lib';
-  const refused = [
+  const gone = missingDirs(['apps/web/src/lib']);
+  if (gone) return gone;
+  const file = (line) => line + '\nexport const x = 1;\n';
+  return standardsCases('S11', 'apps/web/src/lib/zz_selftest_s11.ts', [
     'import { withDeadline } from "@sf/runtime";',
     "import { createProbeRedis } from '@sf/runtime/redis';",
     'import { createDb } from "@sf/db";',
@@ -1040,29 +1256,145 @@ check('standards: серверные пакеты в apps/web/src (корень,
     'import "@sf/db";',
     "import '@sf/config/redis-url';",
     'export { createDb } from "@sf/db";',
-  ];
-  const allowed = [
+  ].map(file), [
     'import { env } from "@sf/config/server";',
     'import { createServerClient } from "@sf/api-client/server";',
     'import { BuildInfoSchema } from "@sf/contracts";',
     'import "server-only";',
-  ];
-  const file = path.join(webDir, 'zz_selftest_s11.ts');
-  try {
-    for (const line of refused) {
-      fs.writeFileSync(file, line + '\nexport const x = 1;\n');
-      const r = probe('standards.js', { tool_input: { file_path: file } }, CWD);
-      if (r.code !== 2 || !/S11/.test(r.err)) return 'не пойман S11: ' + line + ' - код ' + r.code + ' ' + r.err.slice(0, 160);
-    }
-    for (const line of allowed) {
-      fs.writeFileSync(file, line + '\nexport const x = 1;\n');
-      const r = probe('standards.js', { tool_input: { file_path: file } }, CWD);
-      if (/S11/.test(r.err)) return 'вход web получил S11: ' + line + ' - ' + r.err.slice(0, 160);
-    }
-    return true;
-  } finally {
-    if (fs.existsSync(file)) fs.unlinkSync(file);
-  }
+  ].map(file));
+});
+
+/**
+ * Форма роута (E0-12D, Р6): роут модуля routes регистрируется только defineRoute из
+ * src/lib/route-schemas.ts. Обе боевые формы - сами файлы health и system из репозитория -
+ * пропуск S13 и S14. Отказ S13 - прямой вызов любым из восьми методов, .route( и
+ * withTypeProvider на любом получателе (app, server, child, fastify, this, instance, app?.,
+ * цепочка с .get( на своей строке), с ( и с <; пропуск - defineRoute, Promise.all, строки
+ * комментария. Отказ S14 - defineRoute в файле без ...errorResponses() в коде: без спреда,
+ * спред только в комментарии (//, блочный, строка JSDoc, хвост строки); пропуск - ключ response:
+ * в файле без defineRoute (лог, тело ответа). Точные статусы 4xx/5xx правило не видит - их
+ * проверяет apps/api/test/route-shape.test.ts.
+ */
+function routeFile(lines) {
+  return 'export function registerRoutes(app: AppInstance): void {\n' + lines.map((l) => '  ' + l + '\n').join('') + '}\n';
+}
+const ROUTE_METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'all'];
+const DEFINED_ROUTE = [
+  'const responses = { ...errorResponses(), [OK_STATUS]: X };',
+  'defineRoute(app, { method: "GET", url: "/x", responses, schema: { tags: ["x"] } }, handler);',
+];
+check('standards: S13 ловит регистрацию роута мимо defineRoute на любом получателе, боевые роуты - нет', () => {
+  const gone = missingDirs(ROUTE_FORMS);
+  if (gone) return gone;
+  return standardsCases('S13', 'apps/api/src/routes/zz_selftest/index.ts', ROUTE_METHODS.map((m) =>
+    routeFile(['app.' + m + '("/x", { schema: { response: responses } }, handler);']),
+  ).concat(ROUTE_METHODS.map((m) =>
+    routeFile(['app.' + m + '<{ Reply: SuccessReply<typeof responses> }>("/x", handler);']),
+  )).concat([
+    routeFile(['server.get("/x", handler);']),
+    routeFile(['child.post<{ Body: B }>("/x", handler);']),
+    routeFile(['fastify.put("/x", handler);']),
+    routeFile(['this.delete("/x", handler);']),
+    routeFile(['app?.get("/x", handler);']),
+    routeFile(['app', '  .get("/x", handler);']),
+    routeFile(['app.route({ method: "GET", url: "/x", handler });']),
+    routeFile(['instance.route<G>({ method: "GET", url: "/x", handler });']),
+    routeFile(['app.withTypeProvider<ZodTypeProvider>().get("/x", handler);']),
+    routeFile(['const typed = app.withTypeProvider<ZodTypeProvider>();']),
+  ]), ROUTE_FORMS.map((rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8')).concat([
+    routeFile(DEFINED_ROUTE),
+    routeFile(DEFINED_ROUTE.concat(['const [a, b] = await Promise.all([one(), two()]);', 'const all = await Promise.all ([one()]);'])),
+    routeFile(['// app.get("/x", handler);', '/**', ' * app.route({}) and app.withTypeProvider()', ' */', 'const x = 1;']),
+  ]));
+});
+check('standards: S14 ловит defineRoute без ...errorResponses() в коде файла, боевые роуты - нет', () => {
+  const gone = missingDirs(ROUTE_FORMS);
+  if (gone) return gone;
+  const route = DEFINED_ROUTE[1];
+  return standardsCases('S14', 'apps/api/src/routes/zz_selftest/index.ts', [
+    routeFile(['const responses = { [OK_STATUS]: X };', route]),
+    routeFile(['const failures = errorResponses();', 'const responses = { ...failures, [OK_STATUS]: X };', route]),
+    routeFile(['// const responses = { ...errorResponses(), [OK_STATUS]: X };', 'const responses = { [OK_STATUS]: X };', route]),
+    routeFile(['/* ...errorResponses() */', 'const responses = { [OK_STATUS]: X };', route]),
+    routeFile(['/**', ' * ...errorResponses() goes first', ' */', 'const responses = { [OK_STATUS]: X };', route]),
+    routeFile(['const responses = { [OK_STATUS]: X }; // no ...errorResponses() here', route]),
+  ], ROUTE_FORMS.map((rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8')).concat([
+    routeFile(DEFINED_ROUTE),
+    routeFile(['request.log.info({ response: answer }, "answered");', 'const body = { response: x, ok: true };', 'reply.send({ response });']),
+  ]));
+});
+
+/**
+ * Направление зависимостей по импортам (E0-12D, §6, ADR-0007): contracts -> core, api-client ->
+ * contracts. Формы - from, побочный import, export … from, import("…"), require("…"), в том
+ * числе после строкового литерала в той же строке; граница имени - с обеих сторон: пакет, имя
+ * которого лишь начинается с разрешённого (@sf/core-x), - отказ, подпуть разрешённого
+ * (@sf/core/sub) - пропуск; импорт пакетом самого себя (@sf/contracts/health в contracts,
+ * @sf/api-client/server в api-client) - не ребро, пропуск, как в test/dependency-direction.ts,
+ * а пакет с тем же началом имени (@sf/contracts-x) - отказ. Текст импорта внутри строкового литерала - не импорт, пропуск.
+ * vi.mock, require.resolve, from на другой строке и манифесты проверяет
+ * test/dependency-direction.test.ts.
+ */
+check('standards: S15 ловит @sf/* кроме @sf/core в packages/contracts, @sf/core и самоимпорт - нет', () => {
+  const gone = missingDirs(['packages/contracts/src']);
+  if (gone) return gone;
+  const file = (line) => line + '\nexport const x = 1;\n';
+  return standardsCases('S15', 'packages/contracts/src/zz_selftest_s15.ts', [
+    'import { env } from "@sf/config";',
+    'import type { Env } from "@sf/config/server";',
+    'export * from "@sf/db";',
+    "import '@sf/runtime';",
+    'export { createClient } from "@sf/youtube";',
+    'import { createApiClient } from "@sf/api-client";',
+    'import { x } from "@sf/core-x";',
+    'import { x } from "@sf/corex";',
+    'import { x } from "@sf/contracts-x";',
+    'import { x } from "@sf/contractsx";',
+    'const m = await import("@sf/config");',
+    'const db = require("@sf/db");',
+    'const n = "a"; const m = await import("@sf/db");',
+    "const k = 'it' + \"s\"; export * from '@sf/runtime';",
+  ].map(file), [
+    'import { AppError } from "@sf/core";',
+    "const s = \"import { x } from '@sf/db'\";",
+    'const t = `export * from "@sf/config"`;',
+    "import type { QueueName } from '@sf/core';",
+    'import { QUEUE_NAMES } from "@sf/core/queues";',
+    'const m = await import("@sf/core");',
+    'import { HEALTH_STATUS_CODES } from "@sf/contracts/health";',
+    'export * from "@sf/contracts";',
+    'import { z } from "zod";',
+    '// import { env } from "@sf/config";',
+  ].map(file));
+});
+check('standards: S16 ловит @sf/* кроме @sf/contracts в packages/api-client, @sf/contracts и самоимпорт - нет', () => {
+  const gone = missingDirs(['packages/api-client/src']);
+  if (gone) return gone;
+  const file = (line) => line + '\nexport const x = 1;\n';
+  return standardsCases('S16', 'packages/api-client/src/zz_selftest_s16.ts', [
+    'import { QUEUE_NAMES } from "@sf/core";',
+    'import { env } from "@sf/config";',
+    'import "@sf/config/server";',
+    'export * from "@sf/db";',
+    "export type { AppError } from '@sf/core';",
+    'import { x } from "@sf/contracts-x";',
+    'import { x } from "@sf/api-client-x";',
+    'import { x } from "@sf/api-clientx";',
+    'const m = await import("@sf/core");',
+    'const env = require("@sf/config");',
+    'const n = "a"; const m = await import("@sf/core");',
+  ].map(file), [
+    'import { ErrorBodySchema } from "@sf/contracts";',
+    "const s = \"import { x } from '@sf/core'\";",
+    "const t = `require('@sf/config')`;",
+    "export type { ErrorBody } from '@sf/contracts';",
+    'import { HEALTH_STATUS_CODES } from "@sf/contracts/health";',
+    'const m = await import("@sf/contracts");',
+    'import { createServerClient } from "@sf/api-client/server";',
+    "export type { ApiClient } from '@sf/api-client';",
+    'import "server-only";',
+    ' * import { QUEUE_NAMES } from "@sf/core";',
+  ].map(file));
 });
 /**
  * Пробы Stop- и UserPromptSubmit-хуков. Состояние - L.statePath(), то есть временная папка
@@ -1428,6 +1760,44 @@ check('gates.js --list отрабатывает', () => {
   return r.status === 0 && /lint/.test(String(r.stdout)) ? true : 'код ' + r.status + ': ' + String(r.stderr || r.stdout).slice(0, 160);
 });
 
+/**
+ * Сверка дерева в последней пробе ловит то, ради чего снимок такой (E0-12D, B8 круга 1):
+ * перезапись файла, который уже `M`, и новый файл под .gitignore. Проверяется на временном
+ * репозитории теми же repoSnapshot и treeDiff: без изменений разницы нет, после перезаписи
+ * `M`-файла и записи в игнорируемый каталог - обе записи названы. Временный репозиторий не
+ * берёт ничего из настроек машины, что исполняет код: init без шаблонов (`--template=`, иначе
+ * init.templateDir кладёт свои хуки), коммит с core.hooksPath на пустой каталог (иначе
+ * глобальный pre-commit красит пробу или исполняется в ней).
+ */
+check('сверка дерева ловит перезапись M-файла и новый игнорируемый каталог, без изменений - тишина', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-git-'));
+  const noHooks = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-nohooks-'));
+  try {
+    const git = (args) => {
+      const r = run('git', ['-c', 'user.name=selftest', '-c', 'user.email=selftest@localhost', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', '-c', 'core.hooksPath=' + noHooks].concat(args), { cwd: dir });
+      if (r.error || r.status !== 0) throw new Error('git ' + args[0] + ': ' + String((r.error && r.error.message) || r.stderr).slice(0, 160));
+    };
+    git(['init', '-q', '--template=']);
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'coverage/\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    git(['add', '.']);
+    git(['commit', '-q', '-m', 'probe']);
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+    const before = repoSnapshot(dir);
+    const still = treeDiff(before, repoSnapshot(dir));
+    if (still.length) return 'разница без изменений: ' + still.join(', ');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'three\n');
+    fs.mkdirSync(path.join(dir, 'coverage'));
+    fs.writeFileSync(path.join(dir, 'coverage', 'x.txt'), 'x\n');
+    const diff = treeDiff(before, repoSnapshot(dir));
+    const missed = ['изменилось содержимое  M a.txt', 'появилось !! coverage/'].filter((line) => !diff.includes(line));
+    return missed.length ? 'сверка не видит: ' + missed.join(', ') + ' (видит: ' + (diff.join(', ') || 'ничего') + ')' : { note: diff.length + ' записи' };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(noHooks, { recursive: true, force: true });
+  }
+});
+
 // ------------------------------------------------------------------ боевое состояние
 check('боевой .qa-state после проб байт в байт прежний', () => {
   const now = liveBytes();
@@ -1435,6 +1805,13 @@ check('боевой .qa-state после проб байт в байт преж�
   if (same) return true;
   return 'боевой ' + LIVE_STATE + ' изменился за прогон: ' +
     (LIVE_BYTES === null ? 'не было' : LIVE_BYTES.length + ' байт') + ' -> ' + (now === null ? 'нет' : now.length + ' байт');
+});
+check('пробы не оставили файлов в репозитории: записи git status, их содержимое и игнорируемые записи до и после прогона те же', () => {
+  if (!LIVE_TREE) return 'снимок дерева до проб не снят: ' + LIVE_TREE_ERROR;
+  const now = repoSnapshot();
+  const diff = treeDiff(LIVE_TREE, now);
+  if (!diff.length) return { note: now.size + ' записей' };
+  return 'за прогон: ' + diff.join(', ').slice(0, 300) + ' (если файлы в это время правили руками или другим процессом - перезапусти)';
 });
 
 // ------------------------------------------------------------------ итог
