@@ -1681,9 +1681,11 @@
       "E0-13"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-10",
-    "started_at": "2026-10-19"
+    "started_at": "2026-10-19",
+    "done_at": "2026-10-19",
+    "note": "роуты api только через defineRoute, замки S13-S16, направления зависимостей и ссылок ADR, selectGates без vm, команда set трекера; долг разнесён в E0-12L..P"
   },
   {
     "id": "E0-11B",

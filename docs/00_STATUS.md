@@ -4,16 +4,14 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-19. **Не �
 
 ## Сводка
 
-- **Прогресс:** `█████░░░░░░░░░░░░░░░░░░░░░░░░░` 22/143 задач, 20.2 / 160.4 оценочных дней.
+- **Прогресс:** `█████░░░░░░░░░░░░░░░░░░░░░░░░░` 23/143 задач, 20.7 / 160.4 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** [E0-12D](TECH_DEBT.md#e0-12d-обвязка-harness-selftest-без-vm-u3-экспорт-selectgates-замки-на-форму-роутов-и-направление-зависимостей-contractsapi-client) Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client
+- **В работе:** ничего — возьмите задачу из «Следующие»
 - **Заблокировано:** нет
 
 ## Сейчас в работе
 
-| Задача | Название | Оценка | Начата |
-|---|---|---|---|
-| [E0-12D](TECH_DEBT.md#e0-12d-обвязка-harness-selftest-без-vm-u3-экспорт-selectgates-замки-на-форму-роутов-и-направление-зависимостей-contractsapi-client) | Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client | 0.5 д | 2026-10-19 |
+_Нет задач в работе._
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
@@ -31,7 +29,7 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-19. **Не �
 
 | | Эпик | Задачи | Дни (сделано / всего) | Документ |
 |---|---|---|---|---|
-| 🔄 | **E0** Каркас проекта и инфраструктура | `████████░░░░` 22/34 | 20.2 / 33.9 | [30_E0_TASKS.md](30_E0_TASKS.md) |
+| 🔄 | **E0** Каркас проекта и инфраструктура | `████████░░░░` 23/34 | 20.7 / 33.9 | [30_E0_TASKS.md](30_E0_TASKS.md) |
 | ⬜ | **E12** Импорт ручной фазы (Phase 0) | `░░░░░░░░░░░░` 0/5 | 0 / 4 | [42_E12_TASKS.md](42_E12_TASKS.md) |
 | ⬜ | **E1** Source Radar | `░░░░░░░░░░░░` 0/12 | 0 / 15.5 | [31_E1_TASKS.md](31_E1_TASKS.md) |
 | ⬜ | **E2** Video Intelligence / Content DNA | `░░░░░░░░░░░░` 0/10 | 0 / 11 | [32_E2_TASKS.md](32_E2_TASKS.md) |
@@ -74,7 +72,7 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-19. **Не �
 | ✅ | [E0-12A](TECH_DEBT.md#e0-12a-общий-пресет-vitest-и-test-support-sfdb-фикстура-int-наборов-общий-страж-стека-чистка-тестовых-хелперов-корневой-vitest-проект-scripts) | Общий пресет vitest и test-support @sf/db: фикстура int-наборов, общий страж стека, чистка тестовых хелперов, корневой vitest-проект scripts/** | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-17 |
 | ✅ | [E0-12B](TECH_DEBT.md#e0-12b-общий-пакет-инфраструктуры-apiworker-logger-redact-redis-shutdown-фабрика-queue-примитив-дедлайна-чистка-публичных-экспортов) | Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-18 |
 | ✅ | [E0-12C](TECH_DEBT.md#e0-12c-гейт-compose-и-cli-migrate-таблица-правил-обязательные-postgresredis-юнит-check-compose-шаги-и-классы-ошибок-migrate-единый-appdockerfile-exec-форма-cmd) | Гейт compose и CLI migrate: таблица правил, обязательные postgres/redis, юнит check-compose, шаги и классы ошибок migrate, единый app.Dockerfile, exec-форма CMD | 1 д | ✅E0-13 ✅E0-12A | 2026-10-18 | 2026-10-18 |
-| 🔄 | [E0-12D](TECH_DEBT.md#e0-12d-обвязка-harness-selftest-без-vm-u3-экспорт-selectgates-замки-на-форму-роутов-и-направление-зависимостей-contractsapi-client) | Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client | 0.5 д | ✅E0-13 | 2026-10-19 |  |
+| ✅ | [E0-12D](TECH_DEBT.md#e0-12d-обвязка-harness-selftest-без-vm-u3-экспорт-selectgates-замки-на-форму-роутов-и-направление-зависимостей-contractsapi-client) | Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client | 0.5 д | ✅E0-13 | 2026-10-19 | 2026-10-19 |
 | ⬜ | [E0-12E](TECH_DEBT.md#e0-12e-чистка-тестов-по-строкам-дисциплины-configcontractsapi-client-int-наборы-sfdb-appsapi-п3-e0-12a-поздние-строки-чистки) | Чистка тестов по строкам дисциплины: config/contracts/api-client, int-наборы @sf/db, apps/api (п.3 E0-12A + поздние строки чистки) | 1.5 д | ✅E0-13 ✅E0-12A |  |  |
 | ✅ | [E0-12F](TECH_DEBT.md#e0-12f-корневой-vitest-проект-scripts-переезд-репо-тестов-из-appsworker-jsdoc-типы-scripts-входы-turbo-с-пробой-cache-miss-кэш-turbo-в-ci) | Корневой vitest-проект scripts/**: переезд репо-тестов из apps/worker, JSDoc-типы scripts, входы turbo с пробой cache miss, кэш .turbo в CI | 1.5 д | ✅E0-13 ✅E0-12A | 2026-10-18 | 2026-10-18 |
 | ⬜ | [E0-12G](TECH_DEBT.md#e0-12g-apiworker-журнал-запросов-разбор-ошибок-причины-healthcheck) | api/worker: журнал запросов, разбор ошибок, причины healthcheck | 1.5 д | ✅E0-13 ✅E0-12B |  |  |
@@ -82,11 +80,11 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-19. **Не �
 | ⬜ | [E0-12I](TECH_DEBT.md#e0-12i-cli-migrate-классы-ошибок-именованные-шаги-возврата-migrate-and-seed-drizzle-kit-check-в-ci) | CLI migrate: классы ошибок, именованные шаги возврата, migrate-and-seed, drizzle-kit check в CI | 0.7 д | ✅E0-13 ✅E0-12A ✅E0-12F |  |  |
 | ⬜ | [E0-12J](TECH_DEBT.md#e0-12j-образы-единый-appdockerfile-с-целями-exec-форма-migrate-проба-одним-run-buildx-кэш-в-ci) | Образы: единый app.Dockerfile с целями, exec-форма migrate, проба одним run, buildx-кэш в CI | 1 д | ✅E0-12C ⬜E0-12I |  |  |
 | ⬜ | [E0-12K](TECH_DEBT.md#e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция-{}-профили-composefile-симлинки) | Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки | 2 д | ✅E0-13 ✅E0-12C |  |  |
-| ⬜ | [E0-12L](TECH_DEBT.md#e0-12l-harness-selftest-граф-turbopnpm-вместо-ручного-разбора-разрез-раздела-гейтов) | harness-selftest: граф turbo/pnpm вместо ручного разбора, разрез раздела гейтов | 1.5 д | ✅E0-13 🔄E0-12D |  |  |
-| ⬜ | [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-rulessfjson-timeout-гейтов---only-с-glob-формула-серверного-пакета-s07s11-замок-zod-glob-testinttrackerselftests04) | gates.js и rules.sf.json: timeout гейтов, --only с glob, формула серверного пакета S07/S11, замок zod, glob test:int/tracker/selftest/S04 | 1 д | ✅E0-13 🔄E0-12D |  |  |
+| ⬜ | [E0-12L](TECH_DEBT.md#e0-12l-harness-selftest-граф-turbopnpm-вместо-ручного-разбора-разрез-раздела-гейтов) | harness-selftest: граф turbo/pnpm вместо ручного разбора, разрез раздела гейтов | 1.5 д | ✅E0-13 ✅E0-12D |  |  |
+| ⬜ | [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-rulessfjson-timeout-гейтов---only-с-glob-формула-серверного-пакета-s07s11-замок-zod-glob-testinttrackerselftests04) | gates.js и rules.sf.json: timeout гейтов, --only с glob, формула серверного пакета S07/S11, замок zod, glob test:int/tracker/selftest/S04 | 1 д | ✅E0-13 ✅E0-12D |  |  |
 | ⬜ | [E0-12N](TECH_DEBT.md#e0-12n-корневые-тесты-и-скрипты-repo-files-turbo-inputs-ci-config-dockerfile-probe-image-no-search-list-общий-test-support-приложений) | Корневые тесты и скрипты: repo-files, turbo-inputs, ci-config, dockerfile, probe-image, no-search-list, общий test-support приложений | 1 д | ✅E0-13 ✅E0-12F |  |  |
 | ⬜ | [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) | CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта | 0.5 д | ✅E0-13 ✅E0-12F |  |  |
-| ⬜ | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | ✅E0-13 🔄E0-12D |  |  |
+| ⬜ | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | ✅E0-13 ✅E0-12D |  |  |
 | ✅ | [E0-13](30_E0_TASKS.md#e0-13-документация-разработчика-adr-закрытие-эпика) | Документация разработчика, ADR, закрытие эпика | 0.5 д | ✅E0-12 | 2026-10-10 | 2026-10-10 |
 
 ### E12. Импорт ручной фазы (Phase 0)
