@@ -1730,9 +1730,11 @@
       "E0-12A"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-17",
-    "started_at": "2026-10-19"
+    "started_at": "2026-10-19",
+    "done_at": "2026-10-19",
+    "note": "test discipline cleanup across config/contracts/api-client, @sf/db int suites, api and worker; src fixes split to E0-12Q, shared test-support to E0-12N"
   },
   {
     "id": "E0-12F",
