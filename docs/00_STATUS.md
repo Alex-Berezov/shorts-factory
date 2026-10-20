@@ -4,16 +4,14 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-20. **Не �
 
 ## Сводка
 
-- **Прогресс:** `██████░░░░░░░░░░░░░░░░░░░░░░░░` 28/146 задач, 26.9 / 162.9 оценочных дней.
+- **Прогресс:** `██████░░░░░░░░░░░░░░░░░░░░░░░░` 29/146 задач, 28.9 / 162.9 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** [E0-12K](TECH_DEBT.md#e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция-{}-профили-composefile-симлинки) Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки
+- **В работе:** ничего — возьмите задачу из «Следующие»
 - **Заблокировано:** нет
 
 ## Сейчас в работе
 
-| Задача | Название | Оценка | Начата |
-|---|---|---|---|
-| [E0-12K](TECH_DEBT.md#e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция-{}-профили-composefile-симлинки) | Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки | 2 д | 2026-10-20 |
+_Нет задач в работе._
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
@@ -31,7 +29,7 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-20. **Не �
 
 | | Эпик | Задачи | Дни (сделано / всего) | Документ |
 |---|---|---|---|---|
-| 🔄 | **E0** Каркас проекта и инфраструктура | `█████████░░░` 28/37 | 26.9 / 36.4 | [30_E0_TASKS.md](30_E0_TASKS.md) |
+| 🔄 | **E0** Каркас проекта и инфраструктура | `█████████░░░` 29/37 | 28.9 / 36.4 | [30_E0_TASKS.md](30_E0_TASKS.md) |
 | ⬜ | **E12** Импорт ручной фазы (Phase 0) | `░░░░░░░░░░░░` 0/5 | 0 / 4 | [42_E12_TASKS.md](42_E12_TASKS.md) |
 | ⬜ | **E1** Source Radar | `░░░░░░░░░░░░` 0/12 | 0 / 15.5 | [31_E1_TASKS.md](31_E1_TASKS.md) |
 | ⬜ | **E2** Video Intelligence / Content DNA | `░░░░░░░░░░░░` 0/10 | 0 / 11 | [32_E2_TASKS.md](32_E2_TASKS.md) |
@@ -81,7 +79,7 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-20. **Не �
 | ✅ | [E0-12H](TECH_DEBT.md#e0-12h-postgres-классы-sqlstate-срокотмена-запроса-пробы-closedb{-timeout-}) | Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout }) | 1.5 д | ✅E0-13 ✅E0-12B | 2026-10-20 | 2026-10-20 |
 | ✅ | [E0-12I](TECH_DEBT.md#e0-12i-cli-migrate-классы-ошибок-именованные-шаги-возврата-migrate-and-seed-drizzle-kit-check-в-ci) | CLI migrate: классы ошибок, именованные шаги возврата, migrate-and-seed, drizzle-kit check в CI | 0.7 д | ✅E0-13 ✅E0-12A ✅E0-12F | 2026-10-20 | 2026-10-20 |
 | ✅ | [E0-12J](TECH_DEBT.md#e0-12j-образы-единый-appdockerfile-с-целями-exec-форма-migrate-проба-одним-run-buildx-кэш-в-ci) | Образы: единый app.Dockerfile с целями, exec-форма migrate, проба одним run, buildx-кэш в CI | 1 д | ✅E0-12C ✅E0-12I | 2026-10-20 | 2026-10-20 |
-| 🔄 | [E0-12K](TECH_DEBT.md#e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция-{}-профили-composefile-симлинки) | Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки | 2 д | ✅E0-13 ✅E0-12C | 2026-10-20 |  |
+| ✅ | [E0-12K](TECH_DEBT.md#e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция-{}-профили-composefile-симлинки) | Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки | 2 д | ✅E0-13 ✅E0-12C | 2026-10-20 | 2026-10-20 |
 | ⬜ | [E0-12L](TECH_DEBT.md#e0-12l-harness-selftest-граф-turbopnpm-вместо-ручного-разбора-разрез-раздела-гейтов) | harness-selftest: граф turbo/pnpm вместо ручного разбора, разрез раздела гейтов | 1.5 д | ✅E0-13 ✅E0-12D |  |  |
 | ⬜ | [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-rulessfjson-timeout-гейтов---only-с-glob-формула-серверного-пакета-s07s11-замок-zod-glob-testinttrackerselftests04) | gates.js и rules.sf.json: timeout гейтов, --only с glob, формула серверного пакета S07/S11, замок zod, glob test:int/tracker/selftest/S04 | 1 д | ✅E0-13 ✅E0-12D |  |  |
 | ⬜ | [E0-12N](TECH_DEBT.md#e0-12n-корневые-тесты-и-скрипты-repo-files-turbo-inputs-ci-config-dockerfile-probe-image-no-search-list-общий-test-support-приложений) | Корневые тесты и скрипты: repo-files, turbo-inputs, ci-config, dockerfile, probe-image, no-search-list, общий test-support приложений | 1 д | ✅E0-13 ✅E0-12F |  |  |

@@ -1833,9 +1833,11 @@
       "E0-12C"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-18",
-    "started_at": "2026-10-20"
+    "started_at": "2026-10-20",
+    "done_at": "2026-10-20",
+    "note": "compose gate checks the operator's graph: override, include/extends via yaml, profiles, interpolation, values from graph files only, COMPOSE_* refused"
   },
   {
     "id": "E0-12L",
