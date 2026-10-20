@@ -1764,9 +1764,11 @@
       "E0-12B"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-17",
-    "started_at": "2026-10-19"
+    "started_at": "2026-10-19",
+    "done_at": "2026-10-20",
+    "note": "request log from one place with one id, error mapping split, healthcheck reasons for the operator, worker error listener silent only on already-written errors, check-compose prints no docker output; runtime block split to E0-12R"
   },
   {
     "id": "E0-12H",
