@@ -1,7 +1,8 @@
 import { parseEnv } from "node:util";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { imagesOf } from "./dockerfile.js";
+import { imageTag } from "../scripts/probe-image.mjs";
+import { APP_DOCKERFILE, imagesOf } from "./dockerfile.js";
 import {
   type Manifest,
   type Turbo,
@@ -326,9 +327,7 @@ describe("ci.yml job ci", () => {
   });
 
   it("checks the Compose files with the pinned Compose, verified by its checksum", () => {
-    const install = steps.findIndex((step) =>
-      step.text.includes("docker-compose-linux-x86_64"),
-    );
+    const install = steps.findIndex(isComposeInstall);
     const text = steps[install]?.text ?? "";
     const version = /\/releases\/download\/v(\d+\.\d+\.\d+)\//.exec(text)?.[1];
 
@@ -337,7 +336,7 @@ describe("ci.yml job ci", () => {
       runs.indexOf("node scripts/check-compose.mjs"),
     );
     expect(version).toBe("5.5.1");
-    expect(text).toMatch(/\b[0-9a-f]{64} {2}\S+ \| sha256sum -c -/);
+    expect(composeInstallViolations(text)).toEqual([]);
     expect(text).toContain(
       `test "$(docker compose version --short)" = "${version}"`,
     );
@@ -353,14 +352,7 @@ describe("ci.yml job ci", () => {
   });
 
   it("migrates with the entry of `pnpm db:migrate` and .env.test as a dotenv file", () => {
-    const step = steps.find(isMigrate);
-    const script = readManifest("packages/db").scripts?.["db:migrate"];
-
-    expect(step?.text).toContain("working-directory: packages/db");
-    expect(script).toMatch(/^tsx \S+$/);
-    expect(step?.run).toBe(
-      `node --env-file=../../.env.test --import ${script}`,
-    );
+    expect(migrateStepViolations(steps)).toEqual([]);
   });
 
   /**
@@ -695,30 +687,362 @@ describe("ci.yml conditions", () => {
   );
 });
 
+/** The image matrix of job docker-build, sorted. */
+function matrixOf(text: string): string[] {
+  const listed = /matrix:\s*\n\s+image:\s*\[([^\]]*)\]/.exec(text)?.[1];
+  return (listed ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "")
+    .sort();
+}
+
+/**
+ * How job docker-build strays from the one Dockerfile and its probe, one line
+ * each; empty when clean: buildx set up, one build of the matrix target of
+ * `APP_DOCKERFILE` loaded into the engine under the tag the probe runs by
+ * default (`imageTag`), the layer cache of GitHub Actions in a scope of the
+ * target both ways - its export failing does not fail the build
+ * (`ignore-error=true`) - no `build-args` (the node image is the one
+ * `app.Dockerfile` names, E0-12J), and node 22 set up before the build for
+ * the probe.
+ */
+function dockerBuildViolations(text: string): string[] {
+  const steps = stepsIn(text, "docker-build");
+  const target = "${{ matrix.image }}";
+  const build = steps.findIndex((step) =>
+    /uses: docker\/build-push-action@v6$/m.test(step.text),
+  );
+  if (build === -1) {
+    return ["docker-build: no docker/build-push-action@v6 step"];
+  }
+  const problems: string[] = [];
+  const buildx = steps.findIndex((step) =>
+    /uses: docker\/setup-buildx-action@v3$/m.test(step.text),
+  );
+  const setup = steps.findIndex(
+    (step) =>
+      step.text.includes("actions/setup-node") &&
+      /node-version: 22\b/.test(step.text),
+  );
+  if (buildx === -1 || buildx > build) {
+    problems.push("docker-build: buildx is not set up before the build");
+  }
+  if (setup === -1 || setup > build) {
+    problems.push("docker-build: setup-node does not come before the build");
+  }
+  const text_ = steps[build]?.text ?? "";
+  const expected: Record<string, string> = {
+    context: ".",
+    file: APP_DOCKERFILE,
+    target,
+    tags: imageTag(target),
+    load: "true",
+    "cache-from": `type=gha,scope=${target}`,
+    "cache-to": `type=gha,mode=max,scope=${target},ignore-error=true`,
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    const found = stepField(text_, key);
+    if (found !== value) {
+      problems.push(`docker-build: ${key} is ${found}, not ${value}`);
+    }
+  }
+  if (/^\s+build-args:/m.test(text_)) {
+    problems.push("docker-build: the build passes build-args");
+  }
+  return problems;
+}
+
 describe("ci.yml image matrix", () => {
-  it("builds and probes every image the repository has a Dockerfile for", () => {
-    const listed = /matrix:\s*\n\s+image:\s*\[([^\]]*)\]/.exec(workflow)?.[1];
-    const matrix = (listed ?? "")
-      .split(",")
-      .map((name) => name.trim())
-      .sort();
+  it("builds and probes every target of app.Dockerfile", () => {
     const runs = stepsOf("docker-build").map((step) => step.run);
 
-    expect(matrix).toEqual(imagesOf());
+    expect(matrixOf(workflow)).toEqual(imagesOf());
     expect(runs).toContain("node scripts/probe-image.mjs ${{ matrix.image }}");
   });
 
-  it("builds the stage Compose runs and sets up node 22 for the probe", () => {
-    const steps = stepsOf("docker-build");
-    const build = steps.find((step) => step.run?.startsWith("docker build"));
-    const setup = steps.find((step) =>
-      step.text.includes("actions/setup-node"),
-    );
+  it("builds the target Compose runs, cached by target, and sets up node 22 for the probe", () => {
+    expect(dockerBuildViolations(workflow)).toEqual([]);
+  });
 
-    expect(build?.run).toContain("--target runtime ");
-    expect(setup?.text).toMatch(/node-version: 22\b/);
-    expect(steps.indexOf(setup as Step)).toBeLessThan(
-      steps.indexOf(build as Step),
+  it.each([
+    ["file: infra/docker/app.Dockerfile", "file: infra/docker/api.Dockerfile"],
+    ["target: ${{ matrix.image }}", "target: runtime"],
+    ["          load: true\n", ""],
+    ["tags: sf-${{ matrix.image }}:ci", "tags: sf-${{ matrix.image }}:latest"],
+    ["cache-from: type=gha,scope=${{ matrix.image }}", "cache-from: type=gha"],
+    [
+      "cache-to: type=gha,mode=max,scope=${{ matrix.image }},",
+      "cache-to: type=gha,mode=max,scope=all,",
+    ],
+    [",ignore-error=true\n", "\n"],
+    [",ignore-error=true\n", ",ignore-error=false\n"],
+    ["cache-to: type=gha,mode=max,", "cache-to: type=registry,mode=max,"],
+    ["uses: docker/build-push-action@v6", "uses: docker/build-push-action@v5"],
+    ["      - uses: docker/setup-buildx-action@v3\n", ""],
+    [
+      "          load: true\n",
+      "          load: true\n          build-args: NODE_IMAGE=node:20-alpine\n",
+    ],
+    [
+      "          load: true\n",
+      "          load: true\n          build-args: |\n            NODE_IMAGE=node:20-alpine\n",
+    ],
+  ])("is red when %j becomes %j", (from, to) => {
+    expect(workflow).toContain(from);
+
+    expect(dockerBuildViolations(workflow.replace(from, to))).toHaveLength(1);
+  });
+
+  it("is red on a matrix that is not the targets", () => {
+    const from = "image: [api, migrate, web, worker]";
+    expect(workflow).toContain(from);
+
+    expect(
+      matrixOf(workflow.replace(from, "image: [api, migrate, web]")),
+    ).not.toEqual(imagesOf());
+  });
+
+  it("is red when setup-node comes after the build", () => {
+    const setup =
+      "      - uses: actions/setup-node@v4\n        with: { node-version: 22 }\n";
+    const buildx = "      - uses: docker/setup-buildx-action@v3\n";
+    const probe = "      # An image whose install put nothing in place";
+    expect(blockOf(workflow, "  docker-build:")).toContain(`${setup}${buildx}`);
+    const moved = workflow
+      .replace(`${setup}${buildx}`, buildx)
+      .replace(probe, `${setup}${probe}`);
+
+    expect(dockerBuildViolations(moved)).toEqual([
+      "docker-build: setup-node does not come before the build",
+    ]);
+  });
+});
+
+/** The text of the Compose file of Postgres and Redis. */
+const compose = read("infra/docker-compose.yml").replace(/\r\n/g, "\n");
+
+/** The block of a service of a Compose text. */
+const composeService = (text: string, service: string): string =>
+  blockOf(blockOf(text, "services:"), `  ${service}:`);
+
+/** The image of a service of a Compose text. */
+function composeImage(text: string, service: string): string {
+  const image = /^ {4}image: (\S+)$/m.exec(composeService(text, service))?.[1];
+  if (image === undefined) throw new Error(`no image of ${service}`);
+  return image;
+}
+
+/** The command of the `CMD-SHELL` healthcheck of a service of a Compose text. */
+function composeHealthShell(text: string, service: string): string {
+  const healthcheck = blockOf(
+    composeService(text, service),
+    "    healthcheck:",
+  );
+  const command = /^ {6}test: \["CMD-SHELL", "(.*)"\]$/m.exec(healthcheck)?.[1];
+  if (command === undefined) {
+    throw new Error(`no CMD-SHELL healthcheck of ${service}`);
+  }
+  return command;
+}
+
+/**
+ * How the services of job ci stray from the stack of Compose, one line each;
+ * empty when clean: Postgres and Redis run the images of
+ * `infra/docker-compose.yml`, and the health command of Redis is the one of
+ * its Compose healthcheck - the answer must be PONG, since redis-cli exits 0
+ * on the LOADING of a Redis replaying its append-only file.
+ */
+function serviceViolations(text: string, composeText: string): string[] {
+  const problems: string[] = [];
+  const services = blockOf(blockOf(text, "  ci:"), "    services:");
+  for (const name of ["postgres", "redis"]) {
+    const block = blockOf(services, `      ${name}:`);
+    const image = /^ {8}image: (\S+)$/m.exec(block)?.[1];
+    const expected = composeImage(composeText, name);
+    if (image !== expected) {
+      problems.push(`ci: ${name} runs ${image}, Compose runs ${expected}`);
+    }
+  }
+  const redis = blockOf(services, "      redis:");
+  const health = /--health-cmd "(.*)"$/m.exec(redis)?.[1];
+  const expected = composeHealthShell(composeText, "redis");
+  if (health !== expected) {
+    problems.push(`ci: redis health is ${health}, Compose checks ${expected}`);
+  }
+  return problems;
+}
+
+describe("ci.yml services against Compose", () => {
+  const PONG = "redis-cli ping | grep -qx PONG";
+
+  it("runs the images and the Redis health check of infra/docker-compose.yml", () => {
+    expect(serviceViolations(workflow, compose)).toEqual([]);
+  });
+
+  it.each([
+    ["postgres:16-alpine", "postgres:17-alpine"],
+    ["redis:7-alpine", "redis:7.4-alpine"],
+    [`--health-cmd "${PONG}"`, '--health-cmd "redis-cli ping"'],
+  ])("is red when %j becomes %j in ci.yml alone", (from, to) => {
+    expect(workflow).toContain(from);
+
+    expect(serviceViolations(workflow.replace(from, to), compose)).toHaveLength(
+      1,
     );
+  });
+
+  it.each([
+    ["image: postgres:16-alpine", "image: postgres:16"],
+    ["image: redis:7-alpine", "image: redis:7"],
+    [`"CMD-SHELL", "${PONG}"`, '"CMD-SHELL", "redis-cli ping"'],
+  ])("is red when %j becomes %j in Compose alone", (from, to) => {
+    expect(compose).toContain(from);
+
+    expect(serviceViolations(workflow, compose.replace(from, to))).toHaveLength(
+      1,
+    );
+  });
+});
+
+/** The step of job ci that installs the pinned Compose. */
+function isComposeInstall(step: Step): boolean {
+  return step.text.includes("docker-compose-linux-x86_64");
+}
+
+/**
+ * How the step that installs Compose would let an unchecked binary in, one
+ * line each; empty when clean: the script starts with `set -euo pipefail`,
+ * downloads the binary to a file, checks the checksum of that very file and
+ * installs that file - in that order.
+ */
+function composeInstallViolations(text: string): string[] {
+  const problems: string[] = [];
+  const lines = text.split("\n").map((line) => line.trim());
+  const script = lines
+    .slice(lines.indexOf("run: |") + 1)
+    .filter((line) => line !== "");
+  if (script[0] !== "set -euo pipefail") {
+    problems.push("compose install: does not start with set -euo pipefail");
+  }
+  const at = (pattern: RegExp) =>
+    script.findIndex((line) => pattern.test(line));
+  const curl = at(/^curl -fsSL -o /);
+  const sum = at(/ \| sha256sum -c -$/);
+  const install = at(/^install -m 0755 /);
+  if (curl === -1 || sum === -1 || install === -1) {
+    return [
+      ...problems,
+      "compose install: lacks curl -o, sha256sum -c or install",
+    ];
+  }
+  if (!(curl < sum && sum < install)) {
+    problems.push("compose install: not curl, then sha256sum, then install");
+  }
+  const unquote = (path: string | undefined) => path?.replace(/^"(.*)"$/, "$1");
+  const downloaded = unquote(
+    /^curl -fsSL -o (\S+) /.exec(script[curl] ?? "")?.[1],
+  );
+  const checked = /^echo "[0-9a-f]{64} {2}(\S+)" \| sha256sum -c -$/.exec(
+    script[sum] ?? "",
+  )?.[1];
+  const installed = unquote(
+    /^install -m 0755 (\S+) \S+$/.exec(script[install] ?? "")?.[1],
+  );
+  if (
+    downloaded === undefined ||
+    checked !== downloaded ||
+    installed !== downloaded
+  ) {
+    problems.push(
+      `compose install: downloads ${downloaded}, checks ${checked}, installs ${installed}`,
+    );
+  }
+  return problems;
+}
+
+describe("ci.yml Compose install", () => {
+  const text = stepsOf("ci").find(isComposeInstall)?.text ?? "";
+  const SUM =
+    "db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576";
+
+  it.each([
+    ["set -euo pipefail\n", ""],
+    ["set -euo pipefail", "set -eu"],
+    [
+      `echo "${SUM}  $RUNNER_TEMP/docker-compose"`,
+      `echo "${SUM}  $RUNNER_TEMP/other"`,
+    ],
+    [
+      'install -m 0755 "$RUNNER_TEMP/docker-compose"',
+      'install -m 0755 "$RUNNER_TEMP/compose"',
+    ],
+    [
+      'curl -fsSL -o "$RUNNER_TEMP/docker-compose"',
+      'curl -fsSL -o "$HOME/.docker/cli-plugins/docker-compose"',
+    ],
+    [" | sha256sum -c -", " | tee /dev/null"],
+  ])("is red when %j becomes %j", (from, to) => {
+    expect(text).toContain(from);
+
+    expect(composeInstallViolations(text.replace(from, to))).toHaveLength(1);
+  });
+
+  it("is red when the binary is installed before its checksum is checked", () => {
+    const lines = text.split("\n");
+    const sum = lines.findIndex((line) => line.includes("sha256sum -c -"));
+    const install = lines.findIndex((line) => line.includes("install -m 0755"));
+    const swapped = [...lines];
+    swapped[sum] = lines[install] ?? "";
+    swapped[install] = lines[sum] ?? "";
+
+    expect(composeInstallViolations(swapped.join("\n"))).toEqual([
+      "compose install: not curl, then sha256sum, then install",
+    ]);
+  });
+});
+
+/**
+ * How the step that migrates the database of CI strays from `pnpm db:migrate`,
+ * one line each; empty when clean: it runs the entry of the script from
+ * `packages/db` with `.env.test` as its dotenv file, and sets no `env:` of its
+ * own - the variables come from the file or from the runner.
+ */
+function migrateStepViolations(steps: Step[]): string[] {
+  const step = steps.find(isMigrate);
+  if (step === undefined) return ["ci: no step runs src/cli/migrate.ts"];
+  const problems: string[] = [];
+  const script = readManifest("packages/db").scripts?.["db:migrate"];
+  if (!/^tsx \S+$/.test(script ?? "")) {
+    problems.push(`packages/db: db:migrate is ${script}, not tsx <entry>`);
+  }
+  if (!/^ {6}- working-directory: packages\/db$/m.test(step.text)) {
+    problems.push("ci: the migration does not run from packages/db");
+  }
+  if (/^ {6}[- ] env:/m.test(step.text)) {
+    problems.push("ci: the migration step sets env of its own");
+  }
+  if (step.run !== `node --env-file=../../.env.test --import ${script}`) {
+    problems.push(`ci: the migration runs ${step.run}`);
+  }
+  return problems;
+}
+
+describe("ci.yml migration step", () => {
+  const step = stepsOf("ci").find(isMigrate)?.text ?? "";
+  const broken = (from: string, to: string) => {
+    expect(step).toContain(from);
+    return stepsIn(workflow.replace(step, step.replace(from, to)), "ci");
+  };
+
+  it.each([
+    ["working-directory: packages/db", "working-directory: ."],
+    ["--env-file=../../.env.test", "--env-file=../../.env"],
+    [
+      "- working-directory: packages/db\n",
+      "- working-directory: packages/db\n        env: { NODE_ENV: test }\n",
+    ],
+  ])("is red when %j becomes %j", (from, to) => {
+    expect(migrateStepViolations(broken(from, to))).toHaveLength(1);
   });
 });

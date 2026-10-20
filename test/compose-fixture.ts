@@ -36,12 +36,16 @@ export function cleanFilesAt(context: string): Record<string, string> {
   };
 }
 
-/** The build of a service's image, as Compose prints it. */
+/**
+ * The build of a service's image, as Compose prints it for the stack of
+ * infra/docker-compose.app.yml: the target of the service's name in the one
+ * Dockerfile of the application.
+ */
 export function buildAt(context: string, name: string): Service {
   return {
     context,
-    dockerfile: `infra/docker/${name}.Dockerfile`,
-    target: "runtime",
+    dockerfile: "infra/docker/app.Dockerfile",
+    target: name,
   };
 }
 
@@ -88,6 +92,7 @@ export function cleanStack({ context, envFile }: FixtureRoot): {
         volumes: [envMount()],
         environment: { NODE_ENV: "production" },
         depends_on: { postgres: { condition: "service_healthy" } },
+        init: true,
         restart: "no",
       },
       api: {

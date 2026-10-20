@@ -1082,6 +1082,30 @@ describe("checkCompose", () => {
    * red: a rule added without a case here, or one that stopped firing,
    * fails this block.
    */
+  describe("13. migrate stops on SIGTERM", () => {
+    it.each([
+      ["without init", undefined],
+      ["with init: false", false],
+      ['with init: "true", a string', "true"],
+    ])("refuses migrate %s", (_label, init) => {
+      const config = broken("migrate", (service) => {
+        service.init = init;
+      });
+
+      expect(check(config)).toEqual([
+        "migrate: init is not true - node as PID 1 ignores SIGTERM, and docker compose stop would end it with SIGKILL",
+      ]);
+    });
+
+    it("asks it of migrate alone", () => {
+      const config = broken("api", (service) => {
+        service.init = undefined;
+      });
+
+      expect(check(config)).toEqual([]);
+    });
+  });
+
   describe("each rule turns red on its own corruption", () => {
     const CORRUPTIONS: Record<
       string,
@@ -1189,6 +1213,14 @@ describe("checkCompose", () => {
         },
         expected:
           "redis: publishes no port 6390 on 127.0.0.1 - REDIS_URL of .env.test points there (localhost)",
+      },
+      init: {
+        config: () =>
+          broken("migrate", (service) => {
+            service.init = undefined;
+          }),
+        expected:
+          "migrate: init is not true - node as PID 1 ignores SIGTERM, and docker compose stop would end it with SIGKILL",
       },
     };
 
@@ -1452,8 +1484,8 @@ describe("rule 11 alone (checkCompose, build-ignores)", () => {
       services[name] = {
         build: {
           context: CONTEXT,
-          dockerfile: `infra/docker/${name}.Dockerfile`,
-          target: "runtime",
+          dockerfile: "infra/docker/app.Dockerfile",
+          target: name,
         },
       };
     }
@@ -1514,17 +1546,59 @@ describe("rule 11 alone (checkCompose, build-ignores)", () => {
     ]);
   });
 
-  it("refuses a Dockerfile with its own .dockerignore", () => {
-    const own = join(CONTEXT, "infra/docker/worker.Dockerfile.dockerignore");
+  it("refuses a Dockerfile with its own .dockerignore once, naming every service built from it", () => {
+    // The stack as it is: all four images are targets of one Dockerfile.
+    const own = join(CONTEXT, "infra/docker/app.Dockerfile.dockerignore");
 
     expect(
       buildIgnores(
-        built("api", "worker"),
+        cleanConfig(),
         reader({ [ROOT_IGNORE]: CLEAN_IGNORE, [own]: CLEAN_IGNORE }),
       ),
     ).toEqual([
-      `worker: ${own} exists - BuildKit reads it instead of ${ROOT_IGNORE}, and the .env masks are not checked there`,
+      `migrate, api, worker, web: ${own} exists - BuildKit reads it instead of ${ROOT_IGNORE}, and the .env masks are not checked there`,
     ]);
+  });
+
+  it("reports the own .dockerignore of each Dockerfile on its own", () => {
+    const config = cleanConfig();
+    config.services.web = {
+      build: { context: CONTEXT, dockerfile: "infra/docker/web.Dockerfile" },
+    };
+    const own = (file: string) =>
+      join(CONTEXT, `infra/docker/${file}.dockerignore`);
+
+    expect(
+      buildIgnores(
+        config,
+        reader({
+          [ROOT_IGNORE]: CLEAN_IGNORE,
+          [own("app.Dockerfile")]: CLEAN_IGNORE,
+          [own("web.Dockerfile")]: CLEAN_IGNORE,
+        }),
+      ),
+    ).toEqual([
+      `migrate, api, worker: ${own("app.Dockerfile")} exists - BuildKit reads it instead of ${ROOT_IGNORE}, and the .env masks are not checked there`,
+      `web: ${own("web.Dockerfile")} exists - BuildKit reads it instead of ${ROOT_IGNORE}, and the .env masks are not checked there`,
+    ]);
+  });
+
+  it("builds the four images of the stack from the targets of one Dockerfile", () => {
+    const builds = Object.entries(cleanConfig().services).flatMap(
+      ([name, service]) =>
+        service.build === undefined ? [] : [[name, service.build]],
+    );
+
+    expect(builds).toEqual(
+      ["migrate", "api", "worker", "web"].map((name) => [
+        name,
+        {
+          context: CONTEXT,
+          dockerfile: "infra/docker/app.Dockerfile",
+          target: name,
+        },
+      ]),
+    );
   });
 
   it("finds the .dockerignore of a Dockerfile given by an absolute path", () => {

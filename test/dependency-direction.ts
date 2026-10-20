@@ -1,11 +1,11 @@
 import { posix } from "node:path";
+import { workspaceDirs } from "../scripts/lib/manifest.mjs";
 import { DYNAMIC_SPECIFIER, importSpecifiers } from "./imports.js";
 import {
   type Manifest,
   readManifest,
   readRepoFile,
   repoFilesUnder,
-  workspacePackageDirs,
 } from "./repo-files.js";
 
 /**
@@ -317,11 +317,11 @@ function intoTestSupport(file: SourceFile, specifier: string): boolean {
 
 /**
  * The packages of the workspace as they are on disk: the manifest of every
- * directory of `workspacePackageDirs()` and its source files among those the
+ * directory of `workspaceDirs()` and its source files among those the
  * hash covers. One `git ls-files` per top directory, not one per package.
  */
 export function readWorkspace(): WorkspacePackage[] {
-  const dirs = workspacePackageDirs();
+  const dirs = workspaceDirs();
   const files = ["apps", "packages"].flatMap((top) => repoFilesUnder(top));
   return dirs.map((dir) => {
     const prefix = `${dir}/`;

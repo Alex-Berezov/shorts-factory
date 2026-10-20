@@ -74,18 +74,18 @@
  *    `create_host_path: true`. So the gate first renders `RENDERING_PROBE`
  *    and stops (`checkRendering`) on a Compose that loses the option; CI
  *    pins the Compose it runs (.github/workflows/ci.yml).
- * 11. No `.env` enters an image: every image is built
- *    from the repository root with `COPY . .`, so the `.dockerignore` of its
- *    context is all that keeps the operator's `.env` - and any `.env.local`,
- *    `.env.production` - out of the layers. It masks `.env` and `.env.*` at
- *    the root and at any depth, and no `!` line follows the first mask: the
- *    last matching line wins, and `!**`, `!*.production` or `!apps/**` after
- *    the masks would let a `.env` back in. No `<Dockerfile>.dockerignore`
- *    lies next to a Dockerfile of the stack: BuildKit reads that file instead
- *    of the context's one, and the checked masks would not apply. A mask
- *    counts by what it masks, from a closed list (`MASK_COVERS`): `.env*`
- *    at any depth stands for all four, `.env*` at the root for the two at
- *    the root. No build has
+ * 11. No `.env` enters an image: every image is built from the repository
+ *    root with `COPY . .`, so the `.dockerignore` of its context is all that
+ *    keeps the operator's `.env` - and any `.env.local`, `.env.production` -
+ *    out of the layers. It masks `.env` and `.env.*` at the root and at any
+ *    depth, and no `!` line follows the first mask: the last matching line
+ *    wins, and `!**`, `!*.production` or `!apps/**` after the masks would let
+ *    a `.env` back in. No `<Dockerfile>.dockerignore` lies next to a Dockerfile
+ *    of the stack: BuildKit reads that file instead of the context's one, and
+ *    the checked masks would not apply; such a file is reported once, naming
+ *    every service built from that Dockerfile. A mask counts by what it masks,
+ *    from a closed list (`MASK_COVERS`): `.env*` at any depth stands for all
+ *    four, `.env*` at the root for the two at the root. No build has
  *    `additional_contexts` or `dockerfile_inline` - the stack has none, and
  *    the rule checks the `.dockerignore` of `build.context` only.
  * 12. `DATABASE_URL` and `REDIS_URL` of the root `.env.test` - the stack the
@@ -103,6 +103,14 @@
  *    packages/db/test/stack-guard.test.ts, so Compose, `.env.test` and the
  *    guard agree. No `.env.test`, no key, no URL or a URL without a port are
  *    violations of their own.
+ * 13. `migrate` runs under Docker's init (`init: true`): its image starts
+ *    node in the exec form, and node as PID 1 ignores SIGTERM - the kernel
+ *    applies no default action to PID 1 and migrate-and-seed.ts sets no
+ *    handler - so `docker compose stop migrate` in the middle of a run would
+ *    end with a SIGKILL (137) after the grace period, the connection and the
+ *    migration lock of Postgres cut. Under init node is a child and SIGTERM
+ *    stops it (143; measured in tasks/2026-10-20-E0-12J.md). Only `true`
+ *    counts: a missing `init` and `init: false` are the same PID 1.
  *
  * Each rule is a function of its own in `RULES`, named by its number above;
  * `checkCompose` runs them in that order. The JSON is read only after its
@@ -158,6 +166,7 @@ import { repoRoot } from "./lib/paths.mjs";
  * @property {unknown} [restart]
  * @property {unknown} [env_file]
  * @property {Record<string, unknown>} [build]
+ * @property {unknown} [init]
  */
 
 /**
@@ -235,6 +244,8 @@ const MIN_START_PERIOD_SEC = { postgres: 60, redis: 10 };
 const MEDIA_VOLUME = "media";
 /** Runs once per `up` and exits; every other service must keep running. */
 const ONE_SHOT = new Set(["migrate"]);
+/** Services whose node is PID 1 without a SIGTERM handler (rule 13). */
+const UNDER_INIT = ["migrate"];
 const RESTART_POLICY = "unless-stopped";
 /** Services that read the root `.env`. */
 const ENV_READERS = ["migrate", "api", "worker", "web"];
@@ -973,6 +984,10 @@ function rule10EnvMount(services, project) {
 function rule11BuildIgnores(services, { read }) {
   /** @type {Set<string>} */
   const problems = new Set();
+  // The services built from each Dockerfile that has its own .dockerignore,
+  // by that file: the targets of one Dockerfile share it.
+  /** @type {Map<string, { services: string[], contextIgnore: string }>} */
+  const ownIgnores = new Map();
   for (const [name, service] of Object.entries(services)) {
     const build = service.build;
     if (build === undefined) continue;
@@ -991,9 +1006,12 @@ function rule11BuildIgnores(services, { read }) {
     const contextIgnore = join(context, ".dockerignore");
     const ownIgnore = `${dockerfilePath}.dockerignore`;
     if (read(ownIgnore) !== null) {
-      problems.add(
-        `${name}: ${ownIgnore} exists - BuildKit reads it instead of ${contextIgnore}, and the .env masks are not checked there`,
-      );
+      const seen = ownIgnores.get(ownIgnore);
+      if (seen === undefined) {
+        ownIgnores.set(ownIgnore, { services: [name], contextIgnore });
+      } else {
+        seen.services.push(name);
+      }
       continue;
     }
     const text = read(contextIgnore);
@@ -1006,6 +1024,11 @@ function rule11BuildIgnores(services, { read }) {
     for (const problem of checkDockerignore(text, contextIgnore)) {
       problems.add(problem);
     }
+  }
+  for (const [ownIgnore, { services: names, contextIgnore }] of ownIgnores) {
+    problems.add(
+      `${names.join(", ")}: ${ownIgnore} exists - BuildKit reads it instead of ${contextIgnore}, and the .env masks are not checked there`,
+    );
   }
   return [...problems];
 }
@@ -1105,6 +1128,27 @@ function rule12TestStackPorts(services, project) {
 }
 
 /**
+ * Rule 13: `migrate` runs under Docker's init, so SIGTERM stops its node.
+ *
+ * @param {Record<string, ComposeService>} services
+ * @returns {string[]}
+ */
+function rule13Init(services) {
+  /** @type {string[]} */
+  const problems = [];
+  for (const name of UNDER_INIT) {
+    const service = services[name];
+    if (service === undefined) continue;
+    if (service.init !== true) {
+      problems.push(
+        `${name}: init is not true - node as PID 1 ignores SIGTERM, and docker compose stop would end it with SIGKILL`,
+      );
+    }
+  }
+  return problems;
+}
+
+/**
  * The rules of the header, in its order.
  *
  * @type {Rule[]}
@@ -1123,6 +1167,7 @@ const RULES = [
   { id: "env-mount", check: rule10EnvMount },
   { id: "build-ignores", check: rule11BuildIgnores },
   { id: "test-stack-ports", check: rule12TestStackPorts },
+  { id: "init", check: rule13Init },
 ];
 
 /** The id of every rule `checkCompose` runs, in its order. */

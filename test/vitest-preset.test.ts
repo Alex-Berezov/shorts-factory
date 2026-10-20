@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import { workspaceDirs } from "../scripts/lib/manifest.mjs";
 import { repoRoot } from "../scripts/lib/paths.mjs";
 import {
   type EntryCheck,
@@ -11,12 +12,7 @@ import {
   intTestConfig,
   unitTestConfig,
 } from "../vitest.preset.js";
-import {
-  readRepoFile,
-  readRepoJson,
-  repoFilesUnder,
-  workspacePackageDirs,
-} from "./repo-files.js";
+import { readRepoFile, readRepoJson, repoFilesUnder } from "./repo-files.js";
 
 /**
  * The preset is the one place the test policy of the workspace is written
@@ -201,7 +197,7 @@ describe("unitTestConfig", () => {
 });
 
 describe("package vitest configs", () => {
-  const dirs = workspacePackageDirs().map((dir) => join(repoRoot, dir));
+  const dirs = workspaceDirs().map((dir) => join(repoRoot, dir));
 
   it("finds the packages of the workspace", () => {
     expect(dirs.length).toBeGreaterThanOrEqual(9);

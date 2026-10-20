@@ -20,7 +20,7 @@ const nextConfig: NextConfig = {
     // still resolves - see docs/adr/0001-config-server-entry.md.
     extensionAlias: { ".js": [".ts", ".tsx", ".js"] },
   },
-  // env-ok: build-time packaging switch for web.Dockerfile, not app config (E0-01)
+  // env-ok: build-time packaging switch for the web target of app.Dockerfile, not app config (E0-01)
   ...(process.env.NEXT_OUTPUT_STANDALONE === "1"
     ? { output: "standalone" as const }
     : {}),

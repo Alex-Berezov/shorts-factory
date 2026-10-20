@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { workspaceDirs } from "../scripts/lib/manifest.mjs";
 import {
   type SourceFile,
   type WorkspacePackage,
@@ -8,7 +9,6 @@ import {
   tableViolations,
 } from "./dependency-direction.js";
 import type { Manifest } from "./repo-files.js";
-import { workspacePackageDirs } from "./repo-files.js";
 
 /**
  * The direction of dependencies (docs/10_SYSTEM_DESIGN.md §6): every row of
@@ -479,7 +479,7 @@ describe("the workspace", () => {
 
   it("reads every package of pnpm-workspace.yaml with its files", () => {
     // An empty read would pass the cases below on nothing.
-    const dirs = workspacePackageDirs();
+    const dirs = workspaceDirs();
     expect(dirs.length).toBeGreaterThan(0);
     expect(workspace.map((entry) => entry.dir)).toEqual(dirs);
     const empty = workspace

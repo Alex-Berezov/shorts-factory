@@ -108,7 +108,7 @@ M already applied`; `app settings seeded`), отказ - одну строку �
 `packages/db/package.json`, а не в `devDependencies`, и это не нарушение направления `db -> core`,
 а его именованное исключение.
 
-- Зачем `dependencies`: образ `migrate` (`infra/docker/migrate.Dockerfile`) ставит пакеты
+- Зачем `dependencies`: образ `migrate` (цель `migrate` в `infra/docker/app.Dockerfile`) ставит пакеты
   `pnpm install --prod --filter @sf/db...` и запускает `src/cli/**`, которым нужна схема
   окружения из `@sf/config`. В `devDependencies` пакет в образ не попадёт, и `db:migrate`
   упадёт на первом импорте. Перенос `@sf/config` в `devDependencies` «по этому ADR» - регресс,

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 import { repoRoot } from "../scripts/lib/paths.mjs";
 
@@ -90,34 +90,4 @@ export function repoFilesUnder(dir: string): string[] {
   return listed.stdout
     .split("\0")
     .filter((path) => path !== "" && existsSync(join(repoRoot, path)));
-}
-
-/**
- * Package directories of the workspace, from the globs of
- * `pnpm-workspace.yaml`, as paths from the root (`apps/api`). Only the
- * `dir/*` form the file uses is understood; any other form throws instead of
- * being skipped, and so does a file without a glob.
- */
-export function workspacePackageDirs(): string[] {
-  const yaml = readRepoFile("pnpm-workspace.yaml");
-  const globs = Array.from(yaml.matchAll(/^\s*-\s*["']?([^"'\s]+)["']?\s*$/gm))
-    .map((match) => match[1])
-    .filter((glob): glob is string => glob !== undefined);
-  if (globs.length === 0) {
-    throw new Error("pnpm-workspace.yaml lists no package glob");
-  }
-  const dirs: string[] = [];
-  for (const glob of globs) {
-    if (!/^[\w/-]+\/\*$/.test(glob)) {
-      throw new Error(`workspace glob "${glob}" is not of the form dir/*`);
-    }
-    const parent = join(repoRoot, glob.slice(0, -2));
-    for (const entry of readdirSync(parent, { withFileTypes: true })) {
-      const dir = join(parent, entry.name);
-      if (entry.isDirectory() && existsSync(join(dir, "package.json"))) {
-        dirs.push(relative(repoRoot, dir).replaceAll("\\", "/"));
-      }
-    }
-  }
-  return dirs.sort();
 }

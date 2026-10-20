@@ -17,12 +17,12 @@
 - **api, worker и CLI `@sf/db` исполняются через `tsx`, без шага компиляции**, одинаково
   в разработке и в образе:
   - `apps/api`: `dev` = `node --import tsx src/server.ts` (`scripts.dev` в `apps/api/package.json`), в образе
-    тот же запуск - `CMD ["node", "--import", "tsx", "src/server.ts"]` (`CMD` в `infra/docker/api.Dockerfile`);
+    тот же запуск - `CMD ["node", "--import", "tsx", "src/server.ts"]` (`CMD` цели `api` в `infra/docker/app.Dockerfile`);
   - `apps/worker`: `dev` = `node --import tsx src/index.ts` (`scripts.dev` в `apps/worker/package.json`),
-    в образе тот же запуск (`CMD` в `infra/docker/worker.Dockerfile`);
+    в образе тот же запуск (`CMD` цели `worker`);
   - `packages/db`: `db:migrate`/`db:seed` = `tsx src/cli/*.ts`, в образе `migrate`
-    `node --import tsx src/cli/migrate.ts && node --import tsx src/cli/seed.ts`
-    (`CMD` в `infra/docker/migrate.Dockerfile`).
+    `node --import tsx src/cli/migrate-and-seed.ts` - миграции и seed одним процессом
+    (`CMD` цели `migrate`, exec-форма; ADR-0013).
 - **`tsx` - рантайм-зависимость**: `tsx ^4.19.0` в `dependencies` `@sf/api`, `@sf/worker`
   и `@sf/db`; образ ставит прод-зависимости `pnpm install --offline --frozen-lockfile --prod
   --filter <pkg>...` (`docs/DECISIONS.md`, 10.10.2026, E0-11: «как tsx попадает в рантайм-образ»
@@ -39,7 +39,7 @@
   (`docs/DECISIONS.md`, 06.09.2026, E0-01: скрипт `build` убран из api и worker).
 
 Следствие для образа web - решение 8 эпика: `output: "standalone"` включается только флагом
-`NEXT_OUTPUT_STANDALONE=1` (`ENV` стадии `build` в `infra/docker/web.Dockerfile`) (условие в `apps/web/next.config.ts`),
+`NEXT_OUTPUT_STANDALONE=1` (`ENV` стадии `web-build` в `infra/docker/app.Dockerfile`) (условие в `apps/web/next.config.ts`),
 обычная сборка локально и в CI trace-копию `node_modules` не делает.
 
 ## Альтернативы

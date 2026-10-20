@@ -132,7 +132,7 @@ describe("check-compose main", () => {
   const STACK = JSON.stringify({
     services: {
       api: {
-        build: { context: ROOT, dockerfile: "infra/docker/api.Dockerfile" },
+        build: { context: ROOT, dockerfile: "infra/docker/app.Dockerfile" },
       },
     },
   });
@@ -232,7 +232,7 @@ describe("check-compose main", () => {
     // the one of the context; rule 12 reads .env.test. Nothing else.
     expect(read).toHaveBeenCalledTimes(3);
     expect(read.mock.calls).toEqual([
-      [join(ROOT, "infra", "docker", "api.Dockerfile.dockerignore")],
+      [join(ROOT, "infra", "docker", "app.Dockerfile.dockerignore")],
       [join(ROOT, ".dockerignore")],
       [join(ROOT, ".env.test")],
     ]);
@@ -329,20 +329,20 @@ describe("check-compose main", () => {
     expect(text).toBe("check-compose: clean");
     expect(code).toBe(0);
     expect(filesOf(docker)[1]).toBe(CANONICAL_FILE);
-    // Every read under the canonical root, each once: the files of rule 11
-    // for the four builds and .env.test.
-    const dockerfileIgnore = (name: string) =>
-      join(CANONICAL, "infra", "docker", `${name}.Dockerfile.dockerignore`);
+    // Every read under the canonical root: the two files of rule 11 for each
+    // of the four builds - targets of one Dockerfile - and .env.test.
+    const dockerfileIgnore = join(
+      CANONICAL,
+      "infra",
+      "docker",
+      "app.Dockerfile.dockerignore",
+    );
     const contextIgnore = join(CANONICAL, ".dockerignore");
     const expected = [
-      dockerfileIgnore("migrate"),
-      contextIgnore,
-      dockerfileIgnore("api"),
-      contextIgnore,
-      dockerfileIgnore("worker"),
-      contextIgnore,
-      dockerfileIgnore("web"),
-      contextIgnore,
+      ...["migrate", "api", "worker", "web"].flatMap(() => [
+        dockerfileIgnore,
+        contextIgnore,
+      ]),
       join(CANONICAL, ".env.test"),
     ];
     expect(canonicalRead).toHaveBeenCalledTimes(expected.length);

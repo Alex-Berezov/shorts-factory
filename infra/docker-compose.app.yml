@@ -40,8 +40,8 @@ services:
   migrate:
     build:
       context: ..
-      dockerfile: infra/docker/migrate.Dockerfile
-      target: runtime
+      dockerfile: infra/docker/app.Dockerfile
+      target: migrate
     environment:
       <<: *app-environment
     volumes:
@@ -49,13 +49,19 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Docker's init as PID 1, node its child. node as PID 1 ignores SIGTERM -
+    # the kernel applies no default action to PID 1 and migrate-and-seed.ts
+    # sets no handler - so `docker compose stop migrate` would end with a
+    # SIGKILL (137) after the grace period; under init SIGTERM stops node (143).
+    # scripts/compose-rules.mjs, rule 13.
+    init: true
     restart: "no"
 
   api:
     build:
       context: ..
-      dockerfile: infra/docker/api.Dockerfile
-      target: runtime
+      dockerfile: infra/docker/app.Dockerfile
+      target: api
       args:
         APP_VERSION: ${APP_VERSION:-}
         GIT_COMMIT: ${GIT_COMMIT:-}
@@ -98,8 +104,8 @@ services:
   worker:
     build:
       context: ..
-      dockerfile: infra/docker/worker.Dockerfile
-      target: runtime
+      dockerfile: infra/docker/app.Dockerfile
+      target: worker
     environment:
       <<: *app-environment
       MEDIA_DIR: *media-dir
@@ -133,15 +139,16 @@ services:
   web:
     build:
       context: ..
-      dockerfile: infra/docker/web.Dockerfile
-      target: runtime
+      dockerfile: infra/docker/app.Dockerfile
+      target: web
     environment:
       <<: *app-environment
       API_INTERNAL_URL: http://api:3001
     volumes:
       - *env-mount
     # The only published port of the stack: WEB_PORT on the host (as with
-    # `pnpm dev`), 3000 inside the container (PORT of web.Dockerfile).
+    # `pnpm dev`), 3000 inside the container (PORT of the web target of
+    # app.Dockerfile).
     ports: ["${WEB_PORT:-3000}:3000"]
     depends_on:
       migrate:

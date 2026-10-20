@@ -1,4 +1,4 @@
-# Build context of every image is the repository root (infra/docker/*.Dockerfile).
+# Build context of every image is the repository root (infra/docker/app.Dockerfile).
 # Environment files never enter the context: configuration reaches a container
 # at run time - the root `.env` mounted read-only at /repo/.env plus Compose's
 # `environment` - not through a layer.
@@ -6,6 +6,17 @@
 .env.*
 **/.env
 **/.env.*
+
+# Tests of the packages and their configs stay out of every image: no runtime
+# imports them (docs/DECISIONS.md, 20.10.2026), and a change to a test does
+# not invalidate the `COPY . .` layer. packages/config/vitest/ is not masked
+# and stays in the images: it is an export of @sf/config (`./vitest/setup`),
+# so it ships with the package, and it throws when imported outside a vitest
+# run. The list is not widened to it (decision R1 of E0-12J).
+**/test
+**/test-support
+**/*.test.ts
+**/vitest*.config.*
 
 # Dependencies and build output are produced inside the image.
 **/node_modules

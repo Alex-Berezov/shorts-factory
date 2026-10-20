@@ -186,7 +186,7 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
   читают через `test/repo-files.ts` - только те, что входят в хеш: отслеживаемые git и
   неотслеживаемые, но не игнорируемые (`git ls-files --cached --others --exclude-standard`,
   `repoFilesUnder`); перечисляют - тоже через него, а не `readdirSync` (пока исключение -
-  `workspacePackageDirs`: пакеты по `pnpm-workspace.yaml` через `readdirSync`, долг E0-12N
+  `workspaceDirs` из `scripts/lib/manifest.mjs`: пакеты по `pnpm-workspace.yaml` через `readdirSync`, долг E0-12N
   в `docs/TECH_DEBT.md`). Игнорируемый файл
   (`coverage/`, сборка) в хеш `//#test:repo` не попадает, и чтение его переиграло бы старый
   результат из кэша. Ответ «путь исчез» у корневых скриптов один - `isGone` из

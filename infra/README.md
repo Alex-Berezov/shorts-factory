@@ -5,7 +5,7 @@
 | `../compose.yaml` | Full stack. Includes the two files below. |
 | `docker-compose.yml` | Postgres 16 + Redis 7 - the development stack on its own. |
 | `docker-compose.app.yml` | `migrate`, `api`, `worker`, `web`. |
-| `docker/{api,worker,web,migrate}.Dockerfile` | Images. Build context is the repository root; `migrate.Dockerfile` is the one-shot migrations + seed image. |
+| `docker/app.Dockerfile` | Every image of the application, one target each: `api`, `worker`, `migrate` (the one-shot migrations + seed image), `web`. Build context is the repository root. |
 | `scripts/backup.sh` | `pg_dump` with a 14-day rotation. |
 | `postgres/init/` | SQL run once on a fresh Postgres volume (creates the test database). |
 
@@ -102,7 +102,7 @@ stamp is not being written: look at the worker log).
     The containers still read `.env`; `WEB_PORT` then comes from
     `.env.example`.
 - Build fingerprint on `/system` (api image only; build args are declared in
-  `docker-compose.app.yml` and `api.Dockerfile`):
+  `docker-compose.app.yml` and in the `api` target of `app.Dockerfile`):
   `APP_VERSION=1.2.0 GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up --build`
   on the command line, or literal values in the root `.env` (`APP_VERSION=1.2.0`,
   `GIT_COMMIT=abc1234`; the file is not a shell, so `$(...)` is not run there).
@@ -131,13 +131,22 @@ stamp is not being written: look at the worker log).
 
 ### migrate
 
-A one-shot service: `node --import tsx src/cli/migrate.ts && node --import tsx src/cli/seed.ts`
-from `packages/db`. It runs on every `docker compose up` and is safe to repeat:
-the runner holds a Postgres advisory lock while it migrates (a concurrent
-`pnpm db:migrate` waits instead of failing - for at most 120 s, then it stops
-with "another migration runner has held the migration lock ..."; look for the
-stuck session in `pg_stat_activity`) and skips what is applied; the seed
-merges defaults under the stored values. Its log is one line per step:
+A one-shot service: `node --import tsx src/cli/migrate-and-seed.ts` from
+`packages/db` - the migrations, then the seed, in one process on one
+connection; the seed does not run after a failed migration. The exec form of
+`CMD` puts no shell in front of node, but node without a SIGTERM handler
+ignores the signal as PID 1, and the engine would end it with SIGKILL (137)
+after its grace period. Compose therefore runs `migrate` with `init: true`
+(Docker's init, tini, is PID 1 and node its child), and `docker compose stop
+migrate` stops it by SIGTERM at once (143); `pnpm check:compose` refuses the
+service without it (rule 13). A `docker run` of the `migrate` image by hand
+needs `--init` for the same reason. It runs on every `docker compose up` and
+is safe to repeat: the runner holds a Postgres advisory lock while it
+migrates (a concurrent `pnpm db:migrate` waits instead of failing - for at
+most 120 s, then it stops with "another migration runner has held the
+migration lock ..."; look for the stuck session in `pg_stat_activity`) and
+skips what is applied; the seed merges defaults under the stored values. Its
+log is one line per step:
 
 ```
 migrations: applied 1, 1 in total        # or: nothing to apply, 1 already applied
@@ -146,6 +155,26 @@ app settings seeded
 
 api, worker and web start only after it exited with 0. If it failed:
 `docker compose logs migrate`.
+
+### One image by hand
+
+Each service is a target of `docker/app.Dockerfile`; Compose and CI pick the
+target by name. To build one outside Compose, from the repository root:
+
+```sh
+docker build --target api -f infra/docker/app.Dockerfile -t sf-api:ci .
+node scripts/probe-image.mjs api   # the probe CI runs on the image
+```
+
+To run the `migrate` image this way, give `docker run` the `--init` flag (see
+`### migrate`). The tests of the packages (`test/`, `test-support/`,
+`*.test.ts`, the vitest configs) are kept out of every image by
+`.dockerignore`, and the probe fails an image whose package directories
+carry them ("carries the tests of its packages"); `packages/config/vitest/`
+stays, as an export of `@sf/config` (`./vitest/setup`) that throws outside a
+vitest run. The probe runs in a container of its own name; one that does not
+finish in 120 s is removed (`docker rm -f`) and the probe exits with 2. The
+node image of every target is the build arg `NODE_IMAGE` (`node:22-alpine`).
 
 ### Stopping
 

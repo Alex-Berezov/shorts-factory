@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { workspaceDirs } from "../scripts/lib/manifest.mjs";
 import {
   type Manifest,
   type Turbo,
@@ -7,7 +8,6 @@ import {
   readRepoFile,
   readTurbo,
   repoFilesUnder,
-  workspacePackageDirs,
 } from "./repo-files.js";
 
 /**
@@ -287,7 +287,7 @@ function depthOf(dir: string, file: string): number {
   return file.slice(dir.length + 1).split("/").length - 1;
 }
 
-const DIRS = workspacePackageDirs();
+const DIRS = workspaceDirs();
 
 function packagesOfRepository(): PackageInputs[] {
   return DIRS.map((dir) => ({

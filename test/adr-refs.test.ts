@@ -42,7 +42,7 @@ const FILES = [
   "apps/api/package.json",
   "apps/worker/src/runtime.ts",
   ".github/workflows/ci.yml",
-  "infra/docker/api.Dockerfile",
+  "infra/docker/app.Dockerfile",
   "packages/db/src/cli/migrate.ts",
   "tools/new-top/check.mjs",
 ];
@@ -66,8 +66,8 @@ describe("fileLineRefs", () => {
     ],
     [
       "a Dockerfile",
-      "`infra/docker/api.Dockerfile:56`",
-      "infra/docker/api.Dockerfile:56",
+      "`infra/docker/app.Dockerfile:56`",
+      "infra/docker/app.Dockerfile:56",
     ],
     ["a file at the root", "see `turbo.json:12`", "turbo.json:12"],
     ["a file at the root without an extension", "`.nvmrc:1`", ".nvmrc:1"],

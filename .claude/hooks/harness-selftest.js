@@ -342,24 +342,30 @@ check('gates.js: require не запускает гейты, не пишет о�
 });
 
 /**
- * Гейт id из rules.sf.json и runs(file) - выбирает ли его selectGates из самого gates.js
- * (экспорт модуля, а не повтор функции, L-008: правка обработки when там обязана краснеть
- * здесь) на одном изменённом файле при полном прогоне (без --only). Вызов selectGates в
- * пробах - только здесь. Нет гейта или gates.js не прошёл пробу require выше - исключение
- * (красная строка check).
+ * Выбирает ли selectGates из самого gates.js (экспорт модуля, а не повтор функции, L-008:
+ * правка обработки when там обязана краснеть здесь) гейт gate на одном изменённом файле file
+ * при полном прогоне (без --only). Вызов selectGates в пробах - только здесь: gateProbe и
+ * пробы отказа на изменённом when зовут selects. gates.js не прошёл пробу require выше -
+ * исключение (красная строка check).
+ */
+function selects(gate, file) {
+  if (!gatesModuleSafe) throw new Error('gates.js не прошёл пробу require - selectGates не загружается');
+  const { selectGates } = require('./gates.js');
+  if (typeof selectGates !== 'function') throw new Error('gates.js не экспортирует функцию selectGates');
+  const picked = selectGates([gate], [file], null);
+  return Boolean(picked && picked[0] && picked[0].run);
+}
+
+/**
+ * Гейт id из rules.sf.json и runs(file) - selects на нём. Нет гейта - исключение (красная
+ * строка check).
  */
 const gateProbes = new Map();
 function gateProbe(id) {
   if (gateProbes.has(id)) return gateProbes.get(id);
   const gate = ((repoRules && repoRules.gates) || []).find((g) => g.id === id);
   if (!gate) throw new Error('гейта ' + id + ' нет в правилах');
-  if (!gatesModuleSafe) throw new Error('gates.js не прошёл пробу require - selectGates не загружается');
-  const { selectGates } = require('./gates.js');
-  if (typeof selectGates !== 'function') throw new Error('gates.js не экспортирует функцию selectGates');
-  const runs = (file) => {
-    const picked = selectGates([gate], [file], null);
-    return Boolean(picked && picked[0] && picked[0].run);
-  };
+  const runs = (file) => selects(gate, file);
   const res = { gate, runs };
   gateProbes.set(id, res);
   return res;
@@ -399,7 +405,9 @@ function notePathsOnDisk(gate) {
  * строки: отказ одной не скрывает состояние другой.
  *   spec.runWhat / spec.skipWhat - хвосты названий строк выбора и пропуска;
  *   spec.mustRun / spec.mustSkip - файлы, на которых гейт обязан выбираться / пропускаться;
- *   spec.extra - [{ name, fn({ gate, runs }) }], результат fn - как у check.
+ *   spec.extra - [{ name, fn({ gate, runs }, spec) }]: fn получает пробу гейта (gateProbe)
+ *     и тот же spec вторым аргументом; результат fn - как у check.
+ * id - идентификатор гейта в правилах; spec - описание пробы выше.
  */
 function checkGateSelection(id, spec) {
   check('гейт ' + id + ': gates.js выбирает его на ' + spec.runWhat, () => {
@@ -414,7 +422,7 @@ function checkGateSelection(id, spec) {
     if (stray.length) return 'gates.js выбирает его на постороннем ' + stray.join(', ');
     return { note: spec.mustSkip.length + ' пропуск' };
   });
-  for (const x of spec.extra || []) check('гейт ' + id + ': ' + x.name, () => x.fn(gateProbe(id)));
+  for (const x of spec.extra || []) check('гейт ' + id + ': ' + x.name, () => x.fn(gateProbe(id), spec));
 }
 
 // Гейт по glob, ошибка в шаблоне, в его разборе или в пути скрипта не краснеет,
@@ -425,6 +433,9 @@ checkGateSelection('compose', {
   mustRun: [
     'compose.yaml',
     'infra/docker-compose.yml',
+    // The full stack: rule 13 (`init: true` of migrate, E0-12J) is held on
+    // this file by the compose gate; container.test.ts reads the file but
+    // does not check `init: true`.
     'infra/docker-compose.app.yml',
     'scripts/check-compose.mjs',
     'scripts/compose-rules.mjs',
@@ -433,7 +444,7 @@ checkGateSelection('compose', {
     'scripts/lib/paths.mjs',
     'scripts/lib/files.mjs',
     '.dockerignore',
-    'infra/docker/worker.Dockerfile.dockerignore',
+    'infra/docker/app.Dockerfile.dockerignore',
     // Rule 12 reads the ports of the test stack from the root .env.test
     // (E0-12C).
     '.env.test',
@@ -453,8 +464,10 @@ checkGateSelection('compose', {
     'docker-compose.yml',
     'docker-compose.prod.yaml',
     // wide mask by decision D, narrowing - E0-12K: the gate does not read
-    // these, infra/** chooses it on them anyway.
-    'infra/docker/api.Dockerfile',
+    // these, infra/** chooses it on them anyway. app.Dockerfile is the one
+    // Dockerfile of every image (E0-12J): rule 11 looks for
+    // app.Dockerfile.dockerignore next to it.
+    'infra/docker/app.Dockerfile',
     'infra/README.md',
     'infra/scripts/backup.sh',
     'infra/postgres/init/01-test-db.sql',
@@ -503,6 +516,32 @@ checkGateSelection('compose', {
       },
     },
     { name: 'пути файлов в его note на диске', fn: ({ gate }) => notePathsOnDisk(gate) },
+    {
+      // Проба отказа (E0-12J, F15/G1): when без infra/** - прочие файлы infra перечислены -
+      // не выбирает гейт на файлах стека приложения, и проба выбора выше на них краснеет.
+      // Rule 13 (`init: true` of migrate) is held on infra/docker-compose.app.yml by the
+      // gate alone. The masks of when are taken one by one: infra/** is dropped wherever it
+      // stands among them, and the files of the stack must stay in mustRun of the gate.
+      name: 'when без infra/** не выбирает его на файлах стека приложения (проба отказа)',
+      fn: ({ gate }, spec) => {
+        const stack = ['infra/docker-compose.app.yml', 'infra/docker/app.Dockerfile'];
+        const unheld = stack.filter((f) => !spec.mustRun.includes(f));
+        if (unheld.length) return 'mustRun гейта не держит ' + unheld.join(', ') + ' - проба выбора на них не краснеет';
+        const when = String(gate.when || '');
+        const m = /^glob:{(.*)}$/.exec(when);
+        if (!m) return 'when гейта не glob:{...} - проба отказа не построена: ' + when;
+        const masks = m[1].split(',');
+        if (!masks.includes('infra/**')) return 'в when гейта нет маски infra/** - проба отказа не построена: ' + when;
+        const kept = masks.filter((x) => x !== 'infra/**');
+        kept.push('infra/docker-compose.yml', 'infra/README.md', 'infra/scripts/**');
+        const narrowed = { ...gate, when: 'glob:{' + kept.join(',') + '}' };
+        const runsNarrowed = (f) => selects(narrowed, f);
+        if (!runsNarrowed('infra/docker-compose.yml')) return 'суженный when не выбирает гейт и на infra/docker-compose.yml - сужение сломало when, проба ничего не доказывает';
+        const still = stack.filter(runsNarrowed);
+        if (still.length) return 'суженный when всё ещё выбирает гейт на ' + still.join(', ') + ' - проба выбора не краснеет';
+        return { note: 'отказ на ' + stack.length + ' файлах' };
+      },
+    },
   ],
 });
 
