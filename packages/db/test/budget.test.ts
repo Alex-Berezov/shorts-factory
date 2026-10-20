@@ -1,13 +1,24 @@
 import {
   BUDGET_CACHE_TTL_SEC,
   BudgetExceededError,
+  type BudgetScope,
   ValidationError,
   budgetCacheKey,
+  budgetScopeFor,
 } from "@sf/core";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import {
+  type MockInstance,
+  afterAll,
+  afterEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import {
   type BudgetCache,
   type BudgetLimits,
+  countBudgetChecks,
   createBudgetGuard,
 } from "../src/budget.js";
 import { closeDb, createDb } from "../src/client.js";
@@ -64,6 +75,29 @@ function fakeCache(): {
       },
     },
   };
+}
+
+/** The scope of a provider that has a cap; the cases below only ask those. */
+function scopeOf(provider: Parameters<typeof budgetScopeFor>[0]): BudgetScope {
+  const scope = budgetScopeFor(provider);
+  if (scope === null) {
+    throw new Error(`${provider} has no cap`);
+  }
+  return scope;
+}
+
+/**
+ * The arguments of the one call of `sumUsages` after the handle. The handle is
+ * compared by identity and left out of every message: a failed match on the
+ * driver client would have vitest walk its proxy while printing the diff.
+ */
+function onlyAggregateCall(
+  sums: MockInstance<typeof apiUsageLogRepo.sumUsages>,
+): unknown[] {
+  expect(sums).toHaveBeenCalledTimes(1);
+  const [handle, ...rest] = sums.mock.calls[0] ?? [];
+  expect(handle === db).toBe(true);
+  return rest;
 }
 
 function recordingLog() {
@@ -182,6 +216,116 @@ describe("budget guard without a cap", () => {
     await expect(guard.assert("youtube_analytics")).rejects.toThrow(
       ValidationError,
     );
+  });
+});
+
+/**
+ * The read of a page: every cap in one statement, always from the database -
+ * no cache to read or write, and no guard to ask.
+ */
+describe("countBudgetChecks", () => {
+  it("counts the caps asked in one aggregate and answers in the order asked", async () => {
+    const sums = vi
+      .spyOn(apiUsageLogRepo, "sumUsages")
+      .mockResolvedValueOnce([10, 4.5]);
+    const sum = spendsInTheDatabase();
+    const now = new Date("2026-03-15T20:00:00Z");
+
+    const checks = await countBudgetChecks(
+      db,
+      LIMITS,
+      ["youtube_data", "youtube_analytics", "gemini"],
+      { now },
+    );
+
+    // The scopes travel whole, each with the zone of its own cap: the
+    // YouTube day in Pacific time, the Gemini day in UTC.
+    const [aggregates, opts] = onlyAggregateCall(sums);
+    expect(aggregates).toEqual([scopeOf("youtube_data"), scopeOf("gemini")]);
+    expect(aggregates).toMatchObject([
+      { timeZone: "America/Los_Angeles" },
+      { timeZone: "UTC" },
+    ]);
+    expect(opts).toEqual({ now });
+    expect(sum).not.toHaveBeenCalled();
+    expect(checks).toEqual([
+      {
+        scope: scopeOf("youtube_data"),
+        spent: 10,
+        cap: 8_000,
+        ratio: 10 / 8_000,
+        warn: false,
+        exceeded: false,
+      },
+      null,
+      {
+        scope: scopeOf("gemini"),
+        spent: 4.5,
+        cap: 5,
+        ratio: 4.5 / 5,
+        warn: true,
+        exceeded: false,
+      },
+    ]);
+  });
+
+  /** Without `now` the windows end on the clock of the database. */
+  it("leaves the end of the windows to the database without now", async () => {
+    const sums = vi
+      .spyOn(apiUsageLogRepo, "sumUsages")
+      .mockResolvedValueOnce([2]);
+
+    await countBudgetChecks(db, LIMITS, ["elevenlabs"]);
+
+    expect(onlyAggregateCall(sums)).toEqual([[scopeOf("elevenlabs")], {}]);
+  });
+
+  /** Providers with no cap ask the aggregate for nothing and answer nulls. */
+  it("answers null for every provider without a cap", async () => {
+    const sums = vi
+      .spyOn(apiUsageLogRepo, "sumUsages")
+      .mockResolvedValueOnce([]);
+
+    await expect(
+      countBudgetChecks(db, LIMITS, ["youtube_analytics", "system"]),
+    ).resolves.toEqual([null, null]);
+    expect(onlyAggregateCall(sums)).toEqual([[], {}]);
+  });
+
+  /**
+   * The page and the guard of the worker read one cap the same way: the same
+   * total gives the same check from either path, so `/system/status` cannot
+   * show a state the guard would not act on.
+   */
+  it.each([
+    ["youtube_data", 1_000],
+    ["gemini", 4],
+    ["openai_tts", 50],
+  ] as const)(
+    "answers %s as the guard does for a total of %s",
+    async (provider, total) => {
+      vi.spyOn(apiUsageLogRepo, "sumUsages").mockResolvedValueOnce([total]);
+      spendsInTheDatabase(total);
+      const guard = createBudgetGuard({ db, limits: LIMITS });
+
+      const [counted] = await countBudgetChecks(db, LIMITS, [provider]);
+      const checked = await guard.check(provider);
+
+      expect(counted).not.toBeNull();
+      expect(counted).toEqual(checked);
+    },
+  );
+
+  /**
+   * An aggregate that answered fewer totals than it was asked for is a
+   * defect, not a cap with nothing spent.
+   */
+  it("refuses an answer with fewer totals than caps asked", async () => {
+    vi.spyOn(apiUsageLogRepo, "sumUsages").mockResolvedValueOnce([10]);
+
+    await expect(
+      countBudgetChecks(db, LIMITS, ["youtube_data", "gemini"]),
+    ).rejects.toThrow("gemini_usd_day: no total counted for the cap");
   });
 });
 

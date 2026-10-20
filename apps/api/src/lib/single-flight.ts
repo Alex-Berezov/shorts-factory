@@ -15,8 +15,11 @@
  * is one more hanging call per lifetime. A call that hangs is therefore
  * joined for as long as it hangs - every caller gives up on its own deadline
  * and reports the dependency as down - so whoever wraps a call in this owns
- * the bound on how long it can hang (the `commandTimeout` of the Redis client
- * in `compose-app.ts`; for a database query, see `lib/health.ts`).
+ * the bound on how long it can hang: the `commandTimeout` of the Redis client
+ * in `compose-app.ts`, and for a database query the limit of the probe
+ * handle it runs on (`createProbeDb` of `@sf/db`, `PROBE_QUERY_LIMIT_MS` in
+ * `lib/dependency-timeout.ts`), past which the connection is destroyed and
+ * the call rejects, so the next caller starts a new one.
  *
  * Nothing is kept after the call settles: the next caller after a success or
  * a failure asks the dependency again.

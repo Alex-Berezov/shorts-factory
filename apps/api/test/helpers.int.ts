@@ -1,4 +1,7 @@
 import { env } from "@sf/config";
+import { type ProbeDb, createProbeDb } from "@sf/db";
+import { testDatabaseUrl } from "@sf/db/test-support/fixture";
+import type { Relay } from "@sf/db/test-support/relay";
 import { suiteRedisUrl } from "@sf/db/test-support/stack-guard";
 import {
   type QueueFactory,
@@ -7,7 +10,10 @@ import {
 } from "@sf/runtime";
 import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import type { Redis } from "ioredis";
-import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
+import {
+  DEPENDENCY_TIMEOUT_MS,
+  PROBE_DB_BOUNDS,
+} from "../src/lib/dependency-timeout.js";
 
 export { openTestDb } from "@sf/db/test-support/fixture";
 
@@ -31,6 +37,16 @@ export { openTestDb } from "@sf/db/test-support/fixture";
  * Postgres stays shared (one migrated schema), and the two suites keep apart
  * there by provider: the worker spends `gemini`, this one `youtube_data`.
  */
+
+/**
+ * A bounded database handle of the kind the api reads through
+ * (`compose-app.ts`), on the test database - or on a relay in front of it,
+ * whose address is derived from the same guarded URL (`openRelay`). The
+ * caller closes it.
+ */
+export function openTestProbeDb(relay?: Relay): ProbeDb {
+  return createProbeDb(relay?.url ?? testDatabaseUrl().href, PROBE_DB_BOUNDS);
+}
 
 /** Connection for an integration file of the api; the caller closes it. */
 export function openTestRedis(): Redis {

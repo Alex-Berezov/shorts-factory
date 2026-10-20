@@ -1,8 +1,9 @@
 import { BudgetExceededError } from "@sf/core";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   type BudgetGuard,
   type BudgetLimits,
+  countBudgetChecks,
   createBudgetGuard,
 } from "../src/budget.js";
 import { apiUsageLogRepo } from "../src/repos/api-usage-log.js";
@@ -203,5 +204,65 @@ describe("the day a cap is counted in", () => {
     // Our own day, which turned over at 00:00 UTC: yesterday's spend is not
     // today's.
     await expect(guard.check("gemini")).resolves.toMatchObject({ spent: 0 });
+  });
+});
+
+/**
+ * The read of `/system/status`: every cap in one statement, so the handle of
+ * the page, which ends each statement at its timeout, bounds the whole read
+ * once (docs/TECH_DEBT.md § E0-12H, п.5). The statements are counted at the
+ * driver: one call of `unsafe` is one statement sent.
+ */
+describe("countBudgetChecks against the spend table", () => {
+  it("answers every cap in one statement with the totals of check", async () => {
+    await db().$client`delete from api_usage_log`;
+    const usage = createUsageLogger(db(), { jobId: "status.read/1" });
+    await usage({
+      provider: "youtube_data",
+      operation: "videos.list",
+      units: 30,
+    });
+    await usage({
+      provider: "gemini",
+      operation: "generateContent",
+      costUsd: 0.25,
+    });
+    await usage({
+      provider: "elevenlabs",
+      operation: "tts.synthesize",
+      costUsd: 2,
+    });
+    await usage({
+      provider: "openai_tts",
+      operation: "tts.synthesize",
+      costUsd: 1.5,
+    });
+    const providers = [
+      "youtube_data",
+      "gemini",
+      "elevenlabs",
+      "youtube_analytics",
+    ] as const;
+    const statements = vi.spyOn(db().$client, "unsafe");
+
+    let many: Awaited<ReturnType<typeof countBudgetChecks>>;
+    try {
+      many = await countBudgetChecks(db(), LIMITS, providers);
+      expect(statements).toHaveBeenCalledTimes(1);
+    } finally {
+      statements.mockRestore();
+    }
+
+    const one = [];
+    for (const provider of providers) {
+      one.push(await guard.check(provider));
+    }
+    expect(many).toEqual(one);
+    expect(many.map((check) => check?.spent ?? null)).toEqual([
+      30,
+      0.25,
+      3.5,
+      null,
+    ]);
   });
 });

@@ -39,12 +39,33 @@ export function clientOptions(opts?: {
   };
 }
 
+/**
+ * The options `openDb` hands the driver: those of `clientOptions`, and the
+ * session parameters a bounded handle of the package sets on its own client.
+ */
+export type OpenDbOptions = ReturnType<typeof clientOptions> & {
+  connection?: { statement_timeout: number };
+  /** `false` skips the `pg_type` query postgres-js sends on every connect. */
+  fetch_types?: boolean;
+};
+
+/**
+ * The one place a drizzle handle over a postgres-js client is made: the
+ * service handle of `createDb` and the bounded handle of a probe
+ * (`createProbeDb`, `probe.ts`) both open through it, so a change to how a
+ * client is opened reaches both. Internal to the package - not in
+ * `index.ts`: a session parameter passed through `createDb` would put the
+ * limit of a probe on a migration or a worker job.
+ */
+export function openDb(url: string, options: OpenDbOptions) {
+  return drizzle(postgres(url, options), { schema });
+}
+
 export function createDb(
   url: string,
   opts?: { max?: number; connectTimeoutSec?: number },
 ) {
-  const client = postgres(url, clientOptions(opts));
-  return drizzle(client, { schema });
+  return openDb(url, clientOptions(opts));
 }
 
 /** Handle every repository and migration helper takes as its first argument. */
@@ -53,7 +74,17 @@ export type Db = ReturnType<typeof createDb>;
 /**
  * Closes the underlying postgres-js client. The driver exposes it as
  * `$client`, so callers do not have to carry the client next to the `Db`.
+ *
+ * Without `timeoutSec` the driver waits for every query in flight, however
+ * long that takes - what a worker draining its jobs and a migration holding
+ * its lock need. With it, a query still in flight after `timeoutSec` is
+ * destroyed: the bound a process stopping under a deadline of its own needs
+ * against a Postgres that went silent (docs/TECH_DEBT.md § E0-12H, п.6).
  */
-export async function closeDb(db: Db): Promise<void> {
-  await db.$client.end();
+export async function closeDb(
+  db: Db,
+  opts?: { timeoutSec?: number },
+): Promise<void> {
+  // An undefined `timeout` is the driver's own default: wait for every query.
+  await db.$client.end({ timeout: opts?.timeoutSec });
 }

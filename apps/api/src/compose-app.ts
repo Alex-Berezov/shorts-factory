@@ -1,6 +1,5 @@
 import { type BuildLabelName, type Env, buildLimits } from "@sf/config";
 import type { BuildInfo } from "@sf/contracts";
-import { type Db, closeDb, createDb } from "@sf/db";
 import {
   type ShutdownHandler,
   createRequestRedis,
@@ -16,6 +15,7 @@ import { createBudgetProbe } from "./lib/budget.js";
 import { DEPENDENCY_TIMEOUT_MS } from "./lib/dependency-timeout.js";
 import { createHealthProbes } from "./lib/health.js";
 import { createWorkerProbe } from "./lib/heartbeat.js";
+import { type ProbeDbs, openProbeDbs } from "./lib/probe-dbs.js";
 import { type QueueStats, createQueueStats } from "./lib/queue-stats.js";
 
 /**
@@ -23,7 +23,7 @@ import { type QueueStats, createQueueStats } from "./lib/queue-stats.js";
  * drains the requests in flight, and a request is bounded by
  * `DEPENDENCY_TIMEOUT_MS` per dependency call.
  */
-const SHUTDOWN_TIMEOUT_MS = 10_000;
+export const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 export interface ComposeOptions {
   /**
@@ -118,7 +118,7 @@ export function composeApp(env: Env, options: ComposeOptions): ComposedApp {
 
   // Assigned below; the stages read them when the stop runs, which may be
   // before any of them exists.
-  let db: Db | undefined;
+  let db: ProbeDbs | undefined;
   let redis: Redis | undefined;
   let queueStats: QueueStats | undefined;
   let app: AppInstance | undefined;
@@ -143,7 +143,7 @@ export function composeApp(env: Env, options: ComposeOptions): ComposedApp {
             stageOf(
               "db",
               () => db,
-              (opened) => closeDb(opened),
+              (opened) => opened.close(),
             ),
           ],
           [
@@ -176,8 +176,10 @@ export function composeApp(env: Env, options: ComposeOptions): ComposedApp {
       log.warn({ variable }, "build label ignored");
     }
 
-    const database = createDb(env.DATABASE_URL);
-    db = database;
+    // The api reads the database through its probes only, each on a handle
+    // of its own (`openProbeDbs`).
+    const databases = openProbeDbs(env.DATABASE_URL, log);
+    db = databases;
     // The client survives a Redis that is down on its own (the factory
     // subscribes to `error` itself); the logger makes it report the outage
     // at a level that fades and say when it is back.
@@ -198,7 +200,7 @@ export function composeApp(env: Env, options: ComposeOptions): ComposedApp {
 
     app = buildApp(
       {
-        health: createHealthProbes({ db: database, redis: client }),
+        health: createHealthProbes({ db: databases.health, redis: client }),
         buildInfo: buildInfoFrom(env),
         queues: stats,
         worker: createWorkerProbe({ redis: client }),
@@ -207,7 +209,10 @@ export function composeApp(env: Env, options: ComposeOptions): ComposedApp {
         // most, nothing kept. The limits are those of the `env` this was
         // given, not the `limits` of `@sf/config`: a test composes with an
         // `env` of its own, and the caps it reads have to be the ones in it.
-        budget: createBudgetProbe({ db: database, limits: buildLimits(env) }),
+        budget: createBudgetProbe({
+          db: databases.budget,
+          limits: buildLimits(env),
+        }),
       },
       { adminPassword: env.ADMIN_PASSWORD, logger: log },
     );

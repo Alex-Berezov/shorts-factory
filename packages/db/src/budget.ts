@@ -32,8 +32,9 @@ export interface BudgetLimits {
  * Where a computed total may be parked for a minute.
  *
  * A port, not a Redis client: `@sf/db` must not depend on `ioredis` (ADR-0002)
- * and the api builds a guard with no cache at all. The worker passes an
- * adapter over its own connection (`apps/worker/src/lib/budget.ts`).
+ * and the api reads the caps with no cache at all (`countBudgetChecks`). The
+ * worker passes an adapter over its own connection
+ * (`apps/worker/src/lib/budget.ts`).
  */
 export interface BudgetCache {
   get(key: string): Promise<string | null>;
@@ -78,14 +79,83 @@ export interface BudgetGuard {
 }
 
 /**
+ * The number of a cap. Exhaustive over `BudgetScopeKey`: a cap added to
+ * `@sf/core` without a number here fails to compile, instead of reading as
+ * "no limit".
+ */
+function capFor(limits: BudgetLimits, scope: BudgetScope): number {
+  switch (scope.key) {
+    case "youtube_data_units_day":
+      return limits.youtubeUnitsDailySoftCap;
+    case "gemini_usd_day":
+      return limits.geminiDailyBudgetUsd;
+    case "tts_usd_month":
+      return limits.ttsMonthlyBudgetUsd;
+  }
+}
+
+/**
+ * Where a total stands against its cap - the one place a counted spend
+ * becomes a `BudgetCheck`, for the guard and for `countBudgetChecks` alike.
+ */
+function checkOf(scope: BudgetScope, spent: number, cap: number): BudgetCheck {
+  return { scope, spent, cap, ...budgetState({ spent, cap }) };
+}
+
+/**
+ * Where the caps of several providers stand, in the order asked, counted in
+ * one statement (`apiUsageLogRepo.sumUsages`); `null` for a provider with no
+ * cap, as `check` answers.
+ *
+ * **Always from the database, and not a method of the guard**: it neither
+ * reads nor writes a cache - it is the read of a page that shows the spend as
+ * it is (`/system/status`), and one statement is what keeps that read under
+ * one statement timeout. A job asks its guard (`check`, `assert`), whose
+ * cache stands between it and the spend table; this function has no cache to
+ * stand anywhere, so it is not on the guard a job is handed.
+ *
+ * `now` ends every window at that moment; without it, at the clock of the
+ * database.
+ */
+export async function countBudgetChecks(
+  db: Db,
+  limits: BudgetLimits,
+  providers: readonly Provider[],
+  opts: { now?: Date } = {},
+): Promise<Array<BudgetCheck | null>> {
+  const scopes = providers.map((provider) => budgetScopeFor(provider));
+  const counted = scopes.filter(
+    (scope): scope is BudgetScope => scope !== null,
+  );
+  const totals = await apiUsageLogRepo.sumUsages(
+    db,
+    counted,
+    opts.now === undefined ? {} : { now: opts.now },
+  );
+  let next = 0;
+  return scopes.map((scope) => {
+    if (scope === null) {
+      return null;
+    }
+    const spent = totals[next];
+    next += 1;
+    if (spent === undefined) {
+      throw new Error(`${scope.key}: no total counted for the cap`);
+    }
+    return checkOf(scope, spent, capFor(limits, scope));
+  });
+}
+
+/**
  * The budget fuse: one place that knows which cap a provider spends against,
  * what has been spent and whether the next call may happen.
  *
  * It lives in `@sf/db` because both processes need the same answer - the
- * worker before a paid call, the api for `/system/status` - and the one thing
- * they must not do is each keep their own idea of which cap covers which
- * provider. Everything a database package should not know is a parameter:
- * `limits` instead of `@sf/config`, a `cache` port instead of `ioredis`.
+ * worker before a paid call, the api for `/system/status` (`countBudgetChecks`,
+ * over the same `capFor` and `checkOf`) - and the one thing they must not do
+ * is each keep their own idea of which cap covers which provider. Everything
+ * a database package should not know is a parameter: `limits` instead of
+ * `@sf/config`, a `cache` port instead of `ioredis`.
  *
  * **The cache is not a cache of the answer.** A total is reused only while the
  * state it was written in was below the warning share, and only if it is still
@@ -102,19 +172,6 @@ export interface BudgetGuard {
  */
 export function createBudgetGuard(options: BudgetGuardOptions): BudgetGuard {
   const { db, limits, cache, log } = options;
-
-  const capOf = (scope: BudgetScope): number => {
-    // Exhaustive over `BudgetScopeKey`: a cap added to `@sf/core` without a
-    // number here fails to compile, instead of reading as "no limit".
-    switch (scope.key) {
-      case "youtube_data_units_day":
-        return limits.youtubeUnitsDailySoftCap;
-      case "gemini_usd_day":
-        return limits.geminiDailyBudgetUsd;
-      case "tts_usd_month":
-        return limits.ttsMonthlyBudgetUsd;
-    }
-  };
 
   // The zone comes from the cap, never from this call: the YouTube day ends at
   // midnight Pacific and the money days end in UTC, and a guard holding one
@@ -155,12 +212,12 @@ export function createBudgetGuard(options: BudgetGuardOptions): BudgetGuard {
       return null;
     }
 
-    const state = budgetState({ spent: parsed.spent, cap });
-    if (state.warn) {
+    const check = checkOf(scope, parsed.spent, cap);
+    if (check.warn) {
       // The cap moved down under a total that used to be comfortable.
       return null;
     }
-    return { scope, spent: parsed.spent, cap, ...state };
+    return check;
   };
 
   const countSpend = async (
@@ -172,13 +229,13 @@ export function createBudgetGuard(options: BudgetGuardOptions): BudgetGuard {
       scope,
       periodOptions(scope),
     );
-    const state = budgetState({ spent, cap });
+    const check = checkOf(scope, spent, cap);
 
     if (cache !== undefined) {
       try {
         await cache.set(
           budgetCacheKey(scope.key),
-          JSON.stringify({ spent, warn: state.warn }),
+          JSON.stringify({ spent, warn: check.warn }),
           BUDGET_CACHE_TTL_SEC,
         );
       } catch (err) {
@@ -189,7 +246,7 @@ export function createBudgetGuard(options: BudgetGuardOptions): BudgetGuard {
       }
     }
 
-    return { scope, spent, cap, ...state };
+    return check;
   };
 
   return {
@@ -198,7 +255,7 @@ export function createBudgetGuard(options: BudgetGuardOptions): BudgetGuard {
       if (scope === null) {
         return null;
       }
-      return countOrCached(scope, capOf(scope));
+      return countOrCached(scope, capFor(limits, scope));
     },
 
     async assert(provider: Provider): Promise<BudgetCheck> {
@@ -213,7 +270,7 @@ export function createBudgetGuard(options: BudgetGuardOptions): BudgetGuard {
         });
       }
 
-      const check = await countOrCached(scope, capOf(scope));
+      const check = await countOrCached(scope, capFor(limits, scope));
       if (check.exceeded) {
         throw new BudgetExceededError(
           `${scope.key}: cap reached, refusing the call`,

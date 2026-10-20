@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./test-support/stack-guard": "./test-support/stack-guard.ts",
     "./test-support/fixture": "./test-support/fixture.ts",
+    "./test-support/relay": "./test-support/relay.ts",
     "./test-support/entry-check/postgres": "./test-support/entry-check/postgres.ts",
     "./test-support/entry-check/migrated-stack": "./test-support/entry-check/migrated-stack.ts"
   },

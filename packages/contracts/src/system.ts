@@ -35,13 +35,19 @@ export type HealthReport = z.infer<typeof HealthReportSchema>;
  *
  * A message from an external system is not a contract: it changes with the
  * driver, and it carries hosts, ports and occasionally credentials into a
- * response body and onto a dashboard. These three are what an operator acts
- * on differently - a deadline of ours, a socket that is not there, and
- * anything else, which means "read the log".
+ * response body and onto a dashboard. These are what an operator acts on
+ * differently - a deadline of ours, a socket that is not there, a server that
+ * turns this service away by its configuration (credentials, a database that
+ * is gone, a protocol it does not speak), a schema behind the code (the api
+ * came up before `migrate`), and anything else, which means "read the log".
+ * What to do about each is the reader's wording; the response carries the
+ * code only.
  */
 export const ProbeFailureCodeSchema = z.enum([
   "timeout",
   "unreachable",
+  "refused",
+  "not_migrated",
   "error",
 ]);
 

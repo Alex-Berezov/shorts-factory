@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clientOptions, createDb } from "../src/client.js";
+import { clientOptions, closeDb, createDb } from "../src/client.js";
 
 const URL = "postgres://sf:sf@localhost:5442/shorts_factory_test";
 
@@ -61,4 +61,31 @@ describe("createDb", () => {
       expect(driver.calls[0]).toEqual([URL, clientOptions(opts)]);
     },
   );
+});
+
+/**
+ * The bound of a close: a process that stops under a deadline of its own hands
+ * it to the driver, everything else waits for the queries in flight as before
+ * (docs/TECH_DEBT.md § E0-12H, п.6).
+ */
+describe("closeDb", () => {
+  it("hands the driver the bound of the wait for queries in flight", async () => {
+    const db = createDb(URL);
+    const end = vi.spyOn(db.$client, "end").mockResolvedValue(undefined);
+
+    await closeDb(db, { timeoutSec: 3 });
+
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(end).toHaveBeenCalledWith({ timeout: 3 });
+  });
+
+  it("leaves the wait to the driver without one", async () => {
+    const db = createDb(URL);
+    const end = vi.spyOn(db.$client, "end").mockResolvedValue(undefined);
+
+    await closeDb(db);
+
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(end.mock.calls[0]?.[0]?.timeout).toBeUndefined();
+  });
 });

@@ -144,6 +144,14 @@ describe("DependencyCheckSchema", () => {
         DependencyCheckSchema.safeParse({ status: "down", reason }).success,
       ).toBe(true);
     }
+    // A server that turns the api away by its configuration, and a schema
+    // behind the code: named on their own (docs/TECH_DEBT.md § E0-12H, п.3,
+    // п.4), so an operator is told what to check rather than to read the log.
+    for (const reason of ["refused", "not_migrated"]) {
+      expect(
+        DependencyCheckSchema.safeParse({ status: "down", reason }).success,
+      ).toBe(true);
+    }
     // A driver message would carry hosts, ports and occasionally credentials
     // into the body of this response.
     expect(

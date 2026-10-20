@@ -1,7 +1,11 @@
 import { HealthResponseSchema } from "@sf/contracts";
-import { closeDb, createDb, pingDb } from "@sf/db";
+import { type ProbeDb, closeDb, createDb, createProbeDb, pingDb } from "@sf/db";
 import { describe, expect, it, vi } from "vitest";
-import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
+import {
+  DEPENDENCY_TIMEOUT_MS,
+  PROBE_DB_BOUNDS,
+  PROBE_QUERY_LIMIT_MS,
+} from "../src/lib/dependency-timeout.js";
 import { createHealthProbes } from "../src/lib/health.js";
 import { AUTH_HEADER, buildTestApp } from "./helpers.js";
 
@@ -130,7 +134,13 @@ describe("createHealthProbes", () => {
       await vi.importActual<typeof import("@sf/db")>("@sf/db");
     vi.useFakeTimers();
     vi.mocked(pingDb).mockClear().mockImplementation(dbAnswer);
-    const db = createDb(CLOSED_DB_URL);
+    const client = createDb(CLOSED_DB_URL);
+    // A handle without a limit of its own: the cases that use it are about
+    // the sharing, and a limit would end the hanging probe under them.
+    const db: ProbeDb = {
+      run: (fn) => fn(client),
+      close: ({ timeoutSec }) => closeDb(client, { timeoutSec }),
+    };
     // A socket that is open but silent never settles the promise; without a
     // deadline the check - and with it /health - would never return.
     const ping = vi.fn(() => new Promise<string>(() => {}));
@@ -140,7 +150,7 @@ describe("createHealthProbes", () => {
       restore: async (): Promise<void> => {
         vi.useRealTimers();
         vi.mocked(pingDb).mockImplementation(realPingDb);
-        await closeDb(db);
+        await db.close({ timeoutSec: 0 });
       },
     };
   }
@@ -223,6 +233,41 @@ describe("createHealthProbes", () => {
       expect(pingDb).toHaveBeenCalledTimes(2);
       expect(ping).toHaveBeenCalledTimes(1);
     } finally {
+      await restore();
+    }
+  });
+  /**
+   * The bound of the sharing: a probe stuck on a half-open socket is given up
+   * on at the limit of its handle, and the next poll asks the database again
+   * over a new connection instead of joining it until the OS breaks the
+   * socket (docs/TECH_DEBT.md § E0-12H, п.5).
+   */
+  it("lets a stuck database probe go at its limit and asks again", async () => {
+    const { ping, restore } = await hangingDependencies();
+    const db = createProbeDb(CLOSED_DB_URL, PROBE_DB_BOUNDS);
+    const probes = createHealthProbes({ db, redis: { ping } });
+
+    try {
+      // Two polls that give up on it at their deadline, one after the other,
+      // join the one stuck probe while it is under the limit.
+      for (let poll = 0; poll < 2; poll += 1) {
+        const report = probes.check();
+        await vi.advanceTimersByTimeAsync(DEPENDENCY_TIMEOUT_MS);
+        await expect(report).resolves.toEqual({ db: "down", redis: "down" });
+      }
+      expect(PROBE_QUERY_LIMIT_MS).toBe(2 * DEPENDENCY_TIMEOUT_MS);
+      expect(pingDb).toHaveBeenCalledTimes(1);
+
+      // The limit has run out with the second deadline: the next poll asks
+      // over a fresh connection, not the stuck one.
+      void probes.check();
+      expect(pingDb).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(pingDb).mock.calls[1]?.[0]).not.toBe(
+        vi.mocked(pingDb).mock.calls[0]?.[0],
+      );
+    } finally {
+      await vi.advanceTimersByTimeAsync(PROBE_QUERY_LIMIT_MS);
+      await db.close({ timeoutSec: 0 });
       await restore();
     }
   });

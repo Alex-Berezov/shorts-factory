@@ -1,8 +1,12 @@
 import { ValidationError } from "@sf/core";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { apiUsageLogRepo } from "../src/repos/api-usage-log.js";
+import {
+  type UsagePeriodOptions,
+  type UsageQuerier,
+  apiUsageLogRepo,
+} from "../src/repos/api-usage-log.js";
 import * as schema from "../src/schema/index.js";
 import { apiUsageLog } from "../src/schema/system.js";
 import { openTestSql, useTestDb } from "../test-support/fixture.js";
@@ -32,6 +36,20 @@ const costThisMonth = {
   providers: [PROVIDER],
   measure: "usd",
   period: "month",
+} as const;
+
+/** The daily Gemini cap and the monthly cap of the speech vendors, as in `@sf/core`. */
+const GEMINI_DAY = {
+  providers: ["gemini"],
+  measure: "usd",
+  period: "day",
+  timeZone: "UTC",
+} as const;
+const TTS_MONTH = {
+  providers: ["elevenlabs", "openai_tts", "google_tts", "cartesia"],
+  measure: "usd",
+  period: "month",
+  timeZone: "UTC",
 } as const;
 
 const db = useTestDb({ beforeAll, afterAll });
@@ -380,6 +398,30 @@ describe("apiUsageLogRepo.sumUsage", () => {
     expect(stamped[0]?.count).toBe("1");
   });
 
+  /**
+   * `sumUsage` takes the zone from its options and from nowhere else: an
+   * aggregate that carries a zone of its own (a `BudgetScope` does) is read
+   * in the zone of the options, and in UTC when they name none.
+   */
+  it("reads the zone of the options, not the one the aggregate carries", async () => {
+    const inPacific = { ...unitsToday, timeZone: PACIFIC };
+    expect(
+      await apiUsageLogRepo.sumUsage(db(), inPacific, {
+        now: NOW,
+        timeZone: "UTC",
+      }),
+    ).toBe(18);
+    expect(await apiUsageLogRepo.sumUsage(db(), inPacific, { now: NOW })).toBe(
+      18,
+    );
+    expect(
+      await apiUsageLogRepo.sumUsage(db(), unitsToday, {
+        now: NOW,
+        timeZone: PACIFIC,
+      }),
+    ).toBe(8);
+  });
+
   it("fails on an unknown time zone instead of falling back to UTC", async () => {
     await expect(
       apiUsageLogRepo.sumUsage(db(), unitsToday, {
@@ -401,65 +443,207 @@ async function currentDatabaseTime(): Promise<Date> {
 }
 
 /**
+ * Several windows in one statement, each in its own zone: the totals are the
+ * ones the fixture gives window by window (the same windows are asked of
+ * `sumUsage` above, one at a time).
+ */
+describe("apiUsageLogRepo.sumUsages", () => {
+  it("answers each window in its own zone, in the order asked", async () => {
+    const totals = await apiUsageLogRepo.sumUsages(
+      db(),
+      [
+        { ...unitsToday, timeZone: PACIFIC },
+        { ...costToday, timeZone: "UTC" },
+        { ...costThisMonth, timeZone: PACIFIC },
+      ],
+      { now: NOW },
+    );
+
+    expect(totals[0]).toBe(8);
+    expect(totals[1]).toBeCloseTo(0.15, 5);
+    expect(totals[2]).toBeCloseTo(1.15, 5);
+  });
+
+  /**
+   * The windows of the caps as they are - the YouTube day in Pacific time,
+   * the Gemini day in UTC, the month of the speech vendors - next to a row of
+   * the YouTube Data API ten days back: inside the month, but of a provider
+   * the monthly cap does not cover, so no total takes it in. It reads the
+   * answer only: how each window walks the index is the explain case of
+   * `the window of sumUsage as an index key`.
+   */
+  it("answers the caps as they are with a stray row of another provider in none of them", async () => {
+    const [stray] = await db()
+      .insert(apiUsageLog)
+      .values({
+        provider: PROVIDER,
+        operation: "videos.list",
+        units: 500,
+        costUsd: "50.00000",
+        createdAt: new Date("2026-03-05T20:00:00Z"),
+      })
+      .returning({ id: apiUsageLog.id });
+
+    try {
+      const totals = await apiUsageLogRepo.sumUsages(
+        db(),
+        [{ ...unitsToday, timeZone: PACIFIC }, GEMINI_DAY, TTS_MONTH],
+        { now: NOW },
+      );
+
+      expect(totals).toEqual([8, 5, 0]);
+    } finally {
+      if (stray !== undefined) {
+        await db().delete(apiUsageLog).where(eq(apiUsageLog.id, stray.id));
+      }
+    }
+  });
+
+  /**
+   * Without `now` every window ends on the clock of the database: the rows of
+   * the fixture are all in March 2026, so the current day and month hold none
+   * of them.
+   */
+  /**
+   * `sumUsages` reads `now` of its options and nothing else: an options object
+   * of `sumUsage` (wider than the type of this parameter, and assignable to
+   * it) carries a zone that must not override the one of the aggregate.
+   */
+  it("keeps the zone of each aggregate against a wider options object", async () => {
+    const options: UsagePeriodOptions = { now: NOW, timeZone: "UTC" };
+
+    const totals = await apiUsageLogRepo.sumUsages(
+      db(),
+      [{ ...unitsToday, timeZone: PACIFIC }],
+      options,
+    );
+
+    expect(totals).toEqual([8]);
+  });
+
+  it("ends every window on the database clock without `now`", async () => {
+    await expect(
+      apiUsageLogRepo.sumUsages(db(), [
+        { ...unitsToday, timeZone: PACIFIC },
+        costThisMonth,
+      ]),
+    ).resolves.toEqual([0, 0]);
+  });
+
+  /**
+   * One aggregate over no providers refuses the whole read: answering the
+   * others and zero for it would report "nothing spent" for a cap.
+   */
+  it("refuses a batch with an aggregate over no providers", async () => {
+    await expect(
+      apiUsageLogRepo.sumUsages(
+        db(),
+        [unitsToday, { providers: [], measure: "usd", period: "day" }],
+        { now: NOW },
+      ),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("asks nothing for no windows", async () => {
+    await expect(apiUsageLogRepo.sumUsages(db(), [])).resolves.toEqual([]);
+  });
+});
+
+/**
+ * The plan of the statement `run` makes the repository send, captured
+ * through the logger of drizzle rather than written out again: a copy here
+ * could keep passing while the repository moved back to a volatile bound.
+ *
+ * The table of a test is small enough for a sequential scan to win on cost
+ * alone, so the choice is taken away: what is asserted is that the index
+ * *can* carry the bound, not which plan the planner prefers today.
+ *
+ * `explain ${...}` is a concatenation, and the one place it is allowed: the
+ * string is the statement drizzle just built and handed to the logger - it
+ * never leaves this process, and its parameters are still bound separately.
+ * Nothing user-supplied may be pasted into SQL this way anywhere else (SEC6).
+ */
+async function planOf(
+  run: (watched: UsageQuerier) => Promise<unknown>,
+): Promise<string[]> {
+  const client = openTestSql();
+  const logged: Array<{ query: string; params: unknown[] }> = [];
+  const watched = drizzle(client, {
+    schema,
+    logger: {
+      logQuery: (query: string, params: unknown[]): void => {
+        logged.push({ query, params });
+      },
+    },
+  });
+
+  try {
+    await run(watched);
+
+    const statement = logged.at(-1);
+    expect(statement).toBeDefined();
+    const params = (statement?.params ?? []).map((value) => String(value));
+    return await client.begin(async (tx) => {
+      await tx`set local enable_seqscan = off`;
+      const rows = await tx.unsafe<Array<Record<string, string>>>(
+        `explain ${statement?.query ?? ""}`,
+        params,
+      );
+      return rows.map((row) => Object.values(row).join(" "));
+    });
+  } finally {
+    await client.end();
+  }
+}
+
+/**
  * The plan of the aggregate, not only its answer.
  *
- * `sumUsage` sits in front of every paid call (`assert`) and runs three times
- * per `/system/status`, and the difference between an upper bound Postgres can
- * use as an index key and one it can only filter with is the difference
- * between reading today's rows and reading every row this provider ever wrote.
- * A volatile `clock_timestamp()` is exactly the second case, which is why the
- * bound is `statement_timestamp()` - and why that is asserted here rather than
- * described in a comment.
+ * `sumUsage` sits in front of every paid call (`assert`) and `sumUsages`
+ * reads every cap of `/system/status` in one statement, and the difference
+ * between an upper bound Postgres can use as an index key and one it can only
+ * filter with is the difference between reading today's rows and reading
+ * every row this provider ever wrote. A volatile `clock_timestamp()` is
+ * exactly the second case, which is why the bound is `statement_timestamp()`
+ * - and why that is asserted here rather than described in a comment.
  */
 describe("the window of sumUsage as an index key", () => {
   it("bounds created_at inside the index condition", async () => {
-    const client = openTestSql();
-    const logged: Array<{ query: string; params: unknown[] }> = [];
-    // The same statement the repository runs, captured through the logger of
-    // drizzle rather than written out again: a copy here could keep passing
-    // while the repository moved back to a volatile bound.
-    const watched = drizzle(client, {
-      schema,
-      logger: {
-        logQuery: (query: string, params: unknown[]): void => {
-          logged.push({ query, params });
-        },
-      },
-    });
+    const plan = await planOf((watched) =>
+      apiUsageLogRepo.sumUsage(watched, unitsToday),
+    );
 
-    try {
-      await apiUsageLogRepo.sumUsage(watched, unitsToday);
+    expect(plan.join("\n")).toContain("api_usage_provider_created_idx");
+    expect(
+      plan.filter((line) => line.includes("Index Cond")).join("\n"),
+    ).toContain("created_at");
+  });
 
-      const statement = logged.at(-1);
-      expect(statement).toBeDefined();
-      const params = (statement?.params ?? []).map((value) => String(value));
+  /**
+   * Each window walks the index by its own providers and its own bounds: a
+   * month of the speech vendors next to the days of the other two caps is
+   * not one scan of every provider asked from the start of the month.
+   */
+  it("walks the index once per window of sumUsages, each by its own bounds", async () => {
+    const windows = [
+      { ...unitsToday, timeZone: PACIFIC },
+      GEMINI_DAY,
+      TTS_MONTH,
+    ];
 
-      // The table of a test is small enough for a sequential scan to win on
-      // cost alone, so the choice is taken away: what is asserted is that the
-      // index *can* carry the bound, not which plan the planner prefers today.
-      //
-      // `explain ${...}` is a concatenation, and the one place it is allowed:
-      // the string is the statement drizzle just built and handed to the
-      // logger above - it never leaves this process, and its parameters are
-      // still bound separately below. Nothing user-supplied may be pasted into
-      // SQL this way anywhere else (SEC6).
-      const plan = await client.begin(async (tx) => {
-        await tx`set local enable_seqscan = off`;
-        const rows = await tx.unsafe<Array<Record<string, string>>>(
-          `explain ${statement?.query ?? ""}`,
-          params,
-        );
-        return rows.map((row) => Object.values(row).join(" ")).join("\n");
-      });
+    const plan = await planOf((watched) =>
+      apiUsageLogRepo.sumUsages(watched, windows),
+    );
 
-      expect(plan).toContain("api_usage_provider_created_idx");
-      const indexCond = plan
-        .split("\n")
-        .filter((line) => line.includes("Index Cond"))
-        .join("\n");
-      expect(indexCond).toContain("created_at");
-    } finally {
-      await client.end();
-    }
+    const bounded = plan.filter(
+      (line) =>
+        line.includes("Index Cond") &&
+        line.includes("created_at") &&
+        line.includes("provider"),
+    );
+    expect(bounded).toHaveLength(windows.length);
+    expect(
+      plan.filter((line) => line.includes("api_usage_provider_created_idx")),
+    ).toHaveLength(windows.length);
   });
 });

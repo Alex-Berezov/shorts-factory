@@ -1781,8 +1781,9 @@
       "E0-12B"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-17"
+    "status": "in_progress",
+    "added_at": "2026-10-17",
+    "started_at": "2026-10-20"
   },
   {
     "id": "E0-12I",

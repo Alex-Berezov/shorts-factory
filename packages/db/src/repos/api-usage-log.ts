@@ -4,7 +4,7 @@ import {
   type Provider,
   ValidationError,
 } from "@sf/core";
-import { and, gte, inArray, lte, sql } from "drizzle-orm";
+import { type SQL, and, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "../client.js";
 import { apiUsageLog } from "../schema/system.js";
 
@@ -60,7 +60,45 @@ export interface UsageAggregate {
   readonly period: BudgetPeriod;
 }
 
+/**
+ * An aggregate with the time zone of its window, for `sumUsages`: several
+ * windows in one statement can each end their day in a zone of their own
+ * (the YouTube day in Pacific time, the money days in UTC).
+ */
+export interface ZonedUsageAggregate extends UsageAggregate {
+  /** IANA name; UTC when left out. */
+  readonly timeZone?: string | undefined;
+}
+
 const DEFAULT_TIME_ZONE = "UTC";
+
+/** One total per aggregate asked, position for position. */
+type TotalsOf<A extends readonly ZonedUsageAggregate[]> = {
+  -readonly [K in keyof A]: number;
+};
+
+/**
+ * The totals of `sumUsages` under the type of its argument: a tuple of
+ * aggregates answers a tuple of the same length, so a caller destructuring
+ * one total gets a number rather than a possibly missing one. The mapping
+ * keeps every position, which is what makes the narrowing true.
+ *
+ * Kept: one cast in one place, the only way to give a runtime array the
+ * tuple type that `TotalsOf` promises.
+ */
+function totalsOf<A extends readonly ZonedUsageAggregate[]>(
+  totals: number[],
+): TotalsOf<A> {
+  return totals as TotalsOf<A>;
+}
+
+/**
+ * The row the totals of `sumUsages` are selected on: every total is a
+ * subquery of its own, and the outer `select` reads no table. drizzle asks
+ * for a source, Postgres needs none - a single-row derived table satisfies
+ * both.
+ */
+const ONE_ROW = sql`(select 1) as one_row`;
 
 /**
  * The column each measure is counted in, and with it the name used in the
@@ -88,8 +126,12 @@ const MEASURE_COLUMN = {
  * either way (`BudgetPeriod`), so there is nothing here for a caller to inject
  * into.
  */
-function periodWindow(unit: BudgetPeriod, opts: UsagePeriodOptions) {
-  const timeZone = opts.timeZone ?? DEFAULT_TIME_ZONE;
+function periodWindow(
+  unit: BudgetPeriod,
+  zone: string | undefined,
+  now: Date | undefined,
+) {
+  const timeZone = zone ?? DEFAULT_TIME_ZONE;
   // Without an explicit moment the window ends at the database clock, the same
   // one that stamps `created_at`. Taking it from the process instead would
   // drop the rows written in the interval a lagging clock has not reached yet
@@ -110,9 +152,9 @@ function periodWindow(unit: BudgetPeriod, opts: UsagePeriodOptions) {
   // `statement_timestamp()` is STABLE, which is what
   // `api_usage_provider_created_idx` needs to be walked by both columns.
   const instant =
-    opts.now === undefined
+    now === undefined
       ? sql`statement_timestamp()`
-      : sql`${opts.now.toISOString()}::timestamptz`;
+      : sql`${now.toISOString()}::timestamptz`;
   return {
     start: sql`(date_trunc(${unit}::text, ${instant} AT TIME ZONE ${timeZone}::text) AT TIME ZONE ${timeZone}::text)`,
     end: instant,
@@ -151,7 +193,7 @@ function toTotal(value: unknown, column: string): number {
 }
 
 /**
- * Thin access to `api_usage_log`: one insert and one total. No business rules
+ * Thin access to `api_usage_log`: one insert and the totals. No business rules
  * here - the budget guard (`src/budget.ts`) decides what an exhausted cap
  * means.
  *
@@ -181,46 +223,109 @@ export const apiUsageLogRepo = {
    * What the given providers spent in the current day or month of the given
    * time zone - units or dollars, whichever the aggregate asks for.
    *
-   * An empty `providers` is refused rather than answered with 0: the only ways
-   * to get here with one are a scope built by hand and a filter that removed
-   * every name, and both are callers asking the wrong question. Returning zero
-   * would answer "nothing spent" and let every call past the cap.
+   * One total of `sumUsages`, so there is one place the window and the sum
+   * are written. An empty `providers` is refused rather than answered with 0:
+   * the only ways to get here with one are a scope built by hand and a filter
+   * that removed every name, and both are callers asking the wrong question.
+   * Returning zero would answer "nothing spent" and let every call past the
+   * cap.
    */
   async sumUsage(
     db: UsageQuerier,
     aggregate: UsageAggregate,
     opts: UsagePeriodOptions = {},
   ): Promise<number> {
-    if (aggregate.providers.length === 0) {
-      throw new ValidationError(
-        "usage aggregate needs at least one provider to sum",
-        { measure: aggregate.measure, period: aggregate.period },
-      );
+    const [total] = await apiUsageLogRepo.sumUsages(
+      db,
+      // The zone of the options, never one the aggregate happens to carry
+      // (a `BudgetScope` does): this signature takes the zone from `opts`,
+      // and leaves the default to the window.
+      [{ ...aggregate, timeZone: opts.timeZone }],
+      opts.now === undefined ? {} : { now: opts.now },
+    );
+    return total;
+  },
+
+  /**
+   * Several totals in one statement: one scalar subquery per aggregate, each
+   * over its own providers, column and window, answered in the order asked.
+   * One statement rather than one per aggregate, so a caller under a
+   * statement timeout - the spend section of the api, whose handle ends every
+   * statement at its timeout - has one bound for the whole read instead of
+   * one per cap (docs/TECH_DEBT.md § E0-12H, п.5).
+   *
+   * A subquery per window, not one scan under the union of the windows: each
+   * walks `api_usage_provider_created_idx` by its own providers and its own
+   * start and end, so a monthly cap over the speech vendors reads its month
+   * of those vendors only, and the daily caps read their day - never the
+   * month of every provider asked.
+   *
+   * Each aggregate carries the time zone of its window (`BudgetScope`
+   * satisfies the type as it is); `now`, when given, ends every window at the
+   * same moment.
+   *
+   * No aggregates, no query: an empty answer. An aggregate over no providers
+   * is refused, as in `sumUsage`.
+   */
+  async sumUsages<const A extends readonly ZonedUsageAggregate[]>(
+    db: UsageQuerier,
+    aggregates: A,
+    opts: Pick<UsagePeriodOptions, "now"> = {},
+  ): Promise<TotalsOf<A>> {
+    if (aggregates.length === 0) {
+      return totalsOf<A>([]);
+    }
+    for (const aggregate of aggregates) {
+      if (aggregate.providers.length === 0) {
+        throw new ValidationError(
+          "usage aggregate needs at least one provider to sum",
+          { measure: aggregate.measure, period: aggregate.period },
+        );
+      }
     }
 
-    const column = MEASURE_COLUMN[aggregate.measure];
-    const window = periodWindow(aggregate.period, opts);
-
-    const rows = await db
-      .select({ total: sql<string | null>`sum(${column})` })
-      .from(apiUsageLog)
-      .where(
-        and(
-          inArray(apiUsageLog.provider, [...aggregate.providers]),
-          gte(apiUsageLog.createdAt, window.start),
-          // Closed at `now` as well: without it "today" for a past `now` means
-          // "that day and everything after it", turning a historical recount
-          // (E13 api_usage_daily) into a running total.
-          lte(apiUsageLog.createdAt, window.end),
-        ),
+    const parts = aggregates.map((aggregate) => {
+      const column = MEASURE_COLUMN[aggregate.measure];
+      // The zone is the aggregate's own, always; of `opts` only `now` is read
+      // (a caller may hand over a wider options object than the type names).
+      const window = periodWindow(
+        aggregate.period,
+        aggregate.timeZone,
+        opts.now,
       );
+      // Embedded as a query builder, drizzle wraps it in parentheses: a
+      // scalar subquery of one row and one column.
+      const total = sql<string | null>`${db
+        .select({ total: sql`sum(${column})` })
+        .from(apiUsageLog)
+        .where(
+          and(
+            inArray(apiUsageLog.provider, [...aggregate.providers]),
+            gte(apiUsageLog.createdAt, window.start),
+            // Closed at `now` as well: without it "today" for a past `now`
+            // means "that day and everything after it", turning a historical
+            // recount (E13 api_usage_daily) into a running total.
+            lte(apiUsageLog.createdAt, window.end),
+          ),
+        )}`;
+      return { column, total };
+    });
+    const totals: Record<string, SQL<string | null>> = {};
+    for (const [index, { total }] of parts.entries()) {
+      totals[`total${index}`] = total;
+    }
+
+    const rows = await db.select(totals).from(ONE_ROW);
 
     const row = rows[0];
     if (row === undefined) {
-      throw new Error(
-        `api_usage_log.${column.name}: aggregate returned no row`,
-      );
+      const columns = parts.map(({ column }) => column.name).join(", ");
+      throw new Error(`api_usage_log.${columns}: aggregate returned no row`);
     }
-    return toTotal(row.total, column.name);
+    return totalsOf<A>(
+      parts.map(({ column }, index) =>
+        toTotal(row[`total${index}`], column.name),
+      ),
+    );
   },
 };

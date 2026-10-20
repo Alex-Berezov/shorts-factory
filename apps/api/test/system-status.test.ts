@@ -8,19 +8,28 @@ import {
 } from "@sf/contracts";
 import {
   PROVIDERS,
-  type Provider,
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_SEC,
   budgetScopeFor,
 } from "@sf/core";
-import { closeDb, createBudgetGuard, createDb } from "@sf/db";
+import {
+  type BudgetCheck,
+  ProbeClosedError,
+  ProbeLimitError,
+  countBudgetChecks,
+  createProbeDb,
+} from "@sf/db";
 import { DeadlineError, createRequestRedis } from "@sf/runtime";
 import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import type { Redis } from "ioredis";
 import { describe, expect, it, vi } from "vitest";
 import type { QueuesSnapshot } from "../src/deps.js";
 import { CAP_REPRESENTATIVES, createBudgetProbe } from "../src/lib/budget.js";
-import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
+import {
+  DEPENDENCY_TIMEOUT_MS,
+  PROBE_DB_BOUNDS,
+  PROBE_QUERY_LIMIT_MS,
+} from "../src/lib/dependency-timeout.js";
 import { createWorkerProbe } from "../src/lib/heartbeat.js";
 import {
   QueueCountersError,
@@ -42,11 +51,11 @@ import {
   parseErrorBody,
 } from "./helpers.js";
 
-// The real guard, replaceable: a case below holds the reads of the budget
-// section to count how many a burst of requests sends to the database.
+// The real read of the caps, replaceable: a case below holds the reads of the
+// budget section to count how many a burst of requests sends to the database.
 vi.mock("@sf/db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@sf/db")>();
-  return { ...actual, createBudgetGuard: vi.fn(actual.createBudgetGuard) };
+  return { ...actual, countBudgetChecks: vi.fn(actual.countBudgetChecks) };
 });
 
 /** The page as a client gets it, parsed against the contract, not cast. */
@@ -200,6 +209,29 @@ describe("GET /system/status", () => {
 
     expect(JSON.stringify(body)).not.toContain("password");
     expect(body.checks.db).toEqual({ status: "down", reason: "error" });
+  });
+
+  /**
+   * The api came up before `migrate`: the budget section has no table to read
+   * and says so, while every section that does not need the schema is still
+   * on the page (docs/TECH_DEBT.md § E0-12H, п.4).
+   */
+  it("answers 200 with a null budget when the schema is behind the code", async () => {
+    const { statusCode, body } = await status({
+      budget: {
+        collect: async (): Promise<BudgetStatus[]> => {
+          throw postgresError("42P01");
+        },
+      },
+    });
+
+    expect(statusCode).toBe(200);
+    expect(body.budget).toBeNull();
+    expect(body.checks.db).toEqual({ status: "down", reason: "not_migrated" });
+    expect(body.queues).toEqual(EMPTY_QUEUES.queues);
+    expect(body.dlq).toEqual({ size: 0 });
+    expect(body.worker).toEqual(LIVE_WORKER);
+    expect(body.checks.redis).toEqual({ status: "up", reason: null });
   });
 
   /**
@@ -373,12 +405,65 @@ describe("dependencyFailureCode", () => {
   );
 
   /**
-   * A missing table, a missing grant, a missing schema, bad data, a broken
-   * constraint: the database answered correctly about a query of ours that is
-   * wrong. Reported as `db: down` it would send the operator to restart a
+   * A server that is there and turns the api away by its configuration - a
+   * password or a role it no longer accepts, a database that is gone, a
+   * protocol the driver does not speak - is one named reason, not the
+   * anonymous `error` (docs/TECH_DEBT.md § E0-12H, п.2, п.3).
+   */
+  it.each(["28P01", "28000", "57P04", "3D000", "08P01"])(
+    "calls a Postgres that turns the api away by its configuration refused (%s)",
+    (code) => {
+      expect(dependencyFailureCode(postgresError(code))).toBe("refused");
+    },
+  );
+
+  /**
+   * `08P01` is named ahead of its class, and only it: the rest of the class
+   * `08` is still a server that is not there.
+   */
+  it("keeps the rest of the connection exceptions unreachable next to 08P01", () => {
+    expect(dependencyFailureCode(postgresError("08P01"))).toBe("refused");
+    expect(dependencyFailureCode(postgresError("08006"))).toBe("unreachable");
+    expect(dependencyFailureCode(postgresError("08001"))).toBe("unreachable");
+  });
+
+  /**
+   * A missing table or column is a schema behind the code - the api came up
+   * before `migrate` - and the section fails on its own rather than taking
+   * the page down (docs/TECH_DEBT.md § E0-12H, п.4).
+   */
+  it.each(["42P01", "42703"])(
+    "calls a schema behind the code not migrated (%s)",
+    (code) => {
+      expect(dependencyFailureCode(postgresError(code))).toBe("not_migrated");
+    },
+  );
+
+  /**
+   * A missing grant, a missing type or function, a missing schema, bad data,
+   * a broken constraint: the database answered correctly about a query of
+   * ours that is wrong. A missing table or column is not among them - that
+   * is a schema behind the code (`not_migrated`, above). Reported as `db: down` it would send the operator to restart a
    * healthy Postgres (decision of 13.09.2026, Р4 E0-11B).
    */
-  it.each(["42P01", "42501", "3F000", "22P02", "23505"])(
+  it.each([
+    "42501",
+    "42704",
+    "42883",
+    "3F000",
+    "22P02",
+    "23505",
+    // The classes of docs/TECH_DEBT.md § E0-12H, п.1, one state each.
+    "0A000",
+    "25001",
+    "26000",
+    "2BP01",
+    "34000",
+    "2F005",
+    "39P01",
+    "3B001",
+    "44000",
+  ])(
     "leaves a Postgres refusal caused by our own query to the caller (%s)",
     (code) => {
       expect(dependencyFailureCode(postgresError(code))).toBe(undefined);
@@ -388,6 +473,73 @@ describe("dependencyFailureCode", () => {
   it("calls any other Postgres refusal an error", () => {
     // Too many connections: the server is there and cannot take this one.
     expect(dependencyFailureCode(postgresError("53300"))).toBe("error");
+  });
+
+  /**
+   * Three states of the class `25` are the server, not our statement: a
+   * session on a standby or a read-only server after a failover, a session
+   * the server ended by its own idle setting, and a transaction it ended by
+   * its `transaction_timeout` (Postgres 17). A 500 there would send
+   * the operator after a bug while the database is what changed; the rest of
+   * the class stays a defect of ours.
+   */
+  it.each(["25006", "25P03", "25P04"])(
+    "calls a transaction state the server imposed an error (%s)",
+    (code) => {
+      expect(dependencyFailureCode(postgresError(code))).toBe("error");
+    },
+  );
+
+  it("keeps the rest of the class 25 a defect of ours next to them", () => {
+    expect(dependencyFailureCode(postgresError("25001"))).toBe(undefined);
+    expect(dependencyFailureCode(postgresError("25P02"))).toBe(undefined);
+  });
+
+  /**
+   * A read that came after the stop closed its handle lost a race with the
+   * stop: not Postgres going away, and not a defect to answer 500 for.
+   */
+  it("calls a read refused by a closed handle an error", () => {
+    expect(dependencyFailureCode(new ProbeClosedError())).toBe("error");
+  });
+
+  /**
+   * A call that waited on the connection the limit destroyed is refused by
+   * the limit as well - nothing came back in time - not by the
+   * `CONNECTION_DESTROYED` of the driver, which reads as a Postgres that went
+   * away (docs/TECH_DEBT.md § E0-12H, п.5).
+   */
+  it("calls a call that waited behind a stuck one on a destroyed client a timeout", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const db = createProbeDb(
+      "postgres://sf:sf@127.0.0.1:1/nowhere",
+      PROBE_DB_BOUNDS,
+    );
+    try {
+      const stuck = db.run(() => new Promise<never>(() => {}));
+      stuck.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(DEPENDENCY_TIMEOUT_MS);
+      let failure: unknown = "pending";
+      db.run(() => new Promise<never>(() => {})).then(
+        () => {
+          failure = "answered";
+        },
+        (err: unknown) => {
+          failure = err;
+        },
+      );
+      // The limit of the stuck call, not of the one behind it.
+      await vi.advanceTimersByTimeAsync(
+        PROBE_QUERY_LIMIT_MS - DEPENDENCY_TIMEOUT_MS,
+      );
+
+      expect(failure).toBeInstanceOf(ProbeLimitError);
+      expect(dependencyFailureCode(failure)).toBe("timeout");
+    } finally {
+      await vi.advanceTimersByTimeAsync(PROBE_QUERY_LIMIT_MS);
+      vi.useRealTimers();
+      await db.close({ timeoutSec: 0 });
+    }
   });
 
   /**
@@ -407,11 +559,11 @@ describe("dependencyFailureCode", () => {
       collect(
         "budget",
         async () => {
-          throw postgresError("42P01");
+          throw postgresError("42501");
         },
         log,
       ),
-    ).rejects.toMatchObject({ name: "PostgresError", code: "42P01" });
+    ).rejects.toMatchObject({ name: "PostgresError", code: "42501" });
   });
 
   /**
@@ -721,7 +873,13 @@ describe("dependencyCheck", () => {
   });
 
   it("reports the reason of a single failed section", () => {
-    for (const reason of ["timeout", "unreachable", "error"] as const) {
+    for (const reason of [
+      "timeout",
+      "unreachable",
+      "refused",
+      "not_migrated",
+      "error",
+    ] as const) {
       expect(dependencyCheck([ok, failed(reason)])).toEqual({
         status: "down",
         reason,
@@ -740,11 +898,53 @@ describe("dependencyCheck", () => {
     );
   });
 
-  it("prefers an answer of the server over a timeout", () => {
+  it("prefers an answer of the server over a timeout whatever the order", () => {
     expect(dependencyCheck([failed("timeout"), failed("error")])).toEqual({
       status: "down",
       reason: "error",
     });
+    expect(dependencyCheck([failed("error"), failed("timeout")])).toEqual({
+      status: "down",
+      reason: "error",
+    });
+  });
+
+  it("prefers a schema behind the code over a refusal whatever the order", () => {
+    expect(
+      dependencyCheck([failed("refused"), failed("not_migrated")]),
+    ).toEqual({ status: "down", reason: "not_migrated" });
+    expect(
+      dependencyCheck([failed("not_migrated"), failed("refused")]),
+    ).toEqual({ status: "down", reason: "not_migrated" });
+  });
+
+  it("prefers a refusal by configuration over an error whatever the order", () => {
+    expect(dependencyCheck([failed("error"), failed("refused")])).toEqual({
+      status: "down",
+      reason: "refused",
+    });
+    expect(dependencyCheck([failed("refused"), failed("error")])).toEqual({
+      status: "down",
+      reason: "refused",
+    });
+  });
+
+  it("prefers a refusal by configuration over unreachable whatever the order", () => {
+    expect(dependencyCheck([failed("unreachable"), failed("refused")])).toEqual(
+      { status: "down", reason: "refused" },
+    );
+    expect(dependencyCheck([failed("refused"), failed("unreachable")])).toEqual(
+      { status: "down", reason: "refused" },
+    );
+  });
+
+  it("prefers a schema behind the code over unreachable whatever the order", () => {
+    expect(
+      dependencyCheck([failed("unreachable"), failed("not_migrated")]),
+    ).toEqual({ status: "down", reason: "not_migrated" });
+    expect(
+      dependencyCheck([failed("not_migrated"), failed("unreachable")]),
+    ).toEqual({ status: "down", reason: "not_migrated" });
   });
 
   it("prefers unreachable over an answer of the server whatever the order", () => {
@@ -861,52 +1061,201 @@ describe("the budget section", () => {
   });
 
   /**
-   * A silent Postgres holds the reads of the section: the deadline of the
-   * page gives up on them without ending them, and a query has no timeout of
-   * its own. Requests that arrive meanwhile join the read in flight rather
-   * than take three more connections of the pool each.
+   * Reads of the caps that wait for the case to answer them, with what the
+   * case gives (nothing counted by default).
    */
-  it("shares one read between the requests that arrive while it is in flight", async () => {
+  function heldCount() {
     const answers: Array<() => void> = [];
-    const check = vi.fn(
-      (_provider: Provider) =>
-        new Promise<null>((resolve) => {
-          answers.push(() => resolve(null));
+    const count = vi.mocked(countBudgetChecks).mockImplementation(
+      () =>
+        new Promise<Array<BudgetCheck | null>>((resolve) => {
+          answers.push(() => resolve([]));
         }),
     );
-    vi.mocked(createBudgetGuard).mockReturnValueOnce({
-      check,
-      assert: async () => {
-        throw new Error("the page never asks before spending");
-      },
-    });
-    const db = createDb("postgres://sf:sf@127.0.0.1:1/nowhere");
-    const probe = createBudgetProbe({
-      db,
-      limits: {
-        youtubeUnitsDailySoftCap: 1,
-        geminiDailyBudgetUsd: 1,
-        ttsMonthlyBudgetUsd: 1,
-      },
-    });
     const answerAll = (): void => {
       for (const answer of answers.splice(0)) {
         answer();
       }
     };
+    return { count, answerAll };
+  }
+
+  /** One turn of the event loop, which the fake clock of a case leaves alone. */
+  function turn(): Promise<void> {
+    return new Promise((resolve) => {
+      setImmediate(resolve);
+    });
+  }
+
+  /** The real read back behind the spy, with the calls it saw forgotten. */
+  async function restoreCount(): Promise<void> {
+    const actual = await vi.importActual<typeof import("@sf/db")>("@sf/db");
+    vi.mocked(countBudgetChecks)
+      .mockClear()
+      .mockImplementation(actual.countBudgetChecks);
+  }
+
+  const LIMITS = {
+    youtubeUnitsDailySoftCap: 1,
+    geminiDailyBudgetUsd: 1,
+    ttsMonthlyBudgetUsd: 1,
+  };
+
+  /**
+   * A silent Postgres holds the reads of the section: the deadline of the
+   * page gives up on them without ending them. Requests that arrive meanwhile
+   * join the read in flight rather than queue one more read each.
+   */
+  it("shares one read between the requests that arrive while it is in flight", async () => {
+    const { count, answerAll } = heldCount();
+    const db = createProbeDb(
+      "postgres://sf:sf@127.0.0.1:1/nowhere",
+      PROBE_DB_BOUNDS,
+    );
+    const probe = createBudgetProbe({ db, limits: LIMITS });
 
     try {
       const requests = [probe.collect(), probe.collect(), probe.collect()];
-      expect(check).toHaveBeenCalledTimes(CAP_REPRESENTATIVES.length);
+      await turn();
+      expect(count).toHaveBeenCalledTimes(1);
       answerAll();
       await expect(Promise.all(requests)).resolves.toEqual([[], [], []]);
 
       const next = probe.collect();
-      expect(check).toHaveBeenCalledTimes(CAP_REPRESENTATIVES.length * 2);
+      await turn();
       answerAll();
       await expect(next).resolves.toEqual([]);
+      expect(count).toHaveBeenCalledTimes(2);
     } finally {
-      await closeDb(db);
+      await restoreCount();
+      await db.close({ timeoutSec: 0 });
+    }
+  });
+
+  /**
+   * A read is one call of the handle and one statement of the count: the
+   * handle ends a statement at its timeout and a call at its limit, and a
+   * read of three statements would outlive both on a slow server
+   * (docs/TECH_DEBT.md § E0-12H, п.5).
+   */
+  it("reads every cap in one call of its handle and one count", async () => {
+    const { count, answerAll } = heldCount();
+    const db = createProbeDb(
+      "postgres://sf:sf@127.0.0.1:1/nowhere",
+      PROBE_DB_BOUNDS,
+    );
+    const run = vi.spyOn(db, "run");
+    const probe = createBudgetProbe({ db, limits: LIMITS });
+
+    try {
+      const read = probe.collect();
+      await turn();
+      answerAll();
+      await expect(read).resolves.toEqual([]);
+
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(count).toHaveBeenCalledTimes(1);
+      expect(count).toHaveBeenCalledWith(
+        expect.anything(),
+        LIMITS,
+        CAP_REPRESENTATIVES,
+      );
+    } finally {
+      await restoreCount();
+      await db.close({ timeoutSec: 0 });
+    }
+  });
+
+  /**
+   * The bound of the sharing: a read stuck on a half-open socket ends at the
+   * limit of its handle - a `timeout` to whoever still waits on it - and the
+   * next open of the page reads again over a new connection
+   * (docs/TECH_DEBT.md § E0-12H, п.5).
+   */
+  it("lets a stuck read go at its limit and reads again", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { count } = heldCount();
+    const db = createProbeDb(
+      "postgres://sf:sf@127.0.0.1:1/nowhere",
+      PROBE_DB_BOUNDS,
+    );
+    const probe = createBudgetProbe({ db, limits: LIMITS });
+
+    try {
+      const stuck = probe.collect();
+      const outcome = stuck.then(
+        () => "answered",
+        (err: unknown) => err,
+      );
+      await vi.advanceTimersByTimeAsync(PROBE_QUERY_LIMIT_MS - 1);
+      void probe.collect();
+      // The stuck read, and nothing after it.
+      expect(count).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      const failure = await outcome;
+      expect(failure).toBeInstanceOf(ProbeLimitError);
+      expect(dependencyFailureCode(failure)).toBe("timeout");
+
+      const next = probe.collect();
+      next.catch(() => undefined);
+      expect(count).toHaveBeenCalledTimes(2);
+      // A read over the new client, not the one the limit took down.
+      const clients = count.mock.calls.map(([db]) => db);
+      expect(clients).toHaveLength(2);
+      expect(clients[1]).not.toBe(clients[0]);
+      await vi.advanceTimersByTimeAsync(PROBE_QUERY_LIMIT_MS);
+    } finally {
+      vi.useRealTimers();
+      await restoreCount();
+      await db.close({ timeoutSec: 0 });
+    }
+  });
+
+  /**
+   * What the page shows of a cap is the check as it was counted: every field
+   * of the scope and of the state, and nothing for a provider with no cap.
+   */
+  it("shows each counted cap with its scope and its state", async () => {
+    const youtube = budgetScopeFor("youtube_data");
+    if (youtube === null) {
+      throw new Error("youtube_data has a cap");
+    }
+    vi.mocked(countBudgetChecks).mockResolvedValueOnce([
+      {
+        scope: youtube,
+        spent: 6_000,
+        cap: 8_000,
+        ratio: 0.75,
+        warn: false,
+        exceeded: false,
+      },
+      null,
+    ]);
+    const db = createProbeDb(
+      "postgres://sf:sf@127.0.0.1:1/nowhere",
+      PROBE_DB_BOUNDS,
+    );
+    const probe = createBudgetProbe({ db, limits: LIMITS });
+
+    try {
+      const expected: BudgetStatus[] = [
+        {
+          key: "youtube_data_units_day",
+          measure: "units",
+          period: "day",
+          timeZone: "America/Los_Angeles",
+          spent: 6_000,
+          cap: 8_000,
+          ratio: 0.75,
+          warn: false,
+          exceeded: false,
+        },
+      ];
+      await expect(probe.collect()).resolves.toEqual(expected);
+    } finally {
+      await restoreCount();
+      await db.close({ timeoutSec: 0 });
     }
   });
 });

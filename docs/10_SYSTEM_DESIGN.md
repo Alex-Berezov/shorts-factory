@@ -172,8 +172,8 @@ shorts-factory/
 │   └── worker/     # BullMQ workers: все очереди из §4
 ├── packages/
 │   ├── core/       # доменные типы, Zod-схемы (ContentDNA, Idea, Script...), чистая бизнес-логика скоринга
-│   ├── db/         # Drizzle-схема, миграции, репозитории, учёт расхода: `createUsageLogger`, `createBudgetGuard` (E0-09)
-│   │   └── test-support/ # общая тестовая обвязка int-наборов: страж стека, фикстура базы (`@sf/db/test-support/*`, только из тестов; ADR-0011)
+│   ├── db/         # Drizzle-схема, миграции, репозитории, учёт расхода: `createUsageLogger`, `createBudgetGuard` (E0-09); дескриптор проб с пределом `createProbeDb` (E0-12H, ADR-0002)
+│   │   └── test-support/ # общая тестовая обвязка int-наборов: страж стека, фикстура базы, реле с `freeze()` для полуоткрытого сокета `test-support/relay` (`@sf/db/test-support/*`, только из тестов; ADR-0011)
 │   ├── config/     # типизированный .env (Zod), константы квот/бюджета
 │   ├── runtime/    # каркас процессов api и worker: опции логгера (белый список `serializers.err`), три Redis-клиента, фабрика `Queue`, остановка, дедлайн (E0-12B, ADR-0012); `test-support/` - рекордер pino для тестов
 │   ├── contracts/  # Zod-схемы запросов/ответов API, общие для api и web (E0-07)

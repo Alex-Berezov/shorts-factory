@@ -15,16 +15,25 @@ export {
   type BudgetGuardOptions,
   type BudgetLimits,
   type BudgetLogger,
+  countBudgetChecks,
   createBudgetGuard,
 } from "./budget.js";
 export { closeDb, createDb, type Db } from "./client.js";
 export { pingDb } from "./health.js";
+export {
+  createProbeDb,
+  ProbeClosedError,
+  type ProbeDb,
+  type ProbeDbOptions,
+  ProbeLimitError,
+} from "./probe.js";
 export {
   type ApiUsageInsert,
   apiUsageLogRepo,
   type UsageAggregate,
   type UsagePeriodOptions,
   type UsageQuerier,
+  type ZonedUsageAggregate,
 } from "./repos/api-usage-log.js";
 export {
   createUsageLogger,

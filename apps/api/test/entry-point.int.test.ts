@@ -4,14 +4,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { env } from "@sf/config";
 import { SystemStatusResponseSchema } from "@sf/contracts";
+import { openRelay } from "@sf/db/test-support/relay";
 import {
   TEST_REDIS_DATABASE_OF,
   suiteRedisUrl,
 } from "@sf/db/test-support/stack-guard";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { SHUTDOWN_TIMEOUT_MS, composeApp } from "../src/compose-app.js";
 import { devCommandParts } from "./dev-command.js";
 import { openTestRedis, whenReady } from "./helpers.int.js";
-import { basicAuthHeader } from "./helpers.js";
+import { basicAuthHeader, recordingServiceLogger } from "./helpers.js";
 
 /**
  * The entry point itself, against the stack of `infra/docker-compose.yml`:
@@ -50,7 +52,7 @@ async function freePort(): Promise<number> {
 
 /** Asks the page until the process answers it or the deadline passes. */
 async function statusOf(port: number): Promise<unknown> {
-  const deadline = Date.now() + START_DEADLINE_MS;
+  const deadline = performance.now() + START_DEADLINE_MS;
   for (;;) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/system/status`, {
@@ -59,7 +61,7 @@ async function statusOf(port: number): Promise<unknown> {
       expect(res.status).toBe(200);
       return await res.json();
     } catch (error) {
-      if (Date.now() > deadline) {
+      if (performance.now() > deadline) {
         throw error;
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -303,5 +305,98 @@ describe("api entry point on a port that is taken", () => {
       }
     },
     EXIT_DEADLINE_MS + 5_000,
+  );
+});
+
+describe("api stop under a silent Postgres", () => {
+  /**
+   * The stop of the api with a db probe stuck on a half-open socket: the
+   * `db` stage closes every handle with a bound of its own, so a clean
+   * SIGTERM ends with 0 before the deadline of the stop instead of 1 by it
+   * (docs/TECH_DEBT.md § E0-12H, п.6). Once per handle - the ping of
+   * `/health` and the read of the `budget` section - since either can be the
+   * one in flight when the signal comes.
+   *
+   * Here rather than next to `compose-app.test.ts`: the case needs the live
+   * stack - a relay in front of the test Postgres and the Redis of the
+   * suite - which only the integration run is behind the entry check for,
+   * and this file is the one about how the process ends. In process rather
+   * than forked: the stop is what is under test, the signal is the argument
+   * of the handler `composeApp` subscribes, and a fork on Windows cannot be
+   * sent a signal its handlers would see. The composition is the entry
+   * point's own - `composeApp` with the parsed config of the run, the
+   * database behind a relay.
+   */
+  it.each([
+    { probe: "health", url: "/health", stuckStatus: 503 },
+    { probe: "budget", url: "/system/status", stuckStatus: 200 },
+  ])(
+    "exits with 0 on SIGTERM while the $probe probe hangs, before the deadline of the stop",
+    async ({ url, stuckStatus }) => {
+      const relay = await openRelay();
+      const codes: number[] = [];
+      const runEnv = {
+        ...env,
+        DATABASE_URL: relay.url,
+        REDIS_URL: suiteRedisUrl(env.REDIS_URL, "api"),
+      };
+      const { log, entries } = recordingServiceLogger(runEnv);
+      const { app, shutdown } = composeApp(runEnv, {
+        log,
+        rejectedBuildLabels: [],
+        subscribe: () => {},
+        exit: (code) => codes.push(code),
+      });
+      const ask = () =>
+        app.inject({
+          method: "GET",
+          url,
+          headers: { authorization: basicAuthHeader(env.ADMIN_PASSWORD) },
+        });
+      try {
+        await app.ready();
+        // A live connection of the handle under test first: the freeze has
+        // to catch an open socket.
+        await vi.waitFor(
+          async () => {
+            const res = await ask();
+            expect(res.statusCode).toBe(200);
+            if (url === "/system/status") {
+              expect(
+                SystemStatusResponseSchema.parse(JSON.parse(res.payload)).checks
+                  .db,
+              ).toEqual({ status: "up", reason: null });
+            }
+          },
+          { timeout: START_DEADLINE_MS, interval: 100 },
+        );
+
+        relay.freeze();
+        const polled = ask();
+        const stoppedAt = performance.now();
+        const stop = shutdown("SIGTERM");
+
+        await vi.waitFor(
+          () => {
+            expect(codes).toHaveLength(1);
+          },
+          { timeout: SHUTDOWN_TIMEOUT_MS + 5_000, interval: 50 },
+        );
+        const took = performance.now() - stoppedAt;
+        await stop;
+        expect((await polled).statusCode).toBe(stuckStatus);
+
+        expect(codes).toEqual([0]);
+        expect(took).toBeLessThan(SHUTDOWN_TIMEOUT_MS);
+        expect(
+          entries().find((entry) => entry.msg === "shutdown complete"),
+        ).toMatchObject({ signal: "SIGTERM" });
+      } finally {
+        relay.thaw();
+        await shutdown("SIGTERM");
+        await relay.cut();
+      }
+    },
+    SHUTDOWN_TIMEOUT_MS + 10_000,
   );
 });

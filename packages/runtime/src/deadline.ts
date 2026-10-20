@@ -12,7 +12,11 @@
  * its driver gives up on it. No signal is handed to the work on purpose - the
  * calls it guards are often shared between callers (`singleFlight` in the
  * api), and one caller cancelling on its own deadline would cancel the call
- * for every caller that joined it.
+ * for every caller that joined it. The bound on how long such work lives is
+ * the driver's: a Redis command ends by the `commandTimeout` of its client,
+ * a database query of a probe by the limit of its handle (`createProbeDb` of
+ * `@sf/db`, which destroys the connection the query hangs on) and, once that
+ * handle is closed, by the bound of its close (`closeDb({ timeoutSec })`).
  *
  * Whether the timer holds the process open is the caller's choice, and a
  * required one (`unref`): a deadline that bounds a request or a shutdown has

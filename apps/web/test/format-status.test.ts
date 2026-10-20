@@ -185,6 +185,8 @@ describe("formatFailureReason", () => {
     expect(lines).toEqual([
       "timed out",
       "unreachable",
+      "refused, check the database credentials and dsn in the api log",
+      "not migrated, run the migrations",
       "error, see the api log",
     ]);
     expect(new Set(lines).size).toBe(ProbeFailureCodeSchema.options.length);

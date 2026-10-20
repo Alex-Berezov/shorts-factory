@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { limits } from "@sf/config";
 import { SystemStatusResponseSchema } from "@sf/contracts";
 import {
@@ -5,23 +6,35 @@ import {
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_SEC,
 } from "@sf/core";
-import { closeDb, createUsageLogger } from "@sf/db";
+import { type Db, type ProbeDb, closeDb, createUsageLogger } from "@sf/db";
+import { openRelay } from "@sf/db/test-support/relay";
 import { TEST_REDIS_DATABASE_OF } from "@sf/db/test-support/stack-guard";
 import { closeRedis } from "@sf/runtime";
-import { silentLogger } from "@sf/runtime/test-support/recording-logger";
+import {
+  recordingLogger,
+  silentLogger,
+} from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type AppInstance, buildApp } from "../src/app.js";
 import { createBudgetProbe } from "../src/lib/budget.js";
+import { PROBE_QUERY_LIMIT_MS } from "../src/lib/dependency-timeout.js";
 import { createHealthProbes } from "../src/lib/health.js";
 import { createWorkerProbe } from "../src/lib/heartbeat.js";
+import { openProbeDbs } from "../src/lib/probe-dbs.js";
 import { type QueueStats, createQueueStats } from "../src/lib/queue-stats.js";
 import {
   openTestDb,
+  openTestProbeDb,
   openTestQueues,
   openTestRedis,
   whenReady,
 } from "./helpers.int.js";
-import { AUTH_HEADER, TEST_PASSWORD } from "./helpers.js";
+import {
+  AUTH_HEADER,
+  EMPTY_QUEUES,
+  LIVE_WORKER,
+  TEST_PASSWORD,
+} from "./helpers.js";
 
 /**
  * The first half of the E0-09 acceptance, against the stack of
@@ -49,6 +62,10 @@ const PAUSE_QUEUE = "radar.snapshot";
 const SPENT_UNITS = 37;
 
 const db = openTestDb();
+// The handles the page reads through, as `compose-app.ts` opens them: the
+// fixture above writes and cleans, these only read.
+const healthDb = openTestProbeDb();
+const budgetDb = openTestProbeDb();
 const redis = openTestRedis();
 let queueStats: QueueStats;
 let app: AppInstance;
@@ -66,11 +83,11 @@ beforeAll(async () => {
   queueStats = createQueueStats({ connection: redis, log: silentLogger() });
   app = buildApp(
     {
-      health: createHealthProbes({ db, redis }),
+      health: createHealthProbes({ db: healthDb, redis }),
       buildInfo: { version: "int", commit: "int" },
       queues: queueStats,
       worker: createWorkerProbe({ redis }),
-      budget: createBudgetProbe({ db, limits }),
+      budget: createBudgetProbe({ db: budgetDb, limits }),
     },
     { adminPassword: TEST_PASSWORD, logger: false },
   );
@@ -82,12 +99,14 @@ afterAll(async () => {
   await queueStats.close();
   await clean();
   await closeDb(db);
+  await healthDb.close({ timeoutSec: 1 });
+  await budgetDb.close({ timeoutSec: 1 });
   await closeRedis(redis);
 });
 
 /** The page, parsed against the contract rather than read as free JSON. */
-async function readStatus() {
-  const res = await app.inject({
+async function readStatus(from: AppInstance = app) {
+  const res = await from.inject({
     method: "GET",
     url: "/system/status",
     headers: { authorization: AUTH_HEADER },
@@ -223,6 +242,75 @@ describe("GET /system/status against the live stack", () => {
       redis: { status: "up", reason: null },
     });
   });
+});
+
+/**
+ * A Postgres host that takes the connection and never answers it - a black
+ * hole: the relay is silent from the first byte. The deadline of the section
+ * (`DEPENDENCY_TIMEOUT_MS`) is armed before the connect and equals its bound,
+ * so the page reads `timeout`, not `unreachable` (decision of 20.10.2026,
+ * docs/adr/0002-db-connection-and-cli-config.md). What the connect bound of
+ * the probe handle buys is that nothing is destroyed: the connect is refused
+ * before the limit of the handle, no warning of the limit is written, and
+ * once the host answers the next poll goes over the same client.
+ */
+describe("GET /system/status against a Postgres nobody answers", () => {
+  it("reads the budget as timed out and keeps its client past the limit", async () => {
+    const relay = await openRelay();
+    relay.freeze();
+    const { log, lines } = recordingLogger();
+    // The handles as the composition opens them, warning on a limit included.
+    const dbs = openProbeDbs(relay.url, log);
+    /** The client every read of the budget ran on, in order. */
+    const seen: Db[] = [];
+    const budget: ProbeDb = {
+      run: (fn) =>
+        dbs.budget.run((client) => {
+          seen.push(client);
+          return fn(client);
+        }),
+      close: (opts) => dbs.budget.close(opts),
+    };
+    const own = buildApp(
+      {
+        health: createHealthProbes({ db: dbs.health, redis }),
+        buildInfo: { version: "int", commit: "int" },
+        // The budget is what this case is about; the Redis sections answer
+        // from fixtures.
+        queues: { collect: async () => EMPTY_QUEUES },
+        worker: { read: async () => LIVE_WORKER },
+        budget: createBudgetProbe({ db: budget, limits }),
+      },
+      { adminPassword: TEST_PASSWORD, logger: false },
+    );
+    try {
+      await own.ready();
+      const askedAt = performance.now();
+
+      const silent = await readStatus(own);
+
+      expect(silent.budget).toBeNull();
+      expect(silent.checks.db).toEqual({ status: "down", reason: "timeout" });
+      // Past the limit of the handle, with a margin: a connect that only
+      // ended there would have destroyed the client and said so by now.
+      await sleep(
+        Math.max(0, askedAt + PROBE_QUERY_LIMIT_MS + 1_000 - performance.now()),
+      );
+      expect(lines.filter((line) => line.level === "warn")).toEqual([]);
+
+      relay.thaw();
+      const back = await readStatus(own);
+
+      expect(back.checks.db).toEqual({ status: "up", reason: null });
+      expect(seen).toHaveLength(2);
+      expect(seen[1]).toBe(seen[0]);
+    } finally {
+      await own.close();
+      relay.thaw();
+      await dbs.close();
+      await relay.cut();
+    }
+  }, 20_000);
 });
 
 /**

@@ -126,6 +126,10 @@ export function formatFailureReason(reason: ProbeFailureCode): string {
       return "timed out";
     case "unreachable":
       return "unreachable";
+    case "refused":
+      return "refused, check the database credentials and dsn in the api log";
+    case "not_migrated":
+      return "not migrated, run the migrations";
     case "error":
       return "error, see the api log";
   }

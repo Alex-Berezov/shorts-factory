@@ -116,3 +116,81 @@ M already applied`; `app settings seeded`), отказ - одну строку �
   `test-support/**` и `vitest*.config.{ts,mts,cts}` - ровно четыре места из «Последствий»;
   импорт в библиотечной части, в `drizzle.config.ts` или упоминание, ставшее импортом, -
   красный тест.
+
+## Дополнение (дополнено 20.10.2026, E0-12H): `createProbeDb` и `closeDb({ timeoutSec })`
+
+Подключение по-прежнему открывается явным вызовом с URL параметром; к `createDb` добавлен второй
+вид дескриптора - для проб, у которых каждый вызов кончается не позже предела.
+
+- `createProbeDb(url, { limitMs, statementTimeoutMs, onLimit? })` (`packages/db/src/probe.ts`) -
+  отдельный клиент postgres-js `max: 1` на каждую пробу, `connection: { statement_timeout:
+  statementTimeoutMs }` и собственный таймер `run(fn)` на `limitMs`. `statementTimeoutMs < limitMs`
+  проверяется в конструкторе (`RangeError` с обоими числами). Два предела - на два вида молчания:
+  медленный запрос живого сервера снимает сам сервер первым (`57014` -> `timeout` на странице),
+  соединение живёт и следующий вызов идёт по нему же; таймер `run` - только для сокета, который
+  ответить не может (полуоткрытый): клиент завершается (`$client.end({ timeout: 0 })`: вызов освобождается, сокет закрывается FIN, полуоткрытый живёт до тайм-аута ОС), все
+  вызовы на нём - и сработавший, и ждавший за ним на том же соединении - получают `ProbeLimitError`
+  (`code: "PROBE_LIMIT"`), отказ висящего запроса и самого `end()` гасятся внутри, `onLimit`
+  сообщает вызывающему (api пишет `warn`; своего логгера у `@sf/db` нет), следующий `run` идёт на
+  новом клиенте. После `close()` `run` отказывает `ProbeClosedError` (на странице - `error`) и
+  клиентов не открывает; `close()` снимает таймеры предела ожидающих вызовов (таймер `run` -
+  `unref`, процесс не держит): запрос в полёте несёт предел `close` и отвечает своей работой,
+  вызов без ответа после закрытия получает `ProbeClosedError`, клиент повторно не завершается. `close({ timeoutSec })` (предел обязателен) ждёт и
+  уничтожаемых клиентов, даже если закрытие текущего отказало; исход один на все вызовы.
+- Клиент открывает внутренний помощник `openDb(url, options)` (`packages/db/src/client.ts`) -
+  его же зовёт `createDb`; в `index.ts` он не экспортируется (`public-surface.test.ts`), сквозной
+  `connection` у `createDb` запрещён: сессионный параметр пробы не должен доехать до миграций.
+- Граница: `statement_timeout` - только у probe-клиента, не в `clientOptions`/`createDb`;
+  миграции и джобы воркера идут без него. `Query.cancel()` не используется: на полуоткрытом
+  сокете ответ на отмену идёт тем же мёртвым путём, а промис отмены postgres-js до 3.4.9
+  теряется в `unhandledRejection`. Потребитель - api (`apps/api/src/lib/probe-dbs.ts`,
+  `openProbeDbs`: по дескриптору на db-пробу `/health` и на секцию `budget`, пределы
+  `PROBE_DB_BOUNDS` - `statementTimeoutMs` = `DEPENDENCY_TIMEOUT_MS` (2 с), `limitMs` =
+  `PROBE_QUERY_LIMIT_MS` (4 с)); закрытие набора ждёт все дескрипторы (`allSettled`) и
+  отвечает первым отказом.
+- Один вызов пробы - один запрос. `statement_timeout` ограничивает каждый statement, таймер
+  `run` - весь вызов: три запроса подряд получили бы по 2 с каждый и пережили бы предел 4 с на
+  живой медленной базе. Поэтому секция `budget` читает все капы одним `select`:
+  `apiUsageLogRepo.sumUsages(db, aggregates, { now })` - по скалярному подзапросу на агрегат,
+  у каждого свои провайдеры, окно и часовой пояс, и каждый идёт по индексу
+  `api_usage_provider_created_idx` своим диапазоном (`provider`, `created_at`) - без общего
+  внешнего фильтра по объединению окон, который заставил бы месячный кап TTS тянуть месяц строк
+  всех провайдеров (`sumUsage` - обёртка над ним). Чтение капов для страницы - модульная
+  функция `countBudgetChecks(db, limits, providers, { now })` (`packages/db/src/budget.ts`,
+  экспорт корня), всегда из базы, без кэша; на `BudgetGuard` её нет - интерфейс, который
+  получает джоб, не несёт чтения мимо кэша. `check`/`assert` воркера не меняются. Клиент пробы
+  открывается с `fetch_types: false`: по умолчанию postgres-js на каждом новом соединении
+  запрашивает `pg_type` до первого запроса - второй statement в одном вызове. Перед открытием
+  проба снимает query-параметр `statement_timeout` с `url`: postgres-js раскладывает
+  query-параметры DSN поверх `connection`, и параметр из `DATABASE_URL` перекрыл бы предел
+  пробы; DSN с ним не запрещается. Оба предела - целые положительные миллисекунды
+  (`RangeError` с именем поля), затем `statementTimeoutMs < limitMs`.
+- Connect пробы ограничен тем же числом: клиент открывается с
+  `clientOptions({ max: 1, connectTimeoutSec: statementTimeoutMs / 1000 })`. Хост, который
+  принимает соединение и молчит («чёрная дыра»), даёт `CONNECT_TIMEOUT` раньше `limitMs`, без
+  уничтожения клиента и `onLimit`. `createDb` и миграции живут с прежним `CONNECT_TIMEOUT_SEC`
+  (10 с).
+- «`CONNECT_TIMEOUT` раньше предела» - свойство дескриптора `@sf/db` (предел 4 с), а не страницы
+  api. Дедлайн секции api (`withDeadline(DEPENDENCY_TIMEOUT_MS)`, 2 с) равен
+  `statementTimeoutMs` и взводится раньше connect, поэтому на «чёрной дыре» api видит свой
+  дедлайн первым: `/system/status` показывает `db: down (timeout)`, а не `unreachable`. Это
+  принято (решение техлида 20.10.2026, открытый вопрос круга fix 2 E0-12H): `DEPENDENCY_TIMEOUT_MS`,
+  `PROBE_QUERY_LIMIT_MS`, `PROBE_DB_BOUNDS`, коды и ранги не меняются. Что даёт connect-предел
+  в api - отсутствие уничтожения: connect отказывает до предела, клиент живёт, `warn` о
+  пределе не пишется, следующий опрос идёт по тому же клиенту
+  (`apps/api/test/system-status.int.test.ts`).
+- PgBouncer и другие пулеры. `statement_timeout` уходит startup-параметром сессии. Пулер в
+  transaction mode такой параметр отвергает: понадобится `ignore_startup_parameters =
+  statement_timeout` в его конфиге или `SET statement_timeout` после connect. `options=` в DSN
+  проба перекрывает своим значением. Сейчас пулера в стеке нет; долг не заводится.
+- `closeDb(db, { timeoutSec })` передаёт предел в `$client.end({ timeout })`: запрос в полёте
+  через `timeoutSec` уничтожается. Без опции поведение прежнее - драйвер ждёт запросы в полёте
+  (воркер дожидается джобов, CLI `migrate` держит advisory lock). С пределом зовёт только
+  стадия `db` остановки api (`DB_CLOSE_TIMEOUT_SEC` меньше `SHUTDOWN_TIMEOUT_MS`).
+- Что проверяет: `packages/db/test/probe.test.ts`, `packages/db/test/probe.int.test.ts`
+  (полуоткрытый сокет через `freeze()` реле `packages/db/test-support/relay.ts`; `pg_sleep`
+  дольше `statementTimeoutMs` - `57014` на том же соединении),
+  `packages/db/test/client.test.ts` (`closeDb`), `packages/db/test/budget.int.test.ts`
+  (`countBudgetChecks` - один statement), `apps/api/test/entry-point.int.test.ts`
+  (SIGTERM при висящей пробе - код 0). Решение - `docs/TECH_DEBT.md § E0-12H`, п.5, п.6
+  (Р3 техлида, 20.10.2026).

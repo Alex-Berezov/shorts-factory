@@ -1,6 +1,5 @@
 import type { HealthReport, ProbeStatus } from "@sf/contracts";
-import type { Db } from "@sf/db";
-import { pingDb } from "@sf/db";
+import { type ProbeDb, pingDb } from "@sf/db";
 import { withDeadline } from "@sf/runtime";
 import type { HealthProbes } from "../deps.js";
 import { DEPENDENCY_TIMEOUT_MS } from "./dependency-timeout.js";
@@ -12,7 +11,8 @@ export interface Pingable {
 }
 
 export interface HealthProbesOptions {
-  db: Db;
+  /** The bounded handle of the db probe (`createProbeDb`), its own. */
+  db: ProbeDb;
   redis: Pingable;
   /** Overridden by tests; the default is what the running service uses. */
   timeoutMs?: number;
@@ -50,21 +50,21 @@ async function probe(
  * call settles: a probe that hangs past the deadline is the one every later
  * poll joins - one hanging call per dependency, not one per poll.
  *
- * How long one can hang differs by dependency. A ping to a Redis whose socket
+ * How long one can hang is bounded for both. A ping to a Redis whose socket
  * is open and silent ends by the `commandTimeout` of its client
- * (`createRequestRedis`, `compose-app.ts`). A database probe has no bound of its own: the
- * `connect_timeout` of `createDb` stops counting once the connection is
- * ready, postgres-js puts no timeout on a query, and its cancel cannot be
- * used yet (docs/TECH_DEBT.md, rows of E0-11B, to E0-12H). Such a probe ends
- * when the server answers or the OS breaks the socket: on a half-open socket
- * that is retransmission for up to ~15 minutes, since keepalive only acts on
- * an idle connection. All that time `/health` answers 503 (`db: down`, each
- * poll on its own deadline) and the `budget` section is empty while Postgres
- * is alive. Nothing is kept once a call has answered.
+ * (`createRequestRedis`, `compose-app.ts`). A database probe ends by the
+ * limit of its handle, `PROBE_QUERY_LIMIT_MS` (`createProbeDb` of `@sf/db`):
+ * the server ends a slow query by `statement_timeout`, and a query on a
+ * half-open socket, which nothing on the server can end, is given up on with
+ * its connection, so the next poll after the limit asks over a new one
+ * instead of joining a probe that would otherwise wait for the
+ * retransmissions of the OS (docs/TECH_DEBT.md § E0-12H, п.5). The handle is
+ * this probe's own: on one connection a stuck read of the `budget` section
+ * would queue the ping behind it. Nothing is kept once a call has answered.
  */
 export function createHealthProbes(options: HealthProbesOptions): HealthProbes {
   const timeoutMs = options.timeoutMs ?? DEPENDENCY_TIMEOUT_MS;
-  const pingDatabase = singleFlight(() => pingDb(options.db));
+  const pingDatabase = singleFlight(() => options.db.run(pingDb));
   const pingRedis = singleFlight(() => options.redis.ping());
 
   return {

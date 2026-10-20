@@ -1,4 +1,3 @@
-import { type Server, type Socket, connect, createServer } from "node:net";
 import { type SQLWrapper, sql as drizzleSql } from "drizzle-orm";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { PgDialect } from "drizzle-orm/pg-core";
@@ -27,6 +26,7 @@ import {
   resetTestDatabase,
   testDatabaseUrl,
 } from "../test-support/fixture.js";
+import { openRelay } from "../test-support/relay.js";
 import { captureProcessOutput } from "./capture-output.js";
 
 /** Migrations the repository ships, read the way drizzle's migrator reads them. */
@@ -198,46 +198,6 @@ function underTheLock(observed: ObservedStatement[]): ObservedStatement[] {
     throw new Error("migrateDb did not take and release its lock");
   }
   return observed.slice(locked + 1, unlocked);
-}
-
-/**
- * A TCP relay in front of the test Postgres that can be pulled out: `cut()`
- * stops listening and drops every relayed socket, so the client's next
- * reconnect is refused - the "database went away" a migration can meet.
- */
-async function openRelay(): Promise<{ url: string; cut: () => Promise<void> }> {
-  const target = testDatabaseUrl();
-  const sockets = new Set<Socket>();
-  const server: Server = createServer((client) => {
-    const upstream = connect({
-      host: target.hostname,
-      port: Number(target.port),
-    });
-    sockets.add(client).add(upstream);
-    client.pipe(upstream).pipe(client);
-    const drop = () => {
-      client.destroy();
-      upstream.destroy();
-    };
-    client.on("error", drop).on("close", drop);
-    upstream.on("error", drop).on("close", drop);
-  });
-  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
-  const address = server.address();
-  if (address === null || typeof address === "string") {
-    throw new Error("relay has no port");
-  }
-  const url = testDatabaseUrl();
-  url.hostname = "127.0.0.1";
-  url.port = String(address.port);
-  return {
-    url: url.toString(),
-    cut: async () => {
-      const closed = new Promise<void>((done) => server.close(() => done()));
-      for (const socket of sockets) socket.destroy();
-      await closed;
-    },
-  };
 }
 
 // The file starts from a reset database - a stray type a previous run left
