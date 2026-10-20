@@ -1799,9 +1799,11 @@
       "E0-12F"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-18",
-    "started_at": "2026-10-20"
+    "started_at": "2026-10-20",
+    "done_at": "2026-10-20",
+    "note": "migrate CLI: lock timeout class on 55P03 only, named session restore steps, migrate-and-seed entry point, runMigrations keeps all failures, schema drift check in CI"
   },
   {
     "id": "E0-12J",
