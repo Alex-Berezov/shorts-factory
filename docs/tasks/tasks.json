@@ -1781,9 +1781,11 @@
       "E0-12B"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-17",
-    "started_at": "2026-10-20"
+    "started_at": "2026-10-20",
+    "done_at": "2026-10-20",
+    "note": "Postgres: SQLSTATE reasons not_migrated/refused, bounded probe clients, budget caps in one statement, closeDb timeout"
   },
   {
     "id": "E0-12I",

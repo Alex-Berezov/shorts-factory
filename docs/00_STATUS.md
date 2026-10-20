@@ -4,16 +4,14 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-20. **Не �
 
 ## Сводка
 
-- **Прогресс:** `█████░░░░░░░░░░░░░░░░░░░░░░░░░` 25/145 задач, 23.7 / 161.9 оценочных дней.
+- **Прогресс:** `█████░░░░░░░░░░░░░░░░░░░░░░░░░` 26/145 задач, 25.2 / 161.9 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** [E0-12H](TECH_DEBT.md#e0-12h-postgres-классы-sqlstate-срокотмена-запроса-пробы-closedb{-timeout-}) Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout })
+- **В работе:** ничего — возьмите задачу из «Следующие»
 - **Заблокировано:** нет
 
 ## Сейчас в работе
 
-| Задача | Название | Оценка | Начата |
-|---|---|---|---|
-| [E0-12H](TECH_DEBT.md#e0-12h-postgres-классы-sqlstate-срокотмена-запроса-пробы-closedb{-timeout-}) | Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout }) | 1.5 д | 2026-10-20 |
+_Нет задач в работе._
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
@@ -31,7 +29,7 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-20. **Не �
 
 | | Эпик | Задачи | Дни (сделано / всего) | Документ |
 |---|---|---|---|---|
-| 🔄 | **E0** Каркас проекта и инфраструктура | `████████░░░░` 25/36 | 23.7 / 35.4 | [30_E0_TASKS.md](30_E0_TASKS.md) |
+| 🔄 | **E0** Каркас проекта и инфраструктура | `█████████░░░` 26/36 | 25.2 / 35.4 | [30_E0_TASKS.md](30_E0_TASKS.md) |
 | ⬜ | **E12** Импорт ручной фазы (Phase 0) | `░░░░░░░░░░░░` 0/5 | 0 / 4 | [42_E12_TASKS.md](42_E12_TASKS.md) |
 | ⬜ | **E1** Source Radar | `░░░░░░░░░░░░` 0/12 | 0 / 15.5 | [31_E1_TASKS.md](31_E1_TASKS.md) |
 | ⬜ | **E2** Video Intelligence / Content DNA | `░░░░░░░░░░░░` 0/10 | 0 / 11 | [32_E2_TASKS.md](32_E2_TASKS.md) |
@@ -78,7 +76,7 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-20. **Не �
 | ✅ | [E0-12E](TECH_DEBT.md#e0-12e-чистка-тестов-по-строкам-дисциплины-configcontractsapi-client-int-наборы-sfdb-appsapi-п3-e0-12a-поздние-строки-чистки) | Чистка тестов по строкам дисциплины: config/contracts/api-client, int-наборы @sf/db, apps/api (п.3 E0-12A + поздние строки чистки) | 1.5 д | ✅E0-13 ✅E0-12A | 2026-10-19 | 2026-10-19 |
 | ✅ | [E0-12F](TECH_DEBT.md#e0-12f-корневой-vitest-проект-scripts-переезд-репо-тестов-из-appsworker-jsdoc-типы-scripts-входы-turbo-с-пробой-cache-miss-кэш-turbo-в-ci) | Корневой vitest-проект scripts/**: переезд репо-тестов из apps/worker, JSDoc-типы scripts, входы turbo с пробой cache miss, кэш .turbo в CI | 1.5 д | ✅E0-13 ✅E0-12A | 2026-10-18 | 2026-10-18 |
 | ✅ | [E0-12G](TECH_DEBT.md#e0-12g-apiworker-журнал-запросов-разбор-ошибок-причины-healthcheck) | api/worker: журнал запросов, разбор ошибок, причины healthcheck | 1.5 д | ✅E0-13 ✅E0-12B | 2026-10-19 | 2026-10-20 |
-| 🔄 | [E0-12H](TECH_DEBT.md#e0-12h-postgres-классы-sqlstate-срокотмена-запроса-пробы-closedb{-timeout-}) | Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout }) | 1.5 д | ✅E0-13 ✅E0-12B | 2026-10-20 |  |
+| ✅ | [E0-12H](TECH_DEBT.md#e0-12h-postgres-классы-sqlstate-срокотмена-запроса-пробы-closedb{-timeout-}) | Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout }) | 1.5 д | ✅E0-13 ✅E0-12B | 2026-10-20 | 2026-10-20 |
 | ⬜ | [E0-12I](TECH_DEBT.md#e0-12i-cli-migrate-классы-ошибок-именованные-шаги-возврата-migrate-and-seed-drizzle-kit-check-в-ci) | CLI migrate: классы ошибок, именованные шаги возврата, migrate-and-seed, drizzle-kit check в CI | 0.7 д | ✅E0-13 ✅E0-12A ✅E0-12F |  |  |
 | ⬜ | [E0-12J](TECH_DEBT.md#e0-12j-образы-единый-appdockerfile-с-целями-exec-форма-migrate-проба-одним-run-buildx-кэш-в-ci) | Образы: единый app.Dockerfile с целями, exec-форма migrate, проба одним run, buildx-кэш в CI | 1 д | ✅E0-12C ⬜E0-12I |  |  |
 | ⬜ | [E0-12K](TECH_DEBT.md#e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция-{}-профили-composefile-симлинки) | Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки | 2 д | ✅E0-13 ✅E0-12C |  |  |
