@@ -111,15 +111,64 @@
  *    migration lock of Postgres cut. Under init node is a child and SIGTERM
  *    stops it (143; measured in tasks/2026-10-20-E0-12J.md). Only `true`
  *    counts: a missing `init` and `init: false` are the same PID 1.
+ * 14. No override: the operator runs `docker compose up` without `-f`, and
+ *    Compose then merges `compose.override.{yml,yaml}` and
+ *    `docker-compose.override.{yml,yaml}` (`OVERRIDE_FILES`) of the directory
+ *    it starts in - the root, or `infra/` for the development stack - into a
+ *    stack the gate, which renders with `-f`, never sees. None of the four
+ *    may lie in the directory of the root file or of any file of its graph.
+ *    Nor may a file of another name Compose looks for there without `-f`
+ *    (`DEFAULT_FILES`) that is not a file of the graph: `infra/compose.yaml`
+ *    would be the stack of `cd infra && docker compose up` in place of
+ *    `infra/docker-compose.yml` - Compose takes the first of the four it
+ *    finds (measured on Compose 5.5.1, tasks/2026-10-20-E0-12K.md).
+ *    Nor may a `.env` lie next to a file of the graph outside the root:
+ *    Compose reads it for the interpolation of that file over `--env-file`
+ *    (measured on Compose 5.5.1, tasks/2026-10-20-E0-12K.md), and the gate
+ *    does not read `.env`. Only whether such a file is there is looked at,
+ *    never what it holds.
+ * 15. The graph is the files the gate is chosen on: every file the root
+ *    pulls in through `include` and `extends: file:`, and theirs in turn
+ *    (`composeGraph` of scripts/lib/compose-graph.mjs), is one of
+ *    `COMPOSE_SOURCES` - the files the `when` of the gate names - by the
+ *    path written and by its realpath, so a link under `infra/` to a file
+ *    elsewhere counts as that file. A file outside would change the stack
+ *    without choosing the gate; the reader does not open it, it follows the
+ *    files of `COMPOSE_SOURCES` only. What the reader cannot read - a form of
+ *    `include` or `extends` it does not take, a path Compose fills in
+ *    (`${X}`), a parse error, a cyclic alias - is a violation of this rule.
+ * 16. No profiles: a service with `profiles` is in the stack only when the
+ *    operator turns its profile on (`--profile`, `COMPOSE_PROFILES` in the
+ *    environment or in `.env`). The gate renders with `--profile '*'`, so
+ *    such a service reaches the rules, and the stack has none.
+ * 17. The values of the stack come from the files of the graph alone, read
+ *    as written (`roots` of `composeGraph`, not a second parse). A key of
+ *    `services.<name>.environment` without a value - an item of a list
+ *    without `=`, a key of a mapping that is null - takes its value from
+ *    `.env` or the shell, and `--variables` does not name it (measured on
+ *    Compose 5.5.1, tasks/2026-10-20-E0-12K.md): it would reach the container
+ *    past the env file of the gate. Top-level `configs` and `secrets`, in any
+ *    form (`file`, `environment`, `content`, `external`), and a
+ *    `services.<name>.label_file` read their values from outside the graph
+ *    too; the stack has none, like `env_file` of rule 10.
+ *
+ * Besides the rules, `checkVariables` and `checkInterpolation` hold the
+ * interpolation of the Compose files to `INTERPOLATED`: a variable the stack
+ * reads from `.env` or the environment may land only in the fields listed
+ * for it, found by comparing the configuration rendered with an empty env
+ * file with one rendered with a control value for each variable.
  *
  * Each rule is a function of its own in `RULES`, named by its number above;
  * `checkCompose` runs them in that order. The JSON is read only after its
  * shape is checked (`servicesOf`): a field in a form the rules cannot read is
  * a violation of its own, with the path of the field, not a `TypeError`.
  */
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { parseEnv } from "node:util";
-import { repoRoot } from "./lib/paths.mjs";
+import { composeGraph } from "./lib/compose-graph.mjs";
+import { isGone } from "./lib/files.mjs";
+import { isRecord } from "./lib/json.mjs";
+import { fromRoot, nameOn, repoRoot } from "./lib/paths.mjs";
 
 /**
  * What the rules read of a published port, as Compose prints it.
@@ -167,25 +216,52 @@ import { repoRoot } from "./lib/paths.mjs";
  * @property {unknown} [env_file]
  * @property {Record<string, unknown>} [build]
  * @property {unknown} [init]
+ * @property {string[]} [profiles]
  */
 
 /**
  * What the rules know of the project besides its configuration.
  *
  * @typedef {object} Project
+ * @property {string} composeFile the canonical path of the root Compose
+ *   file, the entry of the graph of rules 14, 15 and 17
  * @property {string} envFile absolute path of the project's `.env`, as
  *   Compose resolves a bind source
  * @property {string} testEnvFile absolute path of the root `.env.test`
  * @property {(path: string) => string | null} read contents of a file, null
  *   if there is none (`readIfFile` of scripts/lib/files.mjs)
+ * @property {(path: string) => string} realpath the canonical path of an
+ *   existing one; a path that is not there throws with the code `ENOENT`
+ *   (`isGone` of scripts/lib/files.mjs)
+ * @property {string} [platform] whose rules the paths of rules 14 and 15 are
+ *   compared by (`win32` without their case, as Compose opens them there);
+ *   this one by default
+ */
+
+/** @typedef {import("./lib/compose-graph.mjs").ComposeGraph} ComposeGraph */
+/** @typedef {import("./lib/compose-graph.mjs").ComposeRoot} ComposeRoot */
+
+/**
+ * A variable the Compose files may take from `.env` (`INTERPOLATED`).
+ *
+ * @typedef {object} Interpolated
+ * @property {string} control what the control render gives it
+ * @property {string[]} parts the pieces Compose splits `control` into that a
+ *   field may hold alone; none for a value Compose does not split
+ * @property {string[]} fields where it may land (`*` any one key, `[*]` any
+ *   index)
  */
 
 /**
- * One rule of the header: its id and the violations it finds, one line each.
+ * One rule of the header: its id and the violations it finds, one line each,
+ * given the services, the project and the graph of its Compose files. The
+ * graph is asked for (`graph()`), not handed over: `checkCompose` reads it at
+ * most once per call, and only for a rule that asks, so a choice of rules
+ * without 14, 15 and 17 opens no Compose file.
  *
  * @typedef {object} Rule
  * @property {string} id
- * @property {(services: Record<string, ComposeService>, project: Project) => string[]} check
+ * @property {(services: Record<string, ComposeService>, project: Project, graph: () => ComposeGraph) => string[]} check
  */
 
 /** The services of the stack (rule 0). */
@@ -311,16 +387,102 @@ export const RENDERING_PROBE = `services:
         bind:
           create_host_path: false
 `;
+/**
+ * The files Compose merges into the stack when it runs without `-f`
+ * (`DefaultOverrideFileNames` of compose-go; rule 14).
+ */
+export const OVERRIDE_FILES = [
+  "compose.override.yml",
+  "compose.override.yaml",
+  "docker-compose.override.yml",
+  "docker-compose.override.yaml",
+];
+/**
+ * The files Compose looks for in the directory it starts in when it runs
+ * without `-f`, in its order (`DefaultFileNames` of compose-go): the first it
+ * finds is the stack (rule 14).
+ */
+export const DEFAULT_FILES = [
+  "compose.yaml",
+  "compose.yml",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+];
+/**
+ * The Compose files of the stack, from the root of the repository: the files
+ * of rule 15, and the ones the `when` of the gate names
+ * (.claude/hooks/rules.sf.json, held to it by test/compose-rules.test.ts). A
+ * new Compose file of the stack is added here and there.
+ */
+export const COMPOSE_SOURCES = [
+  "compose.yaml",
+  "infra/docker-compose.yml",
+  "infra/docker-compose.app.yml",
+];
 
 /**
- * Whether `value` is a JSON object (not an array, not null).
+ * Whether `relPath` - from the root of the repository, `/` between its parts
+ * - is one of `COMPOSE_SOURCES`, compared the way `platform` opens files:
+ * on Windows `Infra/docker-compose.yml` is `infra/docker-compose.yml`.
  *
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
+ * @param {string} relPath
+ * @param {string} [platform]
+ * @returns {boolean}
  */
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export function isComposeSource(relPath, platform) {
+  const path = nameOn(relPath, platform);
+  return COMPOSE_SOURCES.some((source) => nameOn(source, platform) === path);
 }
+
+/**
+ * Each variable the Compose files of the stack may take from `.env` or the
+ * environment: its control value - what the gate gives it in the control
+ * render - and the fields of the configuration it may land in (`*` is any
+ * one key, `[*]` any index). The control value differs from the default of
+ * the files, so a field that takes the variable changes between the two
+ * renders, and it has every form a value of `.env` may take there, so the
+ * control render shows each field such a value reaches: `WEB_PORT` an
+ * address, a `:` and a range of ports - Compose reads `${WEB_PORT}:3000`
+ * with `0.0.0.0:3000` as the address and the port of web, and with
+ * `3000-3010` as a range (measured on Compose 5.5.1,
+ * tasks/2026-10-20-E0-12K.md); the build args a word no file writes. `parts`
+ * are the pieces Compose splits the control value into, each of which a
+ * field may hold alone - the address and the range of `WEB_PORT`; a
+ * variable Compose does not split has none, and a piece of its value is not
+ * its value. A new variable is added here, with its parts, its fields and a
+ * case (docs/adr/0014-compose-graph-gate.md).
+ *
+ * @type {Map<string, Interpolated>}
+ */
+export const INTERPOLATED = new Map([
+  [
+    "WEB_PORT",
+    {
+      control: "127.0.0.2:39871-39872",
+      parts: ["127.0.0.2", "39871-39872"],
+      fields: [
+        "services.web.ports[*].host_ip",
+        "services.web.ports[*].published",
+      ],
+    },
+  ],
+  [
+    "APP_VERSION",
+    {
+      control: "gate-control-app-version",
+      parts: [],
+      fields: ["services.*.build.args.APP_VERSION"],
+    },
+  ],
+  [
+    "GIT_COMMIT",
+    {
+      control: "gate-control-git-commit",
+      parts: [],
+      fields: ["services.*.build.args.GIT_COMMIT"],
+    },
+  ],
+]);
 
 /** Fields of a service that hold an object when present. */
 const OBJECT_FIELDS = ["environment", "depends_on", "healthcheck", "build"];
@@ -332,7 +494,8 @@ const LIST_FIELDS = ["ports", "volumes"];
  * it has (`services.api.ports`), null when they can read every one: a service
  * is an object, `ports`/`volumes` lists of objects, `environment`,
  * `depends_on` (and each of its entries), `healthcheck`, `build` and the
- * `bind` of a mount objects. Fields the rules do not read are not looked at.
+ * `bind` of a mount objects, `profiles` a list of names. Fields the rules do
+ * not read are not looked at.
  *
  * @param {unknown} service
  * @param {string} path where `service` lies in the configuration
@@ -360,6 +523,16 @@ function shapeIssue(service, path) {
         return `${path}.${field}[${index}].bind`;
       }
     }
+  }
+  const { profiles } = service;
+  if (
+    profiles !== undefined &&
+    !(
+      Array.isArray(profiles) &&
+      profiles.every((profile) => typeof profile === "string")
+    )
+  ) {
+    return `${path}.profiles`;
   }
   return null;
 }
@@ -399,7 +572,9 @@ function servicesOf(config) {
 /**
  * Violations of the rendering `RENDERING_PROBE` must survive: the
  * configuration Compose printed for it carries `create_host_path: false`.
- * Empty when it does.
+ * Empty when it does. The violation says what was lost in one of two fixed
+ * words, never what Compose printed in its place (docs/DECISIONS.md, Т7
+ * E0-12G: nothing docker printed reaches the log).
  *
  * @param {unknown} config
  * @returns {string[]}
@@ -409,8 +584,12 @@ export function checkRendering(config) {
   if (problems.length > 0) return problems;
   const mount = services.probe?.volumes?.[0];
   if (mount?.bind?.create_host_path === false) return [];
+  const lost =
+    mount?.bind === undefined
+      ? "no bind"
+      : "bind has no create_host_path: false";
   return [
-    `this docker compose prints the probe's create_host_path: false as ${JSON.stringify(mount?.bind ?? null)} - rule 10 cannot tell the option from its absence; run the Compose CI pins (.github/workflows/ci.yml)`,
+    `this docker compose prints the probe's mount with ${lost} - rule 10 cannot tell the option from its absence; run the Compose CI pins (.github/workflows/ci.yml)`,
   ];
 }
 
@@ -1149,6 +1328,215 @@ function rule13Init(services) {
 }
 
 /**
+ * Whether a file of `project`, by its path, is one of `COMPOSE_SOURCES`: the
+ * one test of a Compose file, both for the files the reader of the graph may
+ * open and for the files rule 15 refuses, so the two cannot drift apart.
+ *
+ * @param {Project} project
+ * @returns {(path: string) => boolean}
+ */
+function isSourceOf(project) {
+  const root = dirname(project.composeFile);
+  return (path) => isComposeSource(fromRoot(root, path), project.platform);
+}
+
+/**
+ * The graph of the Compose files of `project`, from its root file, through
+ * the files of `COMPOSE_SOURCES` only (rule 15).
+ *
+ * @param {Project} project
+ * @returns {ComposeGraph}
+ */
+function graphOf(project) {
+  return composeGraph(project.composeFile, {
+    read: project.read,
+    realpath: project.realpath,
+    admits: isSourceOf(project),
+  });
+}
+
+/**
+ * Whether there is anything at `path`, by the realpath of the project: the
+ * file is not opened. A failure other than "not there" is thrown.
+ *
+ * @param {Project} project
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isThere(project, path) {
+  try {
+    project.realpath(path);
+    return true;
+  } catch (error) {
+    if (isGone(error)) return false;
+    throw error;
+  }
+}
+
+/**
+ * Rule 14: no override and no other Compose file of a default name next to
+ * the root or a file of its graph, no `.env` next to a file of the graph
+ * outside the root.
+ *
+ * @param {Record<string, ComposeService>} _services
+ * @param {Project} project
+ * @param {() => ComposeGraph} graphOfProject
+ * @returns {string[]}
+ */
+function rule14NoOverride(_services, project, graphOfProject) {
+  const graph = graphOfProject();
+  const root = dirname(project.composeFile);
+  /** @param {string} path */
+  const folded = (path) => nameOn(path, project.platform);
+  const ofGraph = new Set([project.composeFile, ...graph.files].map(folded));
+  const dirs = [...new Set([root, ...graph.files.map(dirname)])];
+  /** @type {string[]} */
+  const problems = [];
+  for (const dir of dirs) {
+    for (const name of OVERRIDE_FILES) {
+      const path = join(dir, name);
+      if (isThere(project, path)) {
+        problems.push(
+          `${path}: Compose merges it into the stack when run without -f from ${dir}, and the gate renders with -f - an override is not supported, change the Compose files of the stack instead`,
+        );
+      }
+    }
+    for (const name of DEFAULT_FILES) {
+      const path = join(dir, name);
+      if (!ofGraph.has(folded(path)) && isThere(project, path)) {
+        problems.push(
+          `${path}: Compose looks for it when run without -f from ${dir} (${DEFAULT_FILES.join(", ")} - the first it finds is the stack), and it is not a file of the graph the gate renders - keep one Compose file of the stack in a directory`,
+        );
+      }
+    }
+    if (dir === root) continue;
+    const envFile = join(dir, ".env");
+    if (isThere(project, envFile)) {
+      problems.push(
+        `${envFile}: Compose reads it for the interpolation of the Compose files of ${dir} over --env-file, and the gate does not read .env - keep the variables in the root .env`,
+      );
+    }
+  }
+  return problems;
+}
+
+/**
+ * Rule 15: every file of the graph, by the path written and by its realpath,
+ * is one of `COMPOSE_SOURCES`; the problems of the reader are its own.
+ *
+ * @param {Record<string, ComposeService>} _services
+ * @param {Project} project
+ * @param {() => ComposeGraph} graphOfProject
+ * @returns {string[]}
+ */
+function rule15ComposeSources(_services, project, graphOfProject) {
+  const graph = graphOfProject();
+  const isSource = isSourceOf(project);
+  const outside = `not one of the Compose files the gate is chosen on (${COMPOSE_SOURCES.join(", ")}), so a change to it would not run the gate`;
+  /** @type {string[]} */
+  const problems = [...graph.problems];
+  if (!isSource(project.composeFile)) {
+    problems.push(`${project.composeFile}: the root file is ${outside}`);
+  }
+  for (const { from, field, written, target } of graph.references) {
+    if (!isSource(written)) {
+      problems.push(`${from}: ${field} names ${written} - ${outside}`);
+    } else if (!isSource(target)) {
+      problems.push(
+        `${from}: ${field} names ${written}, a link to ${target} - ${outside}`,
+      );
+    }
+  }
+  return problems;
+}
+
+/**
+ * Rule 16: no service has profiles.
+ *
+ * @param {Record<string, ComposeService>} services
+ * @returns {string[]}
+ */
+function rule16Profiles(services) {
+  return Object.entries(services)
+    .filter(([, service]) => service.profiles !== undefined)
+    .map(
+      ([name, service]) =>
+        `${name}: has profiles (${(service.profiles ?? []).join(", ")}) - the stack would change with the profile the operator turns on; the stack has none`,
+    );
+}
+
+/** The top-level fields of a Compose file whose values come from outside it. */
+const OUTSIDE_VALUES = ["configs", "secrets"];
+
+/**
+ * Violations of rule 17 in the root mapping of one file of the graph.
+ *
+ * @param {ComposeRoot} parsed
+ * @returns {string[]}
+ */
+function outsideValuesOf({ file, root }) {
+  const outside =
+    "Compose takes its value from .env or the shell, past the env file of the gate";
+  /** @type {string[]} */
+  const problems = [];
+  for (const key of OUTSIDE_VALUES) {
+    if (key in root) {
+      problems.push(
+        `${file}: ${key} - its values come from outside the files of the graph (a file, the environment, an external one), and the stack has none`,
+      );
+    }
+  }
+  const { services } = root;
+  // A services that is not a mapping is the reader's problem (rule 15).
+  if (!isRecord(services)) return problems;
+  for (const [name, service] of Object.entries(services)) {
+    if (!isRecord(service)) continue;
+    const field = `services.${name}`;
+    if ("label_file" in service) {
+      problems.push(
+        `${file}: ${field}.label_file - Compose reads labels from a file outside the graph, and the stack has none`,
+      );
+    }
+    const { build } = service;
+    /** @type {[string, unknown][]} */
+    const blocks = [["environment", service.environment]];
+    if (isRecord(build)) blocks.push(["build.args", build.args]);
+    for (const [block, value] of blocks) {
+      if (Array.isArray(value)) {
+        for (const [index, item] of value.entries()) {
+          if (typeof item === "string" && !item.includes("=")) {
+            problems.push(
+              `${file}: ${field}.${block}[${index}] (${item}) has no value - ${outside}`,
+            );
+          }
+        }
+      } else if (isRecord(value)) {
+        for (const [key, entry] of Object.entries(value)) {
+          if (entry === null) {
+            problems.push(
+              `${file}: ${field}.${block}.${key} has no value - ${outside}`,
+            );
+          }
+        }
+      }
+    }
+  }
+  return problems;
+}
+
+/**
+ * Rule 17: the values of the stack come from the files of the graph alone.
+ *
+ * @param {Record<string, ComposeService>} _services
+ * @param {Project} _project
+ * @param {() => ComposeGraph} graphOfProject
+ * @returns {string[]}
+ */
+function rule17GraphValues(_services, _project, graphOfProject) {
+  return graphOfProject().roots.flatMap(outsideValuesOf);
+}
+
+/**
  * The rules of the header, in its order.
  *
  * @type {Rule[]}
@@ -1168,6 +1556,10 @@ const RULES = [
   { id: "build-ignores", check: rule11BuildIgnores },
   { id: "test-stack-ports", check: rule12TestStackPorts },
   { id: "init", check: rule13Init },
+  { id: "no-override", check: rule14NoOverride },
+  { id: "compose-sources", check: rule15ComposeSources },
+  { id: "profiles", check: rule16Profiles },
+  { id: "graph-values", check: rule17GraphValues },
 ];
 
 /** The id of every rule `checkCompose` runs, in its order. */
@@ -1197,9 +1589,194 @@ export function checkCompose(config, project, only = RULE_IDS) {
   }
   const { services, problems } = servicesOf(config);
   if (problems.length > 0) return problems;
+  /** @type {ComposeGraph | undefined} */
+  let graph;
+  // Read on the first rule that asks, once for this call: no state past it.
+  const graphOfProject = () => {
+    graph ??= graphOf(project);
+    return graph;
+  };
   return RULES.filter(
     (rule) => rule.check === rule0Services || only.includes(rule.id),
-  ).flatMap((rule) => rule.check(services, project));
+  ).flatMap((rule) => rule.check(services, project, graphOfProject));
+}
+
+/** The prefix of a violation of the interpolation. */
+const INTERPOLATION = "interpolation:";
+
+/**
+ * Violations of what `docker compose config --variables --format json`
+ * prints for the stack - each variable it reads, with `DefaultValue` and
+ * `Required` - against `allowed`: a variable that is not there has no control
+ * value and no fields, a required one keeps the stack from coming up without
+ * `.env` (the gate renders with an empty env file), and one whose default is
+ * its control value would not change the control render. Names only, no
+ * values. The one reading of that output: `names` are the variables it
+ * lists - the ones the gate takes out of the environment of docker and gives
+ * a control value - and `problems` is empty when clean.
+ *
+ * @param {unknown} variables
+ * @param {Map<string, Interpolated>} [allowed]
+ * @returns {{ names: string[], problems: string[] }}
+ */
+export function checkVariables(variables, allowed = INTERPOLATED) {
+  const shape = "unexpected shape of docker compose config --variables:";
+  if (!isRecord(variables)) {
+    return { names: [], problems: [`${shape} (top level)`] };
+  }
+  /** @type {string[]} */
+  const problems = [];
+  for (const [name, entry] of Object.entries(variables)) {
+    if (!isRecord(entry)) {
+      problems.push(`${shape} ${name}`);
+      continue;
+    }
+    const known = allowed.get(name);
+    if (known === undefined) {
+      problems.push(
+        `${INTERPOLATION} ${name} - the gate has no control value for it and cannot see where it lands; add it to INTERPOLATED of scripts/compose-rules.mjs with the fields it may reach`,
+      );
+      continue;
+    }
+    if (entry.Required !== false) {
+      problems.push(
+        `${INTERPOLATION} ${name} is required - the stack does not come up without it, and the gate renders with an empty env file`,
+      );
+    }
+    if (entry.DefaultValue === known.control) {
+      problems.push(
+        `${INTERPOLATION} ${name} defaults to its control value - the control render would not see where it lands`,
+      );
+    }
+  }
+  return { names: Object.keys(variables), problems };
+}
+
+/**
+ * The env file of the control render: the control value of each variable of
+ * `names` (the `names` of `checkVariables`) that `allowed` knows.
+ *
+ * @param {readonly string[]} names
+ * @param {Map<string, Interpolated>} [allowed]
+ * @returns {string}
+ */
+export function controlEnvOf(names, allowed = INTERPOLATED) {
+  return names
+    .flatMap((name) => {
+      const known = allowed.get(name);
+      return known === undefined ? [] : [`${name}=${known.control}\n`];
+    })
+    .join("");
+}
+
+/**
+ * Every leaf of a JSON value by its path (`services.web.ports[0].published`),
+ * as JSON; an empty object or list is a leaf of its own. A key that is not a
+ * plain word is written `["key"]`, so no key reads as a path of others.
+ *
+ * @param {unknown} value
+ * @param {string} [path]
+ * @param {Map<string, string>} [leaves]
+ * @returns {Map<string, string>}
+ */
+function leavesOf(value, path = "", leaves = new Map()) {
+  if (Array.isArray(value) && value.length > 0) {
+    for (const [index, item] of value.entries()) {
+      leavesOf(item, `${path}[${index}]`, leaves);
+    }
+  } else if (isRecord(value) && Object.keys(value).length > 0) {
+    for (const [key, item] of Object.entries(value)) {
+      const step = /^[\w-]+$/.test(key)
+        ? `${path === "" ? "" : "."}${key}`
+        : `[${JSON.stringify(key)}]`;
+      leavesOf(item, `${path}${step}`, leaves);
+    }
+  } else {
+    leaves.set(path, JSON.stringify(value));
+  }
+  return leaves;
+}
+
+/**
+ * Whether the path of a leaf is one of the fields `field` writes: `*` one
+ * key, `[*]` one index, the rest as it is.
+ *
+ * @param {string} field
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isField(field, path) {
+  const source = field
+    .split(/(\[\*\]|\*)/)
+    .map((part) => {
+      if (part === "[*]") return "\\[\\d+\\]";
+      if (part === "*") return "[\\w-]+";
+      return part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    })
+    .join("");
+  return new RegExp(`^${source}$`).test(path);
+}
+
+/**
+ * Whether the leaf `leaf` (JSON, as `leavesOf` keeps it) holds the control
+ * value of `variable`: the whole of it, or one of the `parts` its entry of
+ * `INTERPOLATED` declares, whole. A string is compared as it is, a number by
+ * its digits.
+ *
+ * @param {string} leaf
+ * @param {Interpolated} variable
+ * @returns {boolean}
+ */
+function holdsControl(leaf, { control, parts }) {
+  /** @type {unknown} */
+  const value = JSON.parse(leaf);
+  const text =
+    typeof value === "string" || typeof value === "number"
+      ? String(value)
+      : leaf;
+  return text.includes(control) || parts.includes(text);
+}
+
+/**
+ * Violations of the interpolation: `base` is the configuration rendered with
+ * an empty env file, `probed` the one rendered with the control value of
+ * each variable (`controlEnvOf`). A field that differs between them took a
+ * variable; it must hold the control value of a variable of `allowed`, or a
+ * part of it its entry declares (`holdsControl`), and be one of the fields
+ * of that variable. The path of the field and the name of the variable, no
+ * values. Empty when clean.
+ *
+ * @param {unknown} base
+ * @param {unknown} probed
+ * @param {Map<string, Interpolated>} [allowed]
+ * @returns {string[]}
+ */
+export function checkInterpolation(base, probed, allowed = INTERPOLATED) {
+  const before = leavesOf(base);
+  const after = leavesOf(probed);
+  /** @type {string[]} */
+  const problems = [];
+  for (const path of new Set([...before.keys(), ...after.keys()])) {
+    const now = after.get(path);
+    if (now !== undefined && before.get(path) === now) continue;
+    const takers = [...allowed].filter(
+      ([, variable]) => now !== undefined && holdsControl(now, variable),
+    );
+    if (takers.length === 0) {
+      problems.push(
+        `${INTERPOLATION} ${path} changes with the variables of the stack and holds none of their control values - only the fields of INTERPOLATED may take a value from .env`,
+      );
+      continue;
+    }
+    for (const [name, { fields }] of takers) {
+      if (!fields.some((field) => isField(field, path))) {
+        problems.push(
+          `${INTERPOLATION} ${path} takes ${name} - it may land only in ${fields.join(", ")}`,
+        );
+      }
+    }
+  }
+  return problems;
 }
 
 /**

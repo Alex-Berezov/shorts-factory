@@ -422,8 +422,37 @@ function checkGateSelection(id, spec) {
     if (stray.length) return 'gates.js выбирает его на постороннем ' + stray.join(', ');
     return { note: spec.mustSkip.length + ' пропуск' };
   });
+  // gates.js берёт изменённые файлы из git (L.changedFiles: diff и ls-files --exclude-standard):
+  // файл из .gitignore туда не попадает никогда, и выбор на нём - обещание без покрытия (E0-12K, B1).
+  check('гейт ' + id + ': каждый файл выбора git показывает (не в .gitignore)', () =>
+    checkIgnoreVerdict(run('git', ['check-ignore', '--', ...spec.mustRun], { cwd: ROOT }), spec.mustRun.length));
   for (const x of spec.extra || []) check('гейт ' + id + ': ' + x.name, () => x.fn(gateProbe(id), spec));
 }
+
+/**
+ * Вердикт пробы «каждый файл выбора git показывает» по результату `git check-ignore`
+ * (spawnSync): результат - как у check. Отказ называется целиком: git не запустился -
+ * его ошибка; упал - код (или сигнал по имени) и весь stderr.
+ * r - результат run; count - число файлов выбора.
+ */
+function checkIgnoreVerdict(r, count) {
+  if (r.error) return 'git check-ignore не запустился: ' + r.error.message;
+  if (r.status === 1) return { note: count + ' видны git' };
+  if (r.status !== 0) {
+    const ended = r.status === null ? 'сигнал ' + r.signal : 'код ' + r.status;
+    return 'git check-ignore: ' + ended + ': ' + (String(r.stderr || '').trim() || 'stderr пуст');
+  }
+  const ignored = String(r.stdout || '').split(/\r?\n/).filter(Boolean);
+  return 'в .gitignore, gates.js их не увидит: ' + ignored.join(', ');
+}
+
+// Ветка «убит сигналом» пробы git check-ignore на живом git не случается: прогоняется
+// здесь на готовом результате, сигнал называется по имени (E0-12K, D7).
+check('проба git check-ignore: git, убитый сигналом, назван по сигналу', () => {
+  const got = checkIgnoreVerdict({ status: null, signal: 'SIGKILL', stdout: '', stderr: '' }, 1);
+  const want = 'git check-ignore: сигнал SIGKILL: stderr пуст';
+  return got === want || 'ожидалось «' + want + '», получено ' + JSON.stringify(got);
+});
 
 // Гейт по glob, ошибка в шаблоне, в его разборе или в пути скрипта не краснеет,
 // а молча выключает гейт (E0-11).
@@ -431,52 +460,56 @@ checkGateSelection('compose', {
   runWhat: 'файлах Compose',
   skipWhat: 'посторонних',
   mustRun: [
+    // Граф стека: compose.yaml и два файла, которые он включает
+    // (COMPOSE_SOURCES из scripts/compose-rules.mjs, правило 15). Правило 13
+    // (`init: true` у migrate, E0-12J) на infra/docker-compose.app.yml держит
+    // только гейт compose; container.test.ts файл читает, но `init: true`
+    // не проверяет.
     'compose.yaml',
     'infra/docker-compose.yml',
-    // The full stack: rule 13 (`init: true` of migrate, E0-12J) is held on
-    // this file by the compose gate; container.test.ts reads the file but
-    // does not check `init: true`.
     'infra/docker-compose.app.yml',
-    'scripts/check-compose.mjs',
-    'scripts/compose-rules.mjs',
-    // The gate finds compose.yaml through the root of scripts/lib and reads
-    // through scripts/lib/files.mjs (E0-12F).
-    'scripts/lib/paths.mjs',
-    'scripts/lib/files.mjs',
-    '.dockerignore',
-    'infra/docker/app.Dockerfile.dockerignore',
-    // Rule 12 reads the ports of the test stack from the root .env.test
-    // (E0-12C).
-    '.env.test',
-    // A Compose file added next to the others selects it from its first
-    // change (E0-12C, Q15).
-    'infra/docker-compose.prod.yml',
-    // The Compose files are taken by a wide mask: compose*.{yml,yaml} and
-    // docker-compose*.{yml,yaml} at the root - the four override names
-    // Compose merges without -f among them - and all of infra/ (E0-12C,
-    // decision D; narrowing to the include/override graph - E0-12K).
-    'compose.override.yaml',
+    // Четыре имени override, которые compose-go без -f подмешивает, в корне и
+    // в infra/ (правило 14): гейт ищет каждое, и появление файла его запускает.
     'compose.override.yml',
-    'infra/compose.yaml',
-    'infra/deploy/extra.yaml',
+    'compose.override.yaml',
     'docker-compose.override.yml',
     'docker-compose.override.yaml',
+    'infra/compose.override.yml',
+    'infra/compose.override.yaml',
+    'infra/docker-compose.override.yml',
+    'infra/docker-compose.override.yaml',
+    // Прочие имена, которые Compose ищет без -f рядом с файлами графа
+    // (правило 14, DEFAULT_FILES): infra/compose.yaml стал бы стеком
+    // `cd infra && docker compose up`. infra/.env, который правило 14 тоже ищет,
+    // здесь нет: он в .gitignore, и gates.js его изменения не видит
+    // (E0-12K, B1).
+    'compose.yml',
     'docker-compose.yml',
-    'docker-compose.prod.yaml',
-    // wide mask by decision D, narrowing - E0-12K: the gate does not read
-    // these, infra/** chooses it on them anyway. app.Dockerfile is the one
-    // Dockerfile of every image (E0-12J): rule 11 looks for
-    // app.Dockerfile.dockerignore next to it.
-    'infra/docker/app.Dockerfile',
-    'infra/README.md',
-    'infra/scripts/backup.sh',
-    'infra/postgres/init/01-test-db.sql',
-    'infra/docker-compose.yml.bak',
+    'docker-compose.yaml',
+    'infra/compose.yaml',
+    'infra/compose.yml',
+    'infra/docker-compose.yaml',
+    'scripts/check-compose.mjs',
+    'scripts/compose-rules.mjs',
+    // Читатель графа и манифест, который закрепляет пин yaml, которым тот
+    // разбирает файлы (E0-12K).
+    'scripts/lib/compose-graph.mjs',
+    'package.json',
+    // Гейт находит compose.yaml через корень из scripts/lib и читает через
+    // scripts/lib/files.mjs (E0-12F) и scripts/lib/json.mjs.
+    'scripts/lib/paths.mjs',
+    'scripts/lib/files.mjs',
+    'scripts/lib/json.mjs',
+    '.dockerignore',
+    'infra/docker/app.Dockerfile.dockerignore',
+    // Правило 12 читает порты тестового стека из корневого .env.test
+    // (E0-12C).
+    '.env.test',
   ],
   // Манифесты приложений check-compose не читает: выбор на них обещал бы
   // проверку, которой нет (E0-11, круг 7-2).
-  // Outside infra/ the when is exactly the files the gate reads (E0-12C): of
-  // scripts/lib only files.mjs and paths.mjs; only the root .env.test.
+  // when - ровно файлы, которые гейт читает (E0-12K): из scripts/lib только
+  // files.mjs, json.mjs, paths.mjs и compose-graph.mjs; только корневой .env.test.
   mustSkip: [
     'apps/web/src/app/page.tsx',
     'apps/api/package.json',
@@ -494,16 +527,30 @@ checkGateSelection('compose', {
     'scripts/lib/manifest.mjs',
     'apps/api/.env.test',
     '.env.example',
-    // Root scripts and helpers the gate does not import (E0-12C, Q16).
+    // Корневые скрипты и помощники, которые гейт не импортирует (E0-12C, Q16).
     'scripts/probe-image.mjs',
     'scripts/check-no-search-list.mjs',
     'scripts/lib/tasks.mjs',
     'scripts/lib/index.mjs',
-    // Not a Compose file by its name, or not under the mask.
+    // Не Compose-файл по имени или не под маской.
     'deploy/compose.yaml',
     'deploy/docker-compose.yml',
     'docker-compose.yml.bak',
     'apps/api/docker-compose.override.yml',
+    // Вне графа и не читаются гейтом (E0-12K): файл вне графа не входит в стек,
+    // а его включение - нарушение правила 15. Сам app.Dockerfile гейт не
+    // читает - правило 11 ищет только .dockerignore рядом с ним.
+    'infra/README.md',
+    'infra/scripts/backup.sh',
+    'infra/postgres/init/01-test-db.sql',
+    'infra/docker/app.Dockerfile',
+    'infra/docker-compose.yml.bak',
+    'infra/deploy/extra.yaml',
+    'infra/docker-compose.prod.yml',
+    'docker-compose.prod.yaml',
+    // Правило 11 читает .dockerignore только рядом с Dockerfile, который
+    // называют сборки (test/compose-rules.test.ts держит when по сборкам).
+    'infra/docker/other.Dockerfile.dockerignore',
   ],
   extra: [
     {
@@ -517,29 +564,42 @@ checkGateSelection('compose', {
     },
     { name: 'пути файлов в его note на диске', fn: ({ gate }) => notePathsOnDisk(gate) },
     {
-      // Проба отказа (E0-12J, F15/G1): when без infra/** - прочие файлы infra перечислены -
-      // не выбирает гейт на файлах стека приложения, и проба выбора выше на них краснеет.
-      // Rule 13 (`init: true` of migrate) is held on infra/docker-compose.app.yml by the
-      // gate alone. The masks of when are taken one by one: infra/** is dropped wherever it
-      // stands among them, and the files of the stack must stay in mustRun of the gate.
-      name: 'when без infra/** не выбирает его на файлах стека приложения (проба отказа)',
+      // Проба отказа (E0-12J, F15/G1; E0-12K): when без маски infra/docker-compose.app.yml
+      // не выбирает гейт на этом файле, и проба выбора выше на нём краснеет. Правило 13
+      // (`init: true` у migrate) на infra/docker-compose.app.yml держит только гейт;
+      // маски when берутся по одной, и файл обязан оставаться в mustRun.
+      // app.Dockerfile в стек пробы не входит: гейт его не читает.
+      name: 'when без infra/docker-compose.app.yml не выбирает его на файле стека приложения (проба отказа)',
       fn: ({ gate }, spec) => {
-        const stack = ['infra/docker-compose.app.yml', 'infra/docker/app.Dockerfile'];
-        const unheld = stack.filter((f) => !spec.mustRun.includes(f));
-        if (unheld.length) return 'mustRun гейта не держит ' + unheld.join(', ') + ' - проба выбора на них не краснеет';
+        const file = 'infra/docker-compose.app.yml';
+        if (!spec.mustRun.includes(file)) return 'mustRun гейта не держит ' + file + ' - проба выбора на нём не краснеет';
         const when = String(gate.when || '');
-        const m = /^glob:{(.*)}$/.exec(when);
-        if (!m) return 'when гейта не glob:{...} - проба отказа не построена: ' + when;
-        const masks = m[1].split(',');
-        if (!masks.includes('infra/**')) return 'в when гейта нет маски infra/** - проба отказа не построена: ' + when;
-        const kept = masks.filter((x) => x !== 'infra/**');
-        kept.push('infra/docker-compose.yml', 'infra/README.md', 'infra/scripts/**');
-        const narrowed = { ...gate, when: 'glob:{' + kept.join(',') + '}' };
+        // Маска снимается по тексту, а не разбором синтаксиса when: синтаксис - дело
+        // только gates.js и lib.js (E0-12K, B4).
+        if (when.split(file).length !== 2) return 'в when гейта маска ' + file + ' не ровно одна - проба отказа не построена: ' + when;
+        const narrowed = { ...gate, when: when.replace(file, file + '.off') };
         const runsNarrowed = (f) => selects(narrowed, f);
         if (!runsNarrowed('infra/docker-compose.yml')) return 'суженный when не выбирает гейт и на infra/docker-compose.yml - сужение сломало when, проба ничего не доказывает';
-        const still = stack.filter(runsNarrowed);
-        if (still.length) return 'суженный when всё ещё выбирает гейт на ' + still.join(', ') + ' - проба выбора не краснеет';
-        return { note: 'отказ на ' + stack.length + ' файлах' };
+        if (runsNarrowed(file)) return 'суженный when всё ещё выбирает гейт на ' + file + ' - проба выбора не краснеет';
+        return { note: 'отказ на ' + file };
+      },
+    },
+    {
+      // Каждый файл mustRun выбирается своей маской, а не более широкой: ни один его
+      // сосед - то же имя с суффиксом, с префиксом, на каталог ниже - гейт не выбирает.
+      // Более широкая маска (infra/**, infra/docker/*.dockerignore, **/compose.yaml)
+      // краснит пробу на первом же файле, который покрывает (E0-12K, P2).
+      name: 'каждый файл выбора выбирает его своей маской, соседи - нет',
+      fn: ({ runs }, spec) => {
+        const neighbours = (f) => {
+          const at = f.lastIndexOf('/') + 1;
+          return [f + '.bak', f.slice(0, at) + 'x-' + f.slice(at), 'x/' + f];
+        };
+        const stray = spec.mustRun
+          .flatMap(neighbours)
+          .filter((f) => !spec.mustRun.includes(f) && runs(f));
+        if (stray.length) return 'when шире файлов, которые гейт читает: выбирает его на ' + stray.join(', ');
+        return { note: spec.mustRun.length * 3 + ' соседей' };
       },
     },
   ],

@@ -192,7 +192,7 @@ PowerShell unless two variants are shown. All of them run from the repository ro
 The full stack in containers (`docker compose up --build` from the root) is described in
 `infra/README.md`. `pnpm check:compose` checks its invariants (only web published, api port,
 `NODE_ENV`, healthchecks, restart policies, the root `.env` mounted read-only at `/repo/.env`, `.env` masks in the `.dockerignore` of every built image, the test stack ports of `.env.test`, ...) through
-`docker compose config` (rule 11 reads the `.dockerignore` of every build and rule 12 the root `.env.test` from disk, `scripts/compose-rules.mjs`): it needs the Docker CLI, not a running daemon, and never reads `.env`.
+`docker compose config` (rule 11 reads the `.dockerignore` of every build and rule 12 the root `.env.test` from disk, `scripts/compose-rules.mjs`), and the stack the operator brings up with it: no override file and no other Compose file of a default name (rule 14), no Compose file outside the three of the stack through `include` or `extends` (rule 15, `scripts/lib/compose-graph.mjs`), no profiles (rule 16), a value from `.env` only where `INTERPOLATED` lets it land, no `COMPOSE_*` in the shell but the few that only change how Compose prints (`HARMLESS`) (`docs/adr/0014-compose-graph-gate.md`): it needs the Docker CLI, not a running daemon, and never reads `.env`.
 It needs Docker Compose 5.x (CI pins 5.5.1); Compose 2.x is red on purpose, see `infra/README.md`.
 
 Postgres and Redis run with `restart: unless-stopped`: once started, they come back with Docker

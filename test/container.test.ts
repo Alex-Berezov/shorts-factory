@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, posix } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -735,9 +735,11 @@ describe(".dockerignore", () => {
       ]),
     );
     const project = {
+      composeFile: join(repoRoot, "compose.yaml"),
       envFile: join(repoRoot, ".env"),
       testEnvFile: join(repoRoot, ".env.test"),
       read: readIfFile,
+      realpath: realpathSync.native,
     };
 
     expect(checkCompose({ services }, project, ["build-ignores"])).toEqual([]);

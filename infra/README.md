@@ -223,15 +223,45 @@ node image of every target is the build arg `NODE_IMAGE` (`node:22-alpine`).
   takes (`localhost`, `127.0.0.1`, `[::1]`), and Postgres and Redis publish
   those ports over TCP (no `protocol`, or `tcp` in any case) on the address
   of the same family (`127.0.0.1` for the first two, `::1` for `[::1]`) to
-  5432 and 6379 of their containers.
+  5432 and 6379 of their containers;
+- no override: none of `compose.override.{yml,yaml}` and
+  `docker-compose.override.{yml,yaml}` lies at the root or in `infra/` (or
+  next to any Compose file of the stack) - Compose merges them when run
+  without `-f`, the gate renders with `-f`, so an override is not supported:
+  change the Compose files of the stack instead. Nor another file Compose
+  looks for without `-f` (`compose.yaml`, `compose.yml`,
+  `docker-compose.yml`, `docker-compose.yaml`) that is not a file of the
+  stack: `infra/compose.yaml` would be what `cd infra && docker compose up`
+  brings up. Nor a `.env` in `infra/`: Compose reads it for the
+  interpolation of the files there, over `--env-file` (the gate finds it
+  whenever it runs, but a new `infra/.env` alone does not run it - the file
+  is in `.gitignore`, and the gates take the changes from git);
+- the Compose files of the stack are exactly `compose.yaml`,
+  `infra/docker-compose.yml` and `infra/docker-compose.app.yml`: every file
+  `include` or `extends: file:` pulls in is one of them, by its path and by
+  its realpath (`scripts/lib/compose-graph.mjs` parses them with `yaml`;
+  a form it does not take, a path with `${...}` or a parse error is a
+  violation, and a file outside them is not opened). A new Compose file of the stack goes into `COMPOSE_SOURCES` of
+  `scripts/compose-rules.mjs` and the `when` of the gate as well;
+- no service has `profiles` (the gate renders with `--profile '*'`);
+- the interpolation: only `WEB_PORT` (the published port of web, its
+  address and a range included), `APP_VERSION` and `GIT_COMMIT` (the build
+  args) may come from `.env`, and only into those fields - the gate renders a second time with a control
+  value for each and compares (`INTERPOLATED`, docs/adr/0014-compose-graph-gate.md).
 
 The JSON of `docker compose config` is checked for its shape first: a field
 in another form is a violation with its path. The gate needs the Docker CLI,
 not a running daemon, reads no `.env` (it reads `.env.test`: local addresses,
 no secrets) and takes only a Compose file at the root of the repository
 (the root `compose.yaml` by default) - for a file in `infra/` Compose would
-take `infra/` as the project directory. The gates run it when
-a file it reads changes.
+take `infra/` as the project directory. docker runs without any `COMPOSE_*`
+and without the variables of the Compose files in its environment, and any
+`COMPOSE_*` set in the shell of the gate - `COMPOSE_FILE`, `COMPOSE_PROFILES`,
+`COMPOSE_PROJECT_NAME` and the rest, but the few that only change how Compose
+prints (`HARMLESS` of `scripts/check-compose.mjs`: `COMPOSE_ANSI`,
+`COMPOSE_PROGRESS` and the like) - fails it: `docker compose up` from that
+shell would bring up another stack than the one checked. The same variables in `.env` the gate does not
+see (it never reads `.env`). The gates run it when a file it reads changes.
 
 It needs Docker Compose 5.x (CI pins 5.5.1). Compose 2.x is red on purpose:
 2.38 prints `create_host_path: false` of a bind mount as `bind: {}`, the

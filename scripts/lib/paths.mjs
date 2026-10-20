@@ -5,14 +5,16 @@
  * `@sf/config/paths`, and neither side imports the other. Next to it
  * `isEntry`, the entry guard of a root script that its tests import as a
  * module: it compares the module's path with the path node was started
- * with, the same arithmetic of paths.
+ * with, the same arithmetic of paths. And the forms paths are compared in:
+ * `fromRoot` (from the root, `/` between the parts) and `nameOn` (without
+ * the case on Windows).
  *
  * Through `fileURLToPath`, never `URL.pathname`: the pathname keeps `%20` for
  * a space and the percent escapes of every non-ASCII letter, so a checkout
  * under such a path would resolve to a directory that does not exist.
  */
 import { realpathSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { codeOf } from "./files.mjs";
 
@@ -50,6 +52,35 @@ export function canonical(path, resolvePath = realpathSync.native) {
   } catch (error) {
     throw new Error(`cannot resolve ${path}`, { cause: error });
   }
+}
+
+/**
+ * `path` from `root`, with `/` between its parts on every system: the form
+ * the masks of a gate's `when` and the lists of the compose rules name a file
+ * of the repository in (`infra/docker-compose.yml`).
+ *
+ * @param {string} root
+ * @param {string} path
+ * @returns {string}
+ */
+export function fromRoot(root, path) {
+  return relative(root, path).split(sep).join("/");
+}
+
+/**
+ * `name` - a path or the name of a variable of the environment - in the form
+ * `platform` compares it in: Windows takes both without their case
+ * (`Infra\compose.yaml` is `infra\compose.yaml`, `compose_file` is
+ * `COMPOSE_FILE`), so there it is upper-cased; elsewhere it is as it is.
+ * Compare a form with a form - a name in capitals is its own - never a form
+ * with a name as written.
+ *
+ * @param {string} name
+ * @param {string} [platform] this one by default
+ * @returns {string}
+ */
+export function nameOn(name, platform = process.platform) {
+  return platform === "win32" ? name.toUpperCase() : name;
 }
 
 /**

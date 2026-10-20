@@ -6,8 +6,9 @@
  * manifests through the Zod schema of `test/repo-files.ts` (`ManifestSchema`).
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, relative } from "node:path";
-import { repoRoot } from "./paths.mjs";
+import { join } from "node:path";
+import { isRecord } from "./json.mjs";
+import { fromRoot, repoRoot } from "./paths.mjs";
 
 /**
  * The fields of a `package.json` the root scripts read.
@@ -16,16 +17,6 @@ import { repoRoot } from "./paths.mjs";
  * @property {string} name
  * @property {Record<string, string>} dependencies empty when the file has none
  */
-
-/**
- * Whether `value` is a plain object (not null, not an array).
- *
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * A parsed `package.json` checked for the fields the scripts read; any other
@@ -130,7 +121,7 @@ export function workspaceDirs(root = repoRoot) {
     for (const entry of readdirSync(parent, { withFileTypes: true })) {
       const dir = join(parent, entry.name);
       if (entry.isDirectory() && existsSync(join(dir, "package.json"))) {
-        dirs.push(relative(root, dir).replaceAll("\\", "/"));
+        dirs.push(fromRoot(root, dir));
       }
     }
   }

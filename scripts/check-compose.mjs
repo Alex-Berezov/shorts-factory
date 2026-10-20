@@ -13,10 +13,36 @@
  * services mount is a path to the gate, not contents. Needs the Docker CLI,
  * not a running daemon.
  *
+ * What the operator's `.env` may change is checked without reading it
+ * (docs/adr/0014-compose-graph-gate.md): `config --variables` names every
+ * variable the Compose files read, each must be one of `INTERPOLATED` of
+ * compose-rules.mjs and not required, and a second render, with a control
+ * value for each, may differ from the first only in the fields listed for
+ * that variable (`checkInterpolation`). Both renders take `--profile '*'`, so
+ * a service behind a profile reaches the rules (rule 16), as does every file
+ * of the graph of the root file (rules 14, 15 and 17, read from the disk).
+ *
+ * docker runs with a copy of the environment of the gate, taken name by name:
+ * without any `COMPOSE_*` and without the variables of the Compose files, so
+ * neither the shell nor a `COMPOSE_PROFILES` there renders another stack than
+ * the files give; on Windows the names are compared without their case, as
+ * Windows reads them. Any `COMPOSE_*` set in that environment - but the ones
+ * of `HARMLESS`, which change how Compose prints, not what it brings up -
+ * fails the gate before docker runs: `docker compose up` from the same shell
+ * would bring up another stack than the one checked (`COMPOSE_FILE`,
+ * `COMPOSE_PROFILES`, `COMPOSE_ENV_FILES` measured,
+ * tasks/2026-10-20-E0-12K.md). The values are never printed, only the names.
+ * A `COMPOSE_*` written in the root `.env` changes the stack of `docker
+ * compose up` as well, and the gate, which does not read `.env`, does not
+ * see it (docs/TECH_DEBT.md, E1-12).
+ *
  * Besides the configuration it reads the `.dockerignore` of every build
  * context and looks for a `<Dockerfile>.dockerignore` next to each Dockerfile
  * (rule 11), reads the root `.env.test` - local Compose addresses, no
- * secrets - for the ports of the test stack (rule 12): files, not secrets.
+ * secrets - for the ports of the test stack (rule 12), the Compose files of
+ * the graph (rule 15; a file outside `COMPOSE_SOURCES` it names, not opens),
+ * and looks for an override, another Compose file of a default name or a
+ * `.env` next to them (rule 14) without opening it: files, not secrets.
  *
  * `--no-env-resolution`: without it `docker compose config` replaces every
  * `env_file` by the variables read from it, so a service that still has an
@@ -43,46 +69,137 @@
  * be read; exit 0 when clean.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   RENDERING_PROBE,
   RENDERING_PROBE_SOURCE,
   checkCompose,
+  checkInterpolation,
   checkRendering,
+  checkVariables,
+  controlEnvOf,
   defaultComposeFile,
 } from "./compose-rules.mjs";
 import { isGone, readIfFile } from "./lib/files.mjs";
-import { canonical, isEntry, repoRoot } from "./lib/paths.mjs";
+import { canonical, isEntry, nameOn, repoRoot } from "./lib/paths.mjs";
 
 /**
- * What `main` works with; each has a default that reaches docker, the disk
- * and the console.
+ * An environment of a process, by name.
+ *
+ * @typedef {Record<string, string | undefined>} Environment
+ */
+
+/**
+ * What `main` works with; each has a default that reaches docker, the disk,
+ * the environment of the process and the console.
  *
  * @typedef {object} GateDeps
- * @property {(args: string[]) => string} [compose] `docker compose` with
- *   `args`, its standard output; throws as `execFileSync` does
+ * @property {(args: string[], env: Environment) => string} [compose]
+ *   `docker compose` with `args` in the environment `env`, its standard
+ *   output; throws as `execFileSync` does
  * @property {(path: string) => string | null} [read] contents of a file,
  *   null if there is none
  * @property {(path: string) => string} [realpath] the canonical path of an
- *   existing one, throwing for any other; the default is the one of
+ *   existing one, throwing for any other - with the code `ENOENT` for a path
+ *   that is not there; the default is the native realpath, the one of
  *   `canonical`
+ * @property {Environment} [env] the environment of the gate, the one docker
+ *   gets a copy of; the default is the environment of this process
+ * @property {string} [platform] whose rules the names of `env` follow
+ *   (`win32` compares them without their case); the default is this one
  * @property {(line: string) => void} [out]
  * @property {(line: string) => void} [err]
  */
 
 /**
- * `docker compose` with `args`, its standard output.
+ * `docker compose` with `args` in the environment `env`, its standard output.
  *
  * @param {string[]} args
+ * @param {Environment} env
  * @returns {string}
  */
-function dockerCompose(args) {
+function dockerCompose(args, env) {
   return execFileSync("docker", ["compose", ...args], {
     encoding: "utf8",
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+/**
+ * The `COMPOSE_*` variables of the environment that change how Compose talks
+ * and prints, not the stack it brings up: colours, progress, the menu, how
+ * many calls at once, what it says of orphans. Every other `COMPOSE_*` set in
+ * the shell of the gate - `COMPOSE_FILE`, `COMPOSE_PROFILES`,
+ * `COMPOSE_ENV_FILES`, `COMPOSE_PROJECT_NAME`, `COMPOSE_DISABLE_ENV_FILE`, a
+ * new one of a later Compose - would be set for the operator's command too,
+ * and may bring up another stack than the one checked.
+ */
+const HARMLESS = [
+  "COMPOSE_ANSI",
+  "COMPOSE_PROGRESS",
+  "COMPOSE_STATUS_STDOUT",
+  "COMPOSE_MENU",
+  "COMPOSE_PARALLEL_LIMIT",
+  "COMPOSE_IGNORE_ORPHANS",
+  "COMPOSE_REMOVE_ORPHANS",
+];
+
+/**
+ * Whether `name` of an environment is a `COMPOSE_*` variable, by the name the
+ * platform reads (`nameOn`) - the one test `stackChangingIn` and `dockerEnvOf`
+ * take, so the variables the gate refuses and the ones it drops for docker
+ * cannot drift apart.
+ *
+ * @param {string} name
+ * @param {string} platform
+ * @returns {boolean}
+ */
+function isComposeVariable(name, platform) {
+  return nameOn(name, platform).startsWith("COMPOSE_");
+}
+
+/**
+ * The names of `env` that are a `COMPOSE_*` outside `HARMLESS` and hold a
+ * value, as `env` writes them; the names are compared the way the platform
+ * reads them (`nameOn`).
+ *
+ * @param {Environment} env
+ * @param {string} platform
+ * @returns {string[]}
+ */
+function stackChangingIn(env, platform) {
+  return Object.keys(env).filter(
+    (name) =>
+      isComposeVariable(name, platform) &&
+      !HARMLESS.includes(nameOn(name, platform)) &&
+      (env[name] ?? "") !== "",
+  );
+}
+
+/**
+ * A copy of `env` for docker, taken name by name: without any `COMPOSE_*`
+ * and without the names of `dropped` (the variables of the Compose files),
+ * compared the way the platform reads them. `DOCKER_*` and the rest stay - the
+ * Compose plugin is found through them.
+ *
+ * @param {Environment} env
+ * @param {string} platform
+ * @param {readonly string[]} dropped
+ * @returns {Environment}
+ */
+function dockerEnvOf(env, platform, dropped) {
+  const drop = new Set(dropped.map((name) => nameOn(name, platform)));
+  /** @type {Environment} */
+  const copy = {};
+  for (const name of Object.keys(env)) {
+    if (isComposeVariable(name, platform) || drop.has(nameOn(name, platform)))
+      continue;
+    copy[name] = env[name];
+  }
+  return copy;
 }
 
 /**
@@ -97,22 +214,13 @@ function detailOf(error) {
 }
 
 /**
- * The codes `execFileSync` gives a call it ended itself, on a limit of the
- * gate rather than on anything docker did: more output than the buffer of
- * the call holds, or a call past its time limit. Node ends such a call with
- * SIGTERM, so without the code it reads as a docker somebody stopped.
- */
-const GATE_LIMITS = {
-  ENOBUFS: "printed more than the gate reads (ENOBUFS)",
-  ETIMEDOUT: "ran past the time limit of the gate (ETIMEDOUT)",
-};
-
-/**
  * How a failed call of docker ended when it ran - `exited with code N`,
- * `was ended by SIGTERM`, or a limit of the gate (`GATE_LIMITS`), told by the
+ * `was ended by SIGTERM`, or a limit of the gate (more output than the buffer of the call holds,
+ * `ENOBUFS`, which Node ends with SIGTERM), told by the
  * code of the failure before its signal - or undefined when it never started
- * (`ENOENT` and any other failure of the spawn itself). A call that ran fails
- * with `execFileSync`'s `Command failed: …`, the whole stderr appended.
+ * (a failure of the spawn itself, `ENOENT` among them, carries no status and
+ * no signal). A call that ran fails with `execFileSync`'s `Command failed: …`,
+ * the whole stderr appended.
  *
  * @param {unknown} error
  * @returns {{ text: string, gateLimit: boolean } | undefined}
@@ -120,10 +228,12 @@ const GATE_LIMITS = {
 function endingOf(error) {
   if (typeof error !== "object" || error === null) return undefined;
   const code = "code" in error ? error.code : undefined;
-  if (code === "ENOBUFS" || code === "ETIMEDOUT") {
-    return { text: GATE_LIMITS[code], gateLimit: true };
+  if (code === "ENOBUFS") {
+    return {
+      text: "printed more than the gate reads (ENOBUFS)",
+      gateLimit: true,
+    };
   }
-  if (code === "ENOENT") return undefined;
   const status = "status" in error ? error.status : undefined;
   if (typeof status === "number") {
     return { text: `exited with code ${status}`, gateLimit: false };
@@ -239,9 +349,16 @@ class UnreadableInputError extends Error {
   }
 }
 
+/** What stands for the control env file of the gate in a command to repeat. */
+const CONTROL_ENV_PLACEHOLDER = "<control env file>";
+
 /**
  * The gate. Returns the exit code: 0 clean, 1 a violation or a configuration
  * that could not be read.
+ *
+ * Calls docker in this order: the rendering probe, the variables of the
+ * stack, the stack with an empty env file, the stack with the control values
+ * - and only then the rules, on the first of the two renders.
  *
  * @param {string[]} argv
  * @param {GateDeps} [deps]
@@ -252,6 +369,10 @@ export function main(argv, deps = {}) {
     compose = dockerCompose,
     read = readIfFile,
     realpath,
+    // The gate hands docker a copy of its own environment, by name, and
+    // prints names only (docs/adr/0014-compose-graph-gate.md).
+    env = process.env,
+    platform = process.platform,
     out = console.log,
     err = console.error,
   } = deps;
@@ -282,6 +403,15 @@ export function main(argv, deps = {}) {
     );
     return 1;
   }
+  const changing = stackChangingIn(env, platform);
+  if (changing.length > 0) {
+    for (const name of changing) {
+      err(
+        `check-compose: ${name} is set in the environment of the gate - docker compose up from this shell would bring up another stack than the one checked; unset it and run the gate again (its value is not printed)`,
+      );
+    }
+    return 1;
+  }
 
   const scratch = mkdtempSync(join(tmpdir(), "sf-check-compose-"));
   try {
@@ -292,25 +422,49 @@ export function main(argv, deps = {}) {
     writeFileSync(join(scratch, RENDERING_PROBE_SOURCE), "");
 
     /**
-     * The arguments that render `composeFile` as JSON, with `envFile` for
-     * the interpolation.
+     * The arguments of `docker compose config` for `composeFile`, with
+     * `envFile` for the interpolation and every profile on, and `output` -
+     * what it prints: one list of the flags for every call, so the
+     * variables and the renders read the same stack.
+     *
+     * @param {string} composeFile
+     * @param {string} envFile
+     * @param {string[]} output
+     * @returns {string[]}
+     */
+    const configArgs = (composeFile, envFile, output) => [
+      "--env-file",
+      envFile,
+      "-f",
+      composeFile,
+      "--profile",
+      "*",
+      "config",
+      ...output,
+      "--format",
+      "json",
+    ];
+    /**
+     * The arguments that render `composeFile` as JSON.
      *
      * @param {string} composeFile
      * @param {string} [envFile]
      * @returns {string[]}
      */
-    const renderArgs = (composeFile, envFile = emptyEnvFile) => [
-      "--env-file",
-      envFile,
-      "-f",
-      composeFile,
-      "config",
-      "--no-env-resolution",
-      "--format",
-      "json",
-    ];
+    const renderArgs = (composeFile, envFile = emptyEnvFile) =>
+      configArgs(composeFile, envFile, ["--no-env-resolution"]);
+    /**
+     * The arguments that list the variables the Compose files read.
+     *
+     * @param {string} envFile
+     * @returns {string[]}
+     */
+    const variablesArgs = (envFile) =>
+      configArgs(file, envFile, ["--variables"]);
     /** @type {(stdout: string) => unknown} */
     const parse = (stdout) => JSON.parse(stdout);
+    /** The environment of every call before the variables are known. */
+    let dockerEnv = dockerEnvOf(env, platform, []);
 
     /**
      * Runs `docker compose` with `args` and hands its output to `then`; on a
@@ -328,7 +482,7 @@ export function main(argv, deps = {}) {
       /** @type {string} */
       let stdout;
       try {
-        stdout = compose(args);
+        stdout = compose(args, dockerEnv);
       } catch (error) {
         if (isGone(error)) {
           // No Docker CLI is a missing prerequisite, not a broken file.
@@ -381,6 +535,29 @@ export function main(argv, deps = {}) {
       return 1;
     }
 
+    const variables = attempt(
+      `docker compose config --variables failed for ${file}`,
+      variablesArgs(emptyEnvFile),
+      parse,
+      (ending) => [
+        ...repeatable(
+          commandOf(variablesArgs(EMPTY_ENV_PLACEHOLDER)),
+          true,
+        )(ending),
+        "  (create an empty file and pass its path as --env-file)",
+      ],
+    );
+    if (variables === null) return 1;
+    const known = checkVariables(variables.value);
+    if (known.problems.length > 0) {
+      err(`check-compose: ${file}`);
+      for (const problem of known.problems) err(`  ${problem}`);
+      return 1;
+    }
+    // From here on neither the shell nor the operator's environment gives a
+    // variable of the Compose files a value: only the env file of the call.
+    dockerEnv = dockerEnvOf(env, platform, known.names);
+
     const config = attempt(
       `docker compose config failed for ${file}`,
       renderArgs(file),
@@ -394,6 +571,22 @@ export function main(argv, deps = {}) {
       ],
     );
     if (config === null) return 1;
+    const controlEnvFile = join(scratch, "control.env");
+    writeFileSync(controlEnvFile, controlEnvOf(known.names));
+    const controlled = attempt(
+      `docker compose config failed for ${file} with the control values of its variables`,
+      renderArgs(file, controlEnvFile),
+      parse,
+      (ending) => [
+        ...repeatable(
+          commandOf(renderArgs(file, CONTROL_ENV_PLACEHOLDER)),
+          true,
+        )(ending),
+        "  (pass as --env-file a file with NAME=control for each variable of INTERPOLATED in scripts/compose-rules.mjs)",
+      ],
+    );
+    if (controlled === null) return 1;
+
     /** @type {(path: string) => string | null} */
     const readInput = (path) => {
       try {
@@ -402,14 +595,31 @@ export function main(argv, deps = {}) {
         throw new UnreadableInputError(path, error);
       }
     };
+    const resolvePath = realpath ?? realpathSync.native;
+    /** @type {(path: string) => string} */
+    const realpathInput = (path) => {
+      try {
+        return resolvePath(path);
+      } catch (error) {
+        // Not there is an answer the rules take; anything else is not.
+        if (isGone(error)) throw error;
+        throw new UnreadableInputError(path, error);
+      }
+    };
     /** @type {string[]} */
     let problems;
     try {
-      problems = checkCompose(config.value, {
-        envFile: join(root, ".env"),
-        testEnvFile: join(root, ".env.test"),
-        read: readInput,
-      });
+      problems = [
+        ...checkCompose(config.value, {
+          composeFile: file,
+          envFile: join(root, ".env"),
+          testEnvFile: join(root, ".env.test"),
+          read: readInput,
+          realpath: realpathInput,
+          platform,
+        }),
+        ...checkInterpolation(config.value, controlled.value),
+      ];
     } catch (error) {
       if (!(error instanceof UnreadableInputError)) throw error;
       err(`check-compose: cannot read ${error.path}, a file the rules check`);

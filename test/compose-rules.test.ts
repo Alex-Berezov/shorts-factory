@@ -1,27 +1,42 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { parse } from "yaml";
+import { z } from "zod";
 import {
+  COMPOSE_SOURCES,
+  DEFAULT_FILES,
+  INTERPOLATED,
+  OVERRIDE_FILES,
   RENDERING_PROBE,
   RENDERING_PROBE_SOURCE,
   RULE_IDS,
   TEST_STACK_BINDS,
   checkCompose,
   checkDockerignore,
+  checkInterpolation,
   checkRendering,
+  checkVariables,
+  controlEnvOf,
   defaultComposeFile,
   durationSec,
+  isComposeSource,
 } from "../scripts/compose-rules.mjs";
-import { repoRoot } from "../scripts/lib/paths.mjs";
+import { fromRoot, repoRoot } from "../scripts/lib/paths.mjs";
 import {
+  CLEAN_APP_COMPOSE,
   CLEAN_IGNORE,
+  CLEAN_INFRA_COMPOSE,
+  CLEAN_ROOT_COMPOSE,
   CLEAN_TEST_ENV,
   type Service,
   buildAt,
   cleanFilesAt,
   cleanStack,
+  realpathIn,
 } from "./compose-fixture.js";
-import { readRepoFile } from "./repo-files.js";
+import { readRepoFile, readRepoJson } from "./repo-files.js";
 
 /**
  * The rules `pnpm check:compose` holds the full stack to, each fed a
@@ -34,7 +49,7 @@ import { readRepoFile } from "./repo-files.js";
 /** The project's `.env`, absolute, as Compose resolves `../.env` of a bind. */
 const PROJECT_ENV = "/srv/shorts-factory/.env";
 /** The build context of every image: the root of the project. */
-const CONTEXT = join("/srv", "shorts-factory");
+const CONTEXT = resolve("/srv", "shorts-factory");
 /** The root `.env.test` of the project. */
 const TEST_ENV_FILE = join(CONTEXT, ".env.test");
 /** A reader of the files in `files` (path -> contents), null for others. */
@@ -47,29 +62,52 @@ function cleanFiles(): Record<string, string> {
   return cleanFilesAt(CONTEXT);
 }
 
-/** The project of `check`: its `.env`, its `.env.test` and `read`. */
-function projectWith(read: (path: string) => string | null) {
+/** The root Compose file of the project of `check`. */
+const COMPOSE_FILE = join(CONTEXT, "compose.yaml");
+
+/**
+ * The project of `check`: its root Compose file, its `.env`, its
+ * `.env.test`, `read` and `realpath` (by default one over nothing).
+ */
+function projectWith(
+  read: (path: string) => string | null,
+  realpath: (path: string) => string = realpathIn({}),
+) {
   return {
+    composeFile: COMPOSE_FILE,
     envFile: PROJECT_ENV,
     testEnvFile: TEST_ENV_FILE,
     read,
+    realpath,
   };
 }
 
-/**
- * `checkCompose` for a project whose `.env` is `PROJECT_ENV`, with the files
- * of `cleanFiles` changed by `files` (a null removes one).
- */
-function check(
-  config: unknown,
-  files: Record<string, string | null> = {},
-): string[] {
-  const present = Object.fromEntries(
+/** The files of `cleanFiles` changed by `files` (a null removes one). */
+function filesWith(
+  files: Record<string, string | null>,
+): Record<string, string> {
+  return Object.fromEntries(
     Object.entries({ ...cleanFiles(), ...files }).filter(
       (entry): entry is [string, string] => entry[1] !== null,
     ),
   );
-  return checkCompose(config, projectWith(reader(present)));
+}
+
+/**
+ * `checkCompose` for a project whose `.env` is `PROJECT_ENV`, with the files
+ * of `cleanFiles` changed by `files` (a null removes one) and the links of
+ * `links` (path -> target) on its disk.
+ */
+function check(
+  config: unknown,
+  files: Record<string, string | null> = {},
+  links: Record<string, string> = {},
+): string[] {
+  const present = filesWith(files);
+  return checkCompose(
+    config,
+    projectWith(reader(present), realpathIn(present, links)),
+  );
 }
 
 /** Rule 11 alone, the way test/container.test.ts runs it, with `read`. */
@@ -1106,6 +1144,462 @@ describe("checkCompose", () => {
     });
   });
 
+  /** What rule 14 says of an override at `path` in `dir`. */
+  function overrideAt(dir: string, name: string): string {
+    return `${join(dir, name)}: Compose merges it into the stack when run without -f from ${dir}, and the gate renders with -f - an override is not supported, change the Compose files of the stack instead`;
+  }
+
+  describe("14. no override", () => {
+    const INFRA = join(CONTEXT, "infra");
+
+    it.each(
+      OVERRIDE_FILES.flatMap((name) => [
+        [name, CONTEXT],
+        [name, INFRA],
+      ]),
+    )("refuses %s in %s", (name, dir) => {
+      expect(
+        check(cleanConfig(), { [join(dir, name)]: "services: {}\n" }),
+      ).toEqual([overrideAt(dir, name)]);
+    });
+
+    it.each([
+      ...["compose.yml", "docker-compose.yml", "docker-compose.yaml"].map(
+        (name) => [name, CONTEXT],
+      ),
+      ...["compose.yaml", "compose.yml", "docker-compose.yaml"].map((name) => [
+        name,
+        INFRA,
+      ]),
+    ])(
+      "refuses %s in %s, a Compose file of a default name off the graph",
+      (name, dir) => {
+        const path = join(dir, name);
+
+        expect(check(cleanConfig(), { [path]: "services: {}\n" })).toEqual([
+          `${path}: Compose looks for it when run without -f from ${dir} (compose.yaml, compose.yml, docker-compose.yml, docker-compose.yaml - the first it finds is the stack), and it is not a file of the graph the gate renders - keep one Compose file of the stack in a directory`,
+        ]);
+      },
+    );
+
+    it("takes the files of the graph of a default name for its own", () => {
+      expect(DEFAULT_FILES).toEqual([
+        "compose.yaml",
+        "compose.yml",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+      ]);
+      expect(check(cleanConfig())).toEqual([]);
+    });
+
+    it("refuses a .env next to a file of the graph outside the root, without reading it", () => {
+      const envFile = join(INFRA, ".env");
+      const present = filesWith({ [envFile]: "WEB_PORT=0.0.0.0:5432\n" });
+      const read = vi.fn(reader(present));
+
+      const problems = checkCompose(
+        cleanConfig(),
+        projectWith(read, realpathIn(present)),
+      );
+
+      expect(problems).toEqual([
+        `${envFile}: Compose reads it for the interpolation of the Compose files of ${INFRA} over --env-file, and the gate does not read .env - keep the variables in the root .env`,
+      ]);
+      expect(read.mock.calls.map(([path]) => path)).not.toContain(envFile);
+      expect(problems.join("\n")).not.toContain("5432");
+    });
+
+    it("takes the .env of the root for the operator's", () => {
+      expect(
+        check(cleanConfig(), { [join(CONTEXT, ".env")]: "WEB_PORT=8080\n" }),
+      ).toEqual([]);
+    });
+
+    it("throws a failure of the realpath other than a path that is not there", () => {
+      const denied = Object.assign(new Error("EACCES: realpath"), {
+        code: "EACCES",
+      });
+      const present = cleanFiles();
+      const realpath = (path: string): string => {
+        if (path === join(CONTEXT, OVERRIDE_FILES[0] ?? "")) throw denied;
+        return realpathIn(present)(path);
+      };
+
+      expect(() =>
+        checkCompose(cleanConfig(), projectWith(reader(present), realpath)),
+      ).toThrow(denied);
+    });
+  });
+
+  describe("15. compose sources", () => {
+    const OUTSIDE = `not one of the Compose files the gate is chosen on (${COMPOSE_SOURCES.join(", ")}), so a change to it would not run the gate`;
+    const APP = join(CONTEXT, "infra", "docker-compose.app.yml");
+
+    it("refuses an include of a file outside COMPOSE_SOURCES", () => {
+      const extra = join(CONTEXT, "deploy", "extra.yml");
+
+      expect(
+        check(cleanConfig(), {
+          [COMPOSE_FILE]: `${CLEAN_ROOT_COMPOSE}  - deploy/extra.yml\n`,
+          [extra]: "services: {}\n",
+        }),
+      ).toEqual([`${COMPOSE_FILE}: include[2] names ${extra} - ${OUTSIDE}`]);
+    });
+
+    it("refuses an extends of a file outside COMPOSE_SOURCES", () => {
+      const base = join(CONTEXT, "deploy", "base.yml");
+
+      expect(
+        check(cleanConfig(), {
+          [APP]:
+            "services:\n  api:\n    extends:\n      file: ../deploy/base.yml\n      service: api\n",
+          [base]: "services:\n  api:\n    image: x\n",
+        }),
+      ).toEqual([
+        `${APP}: services.api.extends.file names ${base} - ${OUTSIDE}`,
+      ]);
+    });
+
+    it("refuses a file of COMPOSE_SOURCES that is a link to a file outside", () => {
+      const target = join(CONTEXT, "deploy", "evil.yml");
+
+      expect(
+        check(cleanConfig(), { [target]: "services: {}\n" }, { [APP]: target }),
+      ).toEqual([
+        `${COMPOSE_FILE}: include[1] names ${APP}, a link to ${target} - ${OUTSIDE}`,
+      ]);
+    });
+
+    it("refuses a link outside COMPOSE_SOURCES to a file of them", () => {
+      const alias = join(CONTEXT, "deploy", "app.yml");
+
+      expect(
+        check(
+          cleanConfig(),
+          {
+            [COMPOSE_FILE]:
+              "include:\n  - infra/docker-compose.yml\n  - deploy/app.yml\n",
+          },
+          { [alias]: APP },
+        ),
+      ).toEqual([`${COMPOSE_FILE}: include[1] names ${alias} - ${OUTSIDE}`]);
+    });
+
+    it("refuses a root file that is not one of COMPOSE_SOURCES", () => {
+      const other = join(CONTEXT, "compose.yml");
+      const present = { ...cleanFiles(), [other]: CLEAN_ROOT_COMPOSE };
+
+      expect(
+        checkCompose(cleanConfig(), {
+          ...projectWith(reader(present), realpathIn(present)),
+          composeFile: other,
+        }),
+      ).toEqual([
+        // compose.yaml is a file of a default name next to it, off its graph.
+        `${COMPOSE_FILE}: Compose looks for it when run without -f from ${CONTEXT} (compose.yaml, compose.yml, docker-compose.yml, docker-compose.yaml - the first it finds is the stack), and it is not a file of the graph the gate renders - keep one Compose file of the stack in a directory`,
+        `${other}: the root file is ${OUTSIDE}`,
+      ]);
+    });
+
+    it("gives the problems of the reader as its own", () => {
+      expect(
+        check(cleanConfig(), {
+          [COMPOSE_FILE]: "include: infra/docker-compose.yml\n",
+        }),
+      ).toEqual([`${COMPOSE_FILE}: include is not a list`]);
+    });
+
+    it("reads the graph once for rules 14 and 15", () => {
+      const present = cleanFiles();
+      const read = vi.fn(reader(present));
+
+      checkCompose(cleanConfig(), projectWith(read, realpathIn(present)));
+
+      expect(
+        read.mock.calls.filter(([path]) => path === COMPOSE_FILE),
+      ).toHaveLength(1);
+    });
+
+    it("reads the graph again on every call, for the same project", () => {
+      const extra = join(CONTEXT, "deploy", "extra.yml");
+      const files: Record<string, string> = { ...cleanFiles(), [extra]: "" };
+      const project = projectWith(
+        (path) => files[path] ?? null,
+        realpathIn(files),
+      );
+
+      expect(checkCompose(cleanConfig(), project)).toEqual([]);
+      files[COMPOSE_FILE] = `${CLEAN_ROOT_COMPOSE}  - deploy/extra.yml\n`;
+
+      expect(checkCompose(cleanConfig(), project)).toEqual([
+        `${COMPOSE_FILE}: include[2] names ${extra} - ${OUTSIDE}`,
+      ]);
+    });
+
+    it("opens no Compose file for a choice of rules without 14 and 15", () => {
+      // Rule 11 alone, as test/container.test.ts runs it: a Compose file that
+      // cannot be read answers by the rule, not by a failure of the graph (C8).
+      const files = cleanFiles();
+      const read = vi.fn((path: string): string | null => {
+        if (path === COMPOSE_FILE) throw new Error("the graph was read");
+        return files[path] ?? null;
+      });
+      const realpath = vi.fn(realpathIn(files));
+
+      expect(
+        checkCompose(cleanConfig(), projectWith(read, realpath), [
+          "build-ignores",
+        ]),
+      ).toEqual([]);
+      expect(read.mock.calls.map(([path]) => path)).not.toContain(COMPOSE_FILE);
+      expect(realpath).toHaveBeenCalledTimes(0);
+    });
+
+    it.each([
+      ["win32", []],
+      [
+        "linux",
+        [
+          // Off the graph there, infra/docker-compose.yml is one more file of
+          // a default name next to it.
+          `${join(CONTEXT, "infra", "docker-compose.yml")}: Compose looks for it when run without -f from ${join(CONTEXT, "infra")} (compose.yaml, compose.yml, docker-compose.yml, docker-compose.yaml - the first it finds is the stack), and it is not a file of the graph the gate renders - keep one Compose file of the stack in a directory`,
+          `${COMPOSE_FILE}: include[0] names ${join(CONTEXT, "Infra", "docker-compose.yml")} - not one of the Compose files the gate is chosen on (${COMPOSE_SOURCES.join(", ")}), so a change to it would not run the gate`,
+        ],
+      ],
+    ])(
+      "compares a path written in another case the way %s opens it",
+      (platform, problems) => {
+        // Windows opens Infra\docker-compose.yml as infra\docker-compose.yml,
+        // Linux as another file (C10).
+        const written = join(CONTEXT, "Infra", "docker-compose.yml");
+        const present = filesWith({
+          [COMPOSE_FILE]: CLEAN_ROOT_COMPOSE.replace(
+            "  - infra/docker-compose.yml",
+            "  - Infra/docker-compose.yml",
+          ),
+        });
+        const links = {
+          [written]: join(CONTEXT, "infra", "docker-compose.yml"),
+        };
+
+        expect(
+          checkCompose(cleanConfig(), {
+            ...projectWith(reader(present), realpathIn(present, links)),
+            platform,
+          }),
+        ).toEqual(problems);
+      },
+    );
+
+    it.each([
+      ["win32", 0],
+      ["linux", 2],
+    ])(
+      "takes a file of the graph whose name on disk is in another case for its own on %s",
+      (platform, count) => {
+        // The disk has infra\Docker-Compose.yml; the realpath gives its case.
+        const onDisk = join(CONTEXT, "infra", "Docker-Compose.yml");
+        const present = filesWith({
+          [join(CONTEXT, "infra", "docker-compose.yml")]: null,
+          [onDisk]: CLEAN_INFRA_COMPOSE,
+        });
+        const links = {
+          [join(CONTEXT, "infra", "docker-compose.yml")]: onDisk,
+        };
+
+        expect(
+          checkCompose(cleanConfig(), {
+            ...projectWith(reader(present), realpathIn(present, links)),
+            platform,
+          }),
+        ).toHaveLength(count);
+      },
+    );
+
+    it("does not open a file it names outside COMPOSE_SOURCES", () => {
+      const extra = join(CONTEXT, "deploy", "extra.yml");
+      const present = filesWith({
+        [COMPOSE_FILE]: `${CLEAN_ROOT_COMPOSE}  - deploy/extra.yml\n`,
+        [extra]: "services: {}\n",
+      });
+      const read = vi.fn(reader(present));
+
+      expect(
+        checkCompose(cleanConfig(), projectWith(read, realpathIn(present))),
+      ).toEqual([`${COMPOSE_FILE}: include[2] names ${extra} - ${OUTSIDE}`]);
+      expect(read.mock.calls.map(([path]) => path)).not.toContain(extra);
+    });
+
+    it.each(["win32", "linux"])(
+      "opens on %s exactly the files of the graph it does not refuse",
+      (platform) => {
+        // The reader and rule 15 take one test of a Compose file (D2): a file
+        // is either read or named outside, never both, never neither.
+        const infra = join(CONTEXT, "infra", "docker-compose.yml");
+        const written = join(CONTEXT, "Infra", "docker-compose.yml");
+        const extra = join(CONTEXT, "deploy", "extra.yml");
+        const present = filesWith({
+          [COMPOSE_FILE]: `${CLEAN_ROOT_COMPOSE.replace(
+            "  - infra/docker-compose.yml",
+            "  - Infra/docker-compose.yml",
+          )}  - deploy/extra.yml\n`,
+          [extra]: "services: {}\n",
+        });
+        const read = vi.fn(reader(present));
+
+        const problems = checkCompose(cleanConfig(), {
+          ...projectWith(read, realpathIn(present, { [written]: infra })),
+          platform,
+        });
+
+        const opened = read.mock.calls.map(([path]) => path);
+        for (const [path, target] of [
+          [written, infra],
+          [extra, extra],
+        ] as const) {
+          const refused = problems.some((problem) =>
+            problem.includes(`names ${path} - ${OUTSIDE}`),
+          );
+          expect({ path, refused, opened: opened.includes(target) }).toEqual({
+            path,
+            refused,
+            opened: !refused,
+          });
+        }
+      },
+    );
+  });
+
+  describe("16. no profiles", () => {
+    it("refuses a service with a profile", () => {
+      const config = broken("redis", (service) => {
+        service.profiles = ["debug", "x"];
+      });
+
+      expect(check(config)).toEqual([
+        "redis: has profiles (debug, x) - the stack would change with the profile the operator turns on; the stack has none",
+      ]);
+    });
+  });
+
+  describe("17. values from the files of the graph alone", () => {
+    const APP = join(CONTEXT, "infra", "docker-compose.app.yml");
+    const INFRA = join(CONTEXT, "infra", "docker-compose.yml");
+    const OUTSIDE_ENV =
+      "Compose takes its value from .env or the shell, past the env file of the gate";
+    /** The clean app Compose file with `lines` under its service api. */
+    function appWith(lines: string): Record<string, string> {
+      return { [APP]: `${CLEAN_APP_COMPOSE}${lines}` };
+    }
+
+    it("refuses a key of a list environment without a value", () => {
+      const lines = [
+        "    environment:",
+        "      - NODE_ENV=production",
+        "      - REDIS_URL",
+        "      - EMPTY=",
+        "",
+      ].join("\n");
+
+      expect(check(cleanConfig(), appWith(lines))).toEqual([
+        `${APP}: services.api.environment[1] (REDIS_URL) has no value - ${OUTSIDE_ENV}`,
+      ]);
+    });
+
+    it("refuses a key of a mapping environment that is null", () => {
+      const lines = [
+        "    environment:",
+        "      NODE_ENV: production",
+        "      REDIS_URL:",
+        '      EMPTY: ""',
+        "",
+      ].join("\n");
+
+      expect(check(cleanConfig(), appWith(lines))).toEqual([
+        `${APP}: services.api.environment.REDIS_URL has no value - ${OUTSIDE_ENV}`,
+      ]);
+    });
+
+    it("refuses a key without a value that a merge key brings into another file of the graph", () => {
+      const text = [
+        "x-env: &env",
+        "  PGPASSWORD:",
+        "services:",
+        "  postgres:",
+        "    image: postgres",
+        "    environment:",
+        "      <<: *env",
+        "",
+      ].join("\n");
+
+      expect(check(cleanConfig(), { [INFRA]: text })).toEqual([
+        `${INFRA}: services.postgres.environment.PGPASSWORD has no value - ${OUTSIDE_ENV}`,
+      ]);
+    });
+
+    it("refuses a key of a list build.args without a value", () => {
+      const lines = [
+        "      args:",
+        "        - APP_VERSION=1",
+        "        - NPM_TOKEN",
+        "",
+      ].join("\n");
+
+      expect(check(cleanConfig(), appWith(lines))).toEqual([
+        `${APP}: services.api.build.args[1] (NPM_TOKEN) has no value - ${OUTSIDE_ENV}`,
+      ]);
+    });
+
+    it("refuses a key of a mapping build.args that is null", () => {
+      const lines = [
+        "      args:",
+        "        APP_VERSION: 1",
+        "        NPM_TOKEN:",
+        "",
+      ].join("\n");
+
+      expect(check(cleanConfig(), appWith(lines))).toEqual([
+        `${APP}: services.api.build.args.NPM_TOKEN has no value - ${OUTSIDE_ENV}`,
+      ]);
+    });
+
+    it("lets a build.args value with an empty default through", () => {
+      const lines = [
+        "      args:",
+        "        APP_VERSION: ${APP_VERSION:-}",
+        "        GIT_COMMIT: ${GIT_COMMIT:-}",
+        "",
+      ].join("\n");
+
+      expect(check(cleanConfig(), appWith(lines))).toEqual([]);
+    });
+
+    it.each(
+      ["configs", "secrets"].flatMap((key) =>
+        [
+          "file: ./app.conf",
+          "environment: APP_CONF",
+          "content: x",
+          "external: true",
+        ].map((form) => [key, form] as const),
+      ),
+    )("refuses top-level %s with %s", (key, form) => {
+      const text = `${CLEAN_APP_COMPOSE}${key}:\n  app:\n    ${form}\n`;
+
+      expect(check(cleanConfig(), { [APP]: text })).toEqual([
+        `${APP}: ${key} - its values come from outside the files of the graph (a file, the environment, an external one), and the stack has none`,
+      ]);
+    });
+
+    it("refuses a label_file of a service", () => {
+      expect(
+        check(cleanConfig(), appWith("    label_file: ./labels.env\n")),
+      ).toEqual([
+        `${APP}: services.api.label_file - Compose reads labels from a file outside the graph, and the stack has none`,
+      ]);
+    });
+  });
+
   describe("each rule turns red on its own corruption", () => {
     const CORRUPTIONS: Record<
       string,
@@ -1222,6 +1716,35 @@ describe("checkCompose", () => {
         expected:
           "migrate: init is not true - node as PID 1 ignores SIGTERM, and docker compose stop would end it with SIGKILL",
       },
+      "no-override": {
+        config: () => cleanConfig(),
+        files: { [join(CONTEXT, "compose.override.yaml")]: "services: {}\n" },
+        expected: overrideAt(CONTEXT, "compose.override.yaml"),
+      },
+      "compose-sources": {
+        config: () => cleanConfig(),
+        files: {
+          [COMPOSE_FILE]: `${CLEAN_ROOT_COMPOSE}  - deploy/extra.yml\n`,
+          [join(CONTEXT, "deploy", "extra.yml")]: "services: {}\n",
+        },
+        expected: `${COMPOSE_FILE}: include[2] names ${join(CONTEXT, "deploy", "extra.yml")} - not one of the Compose files the gate is chosen on (compose.yaml, infra/docker-compose.yml, infra/docker-compose.app.yml), so a change to it would not run the gate`,
+      },
+      profiles: {
+        config: () =>
+          broken("api", (service) => {
+            service.profiles = ["debug"];
+          }),
+        expected:
+          "api: has profiles (debug) - the stack would change with the profile the operator turns on; the stack has none",
+      },
+      "graph-values": {
+        config: () => cleanConfig(),
+        files: {
+          [join(CONTEXT, "infra", "docker-compose.app.yml")]:
+            `${CLEAN_APP_COMPOSE}    environment: [REDIS_URL]\n`,
+        },
+        expected: `${join(CONTEXT, "infra", "docker-compose.app.yml")}: services.api.environment[0] (REDIS_URL) has no value - Compose takes its value from .env or the shell, past the env file of the gate`,
+      },
     };
 
     it("has a corruption for every rule, in the order of the table", () => {
@@ -1322,6 +1845,22 @@ describe("the shape of the configuration", () => {
         }),
       "services.api.build",
     ],
+    [
+      "profiles",
+      () =>
+        broken("api", (service) => {
+          service.profiles = "debug";
+        }),
+      "services.api.profiles",
+    ],
+    [
+      "a profile",
+      () =>
+        broken("api", (service) => {
+          service.profiles = [1];
+        }),
+      "services.api.profiles",
+    ],
   ])("refuses %s in another shape", (_case, config, path) => {
     const value = config();
 
@@ -1367,18 +1906,26 @@ describe("checkRendering", () => {
     expect(checkRendering(rendered({ create_host_path: false }))).toEqual([]);
   });
 
+  const HAS_NO_OPTION = "bind has no create_host_path: false";
   it.each([
-    ["empty bind options (Docker Compose v2.38)", {}, "{}"],
-    ["no bind options", undefined, "null"],
-    [
-      "the option reversed",
-      { create_host_path: true },
-      '{"create_host_path":true}',
-    ],
-  ])("stops on a rendering with %s", (_case, bind, shown) => {
+    ["empty bind options (Docker Compose v2.38)", {}, HAS_NO_OPTION],
+    ["no bind options", undefined, "no bind"],
+    ["the option reversed", { create_host_path: true }, HAS_NO_OPTION],
+  ])("stops on a rendering with %s", (_case, bind, lost) => {
     expect(checkRendering(rendered(bind))).toEqual([
-      `this docker compose prints the probe's create_host_path: false as ${shown} - rule 10 cannot tell the option from its absence; run the Compose CI pins (.github/workflows/ci.yml)`,
+      `this docker compose prints the probe's mount with ${lost} - rule 10 cannot tell the option from its absence; run the Compose CI pins (.github/workflows/ci.yml)`,
     ]);
+  });
+
+  it("prints nothing of what Compose put in the place of the option", () => {
+    // Т7 E0-12G: the gate repeats nothing docker printed.
+    const problems = checkRendering(
+      rendered({ create_host_path: "sk-printed-by-docker", other: 1 }),
+    );
+
+    expect(problems).toHaveLength(1);
+    expect(problems.join("\n")).not.toContain("sk-printed-by-docker");
+    expect(problems.join("\n")).not.toContain("other");
   });
 
   it("stops on a rendering without the probe", () => {
@@ -1620,6 +2167,468 @@ describe("rule 11 alone (checkCompose, build-ignores)", () => {
   });
 });
 
+/**
+ * The interpolation of the Compose files, without `.env` (docs/adr/0014):
+ * what `config --variables` names, and where a control value lands.
+ */
+describe("checkVariables", () => {
+  /** What `--variables` prints for the stack of this repository. */
+  function stackVariables(): Record<string, Record<string, unknown>> {
+    return {
+      APP_VERSION: {
+        Name: "APP_VERSION",
+        DefaultValue: "",
+        PresenceValue: "",
+        Required: false,
+      },
+      GIT_COMMIT: {
+        Name: "GIT_COMMIT",
+        DefaultValue: "",
+        PresenceValue: "",
+        Required: false,
+      },
+      WEB_PORT: {
+        Name: "WEB_PORT",
+        DefaultValue: "3000",
+        PresenceValue: "",
+        Required: false,
+      },
+    };
+  }
+
+  it("passes the variables of the stack", () => {
+    expect(checkVariables(stackVariables())).toEqual({
+      names: ["APP_VERSION", "GIT_COMMIT", "WEB_PORT"],
+      problems: [],
+    });
+  });
+
+  it("refuses a variable INTERPOLATED does not list, by its name", () => {
+    const variables = {
+      ...stackVariables(),
+      PG_PORT: { Name: "PG_PORT", DefaultValue: "5442", Required: false },
+    };
+
+    expect(checkVariables(variables).problems).toEqual([
+      "interpolation: PG_PORT - the gate has no control value for it and cannot see where it lands; add it to INTERPOLATED of scripts/compose-rules.mjs with the fields it may reach",
+    ]);
+  });
+
+  it.each([
+    ["true", true],
+    ["missing", undefined],
+  ])("refuses a variable whose Required is %s", (_case, required) => {
+    const variables = stackVariables();
+    variables.WEB_PORT = { ...variables.WEB_PORT, Required: required };
+
+    expect(checkVariables(variables).problems).toEqual([
+      "interpolation: WEB_PORT is required - the stack does not come up without it, and the gate renders with an empty env file",
+    ]);
+  });
+
+  it("refuses a default that is the control value", () => {
+    const variables = stackVariables();
+    variables.WEB_PORT = {
+      ...variables.WEB_PORT,
+      DefaultValue: INTERPOLATED.get("WEB_PORT")?.control,
+    };
+
+    expect(checkVariables(variables).problems).toEqual([
+      "interpolation: WEB_PORT defaults to its control value - the control render would not see where it lands",
+    ]);
+  });
+
+  it.each([
+    ["the top level", [], "(top level)"],
+    ["a variable", { WEB_PORT: "3000" }, "WEB_PORT"],
+  ])("refuses %s in another shape", (_case, variables, path) => {
+    expect(checkVariables(variables).problems).toEqual([
+      `unexpected shape of docker compose config --variables: ${path}`,
+    ]);
+  });
+
+  it("gives the control render a value for each variable it knows", () => {
+    expect(controlEnvOf([...Object.keys(stackVariables()), "OTHER"])).toBe(
+      [
+        `APP_VERSION=${INTERPOLATED.get("APP_VERSION")?.control}`,
+        `GIT_COMMIT=${INTERPOLATED.get("GIT_COMMIT")?.control}`,
+        `WEB_PORT=${INTERPOLATED.get("WEB_PORT")?.control}`,
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("controls WEB_PORT with an address and a range of ports, none of them its default", () => {
+    // `.env` may give WEB_PORT an address (`0.0.0.0:3000`) and a range
+    // (`3000-3010`): Compose puts the first into host_ip, the second into
+    // published (measured on Compose 5.5.1), so the control value has both.
+    const control = INTERPOLATED.get("WEB_PORT")?.control ?? "";
+    const [, host = "", from = "", to = ""] =
+      /^([\d.]+):(\d+)-(\d+)$/.exec(control) ?? [];
+
+    expect(host).not.toBe("");
+    expect(host).not.toBe("127.0.0.1");
+    // The pieces Compose splits it into, each a field may hold alone.
+    expect(INTERPOLATED.get("WEB_PORT")?.parts).toEqual([
+      host,
+      `${from}-${to}`,
+    ]);
+    expect(Number(from)).toBeLessThan(Number(to));
+    expect(Number(to)).toBeLessThan(65536);
+    expect([from, to]).not.toContain("3000");
+  });
+});
+
+describe("checkInterpolation", () => {
+  const WEB_PORT = INTERPOLATED.get("WEB_PORT")?.control ?? "";
+  const APP_VERSION = INTERPOLATED.get("APP_VERSION")?.control ?? "";
+  /** The fields WEB_PORT may land in, as the violations name them. */
+  const WEB_PORT_FIELDS =
+    "services.web.ports[*].host_ip, services.web.ports[*].published";
+  /**
+   * How Compose renders `${WEB_PORT}:<target>` with the control value: the
+   * address in host_ip, the range in published (measured on Compose 5.5.1).
+   */
+  function controlPort(target: number): Record<string, unknown> {
+    const [host, ports] = WEB_PORT.split(":");
+    return { host_ip: host, target, published: ports };
+  }
+
+  /** A clean stack with the service `name` changed by `change`. */
+  function changed(
+    name: string,
+    change: (service: Service) => void,
+  ): { services: Record<string, Service> } {
+    return broken(name, change);
+  }
+
+  it("passes two renders that do not differ", () => {
+    expect(checkInterpolation(cleanConfig(), cleanConfig())).toEqual([]);
+  });
+
+  it("passes WEB_PORT in the published port of web", () => {
+    const probed = changed("web", (service) => {
+      service.ports = [{ target: 3000, published: WEB_PORT }];
+    });
+
+    expect(checkInterpolation(cleanConfig(), probed)).toEqual([]);
+  });
+
+  it("passes WEB_PORT in the address and the range of the port of web", () => {
+    const probed = changed("web", (service) => {
+      service.ports = [controlPort(3000)];
+    });
+
+    expect(checkInterpolation(cleanConfig(), probed)).toEqual([]);
+  });
+
+  it("refuses the address and the range of WEB_PORT in the port of postgres", () => {
+    const probed = changed("postgres", (service) => {
+      service.ports = [controlPort(5432)];
+    });
+
+    expect(checkInterpolation(cleanConfig(), probed)).toEqual([
+      `interpolation: services.postgres.ports[0].host_ip takes WEB_PORT - it may land only in ${WEB_PORT_FIELDS}`,
+      `interpolation: services.postgres.ports[0].published takes WEB_PORT - it may land only in ${WEB_PORT_FIELDS}`,
+    ]);
+  });
+
+  it("takes a part of a control value only whole, not a piece of a part", () => {
+    const probed = changed("postgres", (service) => {
+      service.ports = [{ host_ip: "127.0.0.1", target: 5432, published: "3" }];
+    });
+
+    expect(checkInterpolation(cleanConfig(), probed)).toEqual([
+      "interpolation: services.postgres.ports[0].published changes with the variables of the stack and holds none of their control values - only the fields of INTERPOLATED may take a value from .env",
+    ]);
+  });
+
+  it("takes no piece of a control value its entry does not declare a part", () => {
+    // A control with `:` that Compose does not split - a URL - gives no
+    // fragment between its `:` to a field (C9, E0-12K).
+    const allowed = new Map([
+      [
+        "DATABASE_URL",
+        {
+          control: "postgres://gate-control:1/db",
+          parts: [],
+          fields: ["services.api.environment.DATABASE_URL"],
+        },
+      ],
+    ]);
+    const probed = changed("api", (service) => {
+      service.environment = { ...environmentOf(service), PGHOST: "postgres" };
+    });
+
+    expect(checkInterpolation(cleanConfig(), probed, allowed)).toEqual([
+      "interpolation: services.api.environment.PGHOST changes with the variables of the stack and holds none of their control values - only the fields of INTERPOLATED may take a value from .env",
+    ]);
+  });
+
+  /**
+   * KNOWN GAP, accepted by decision (ОВ1, ADR-0014): not the behaviour the
+   * gate wants, the hole it is known to have. The tech lead took it as the
+   * residue of a form made on purpose (Открытый вопрос 1, E0-12K) and
+   * ADR-0014 writes it in «Последствия»: `--variables` gives one default per
+   * variable, so a second use of it whose default is the control value
+   * renders the same in both renders and is not seen. The case pins the gap
+   * where the ADR writes it: a gate that comes to see it turns this red, and
+   * the ADR is changed with it.
+   */
+  it("known gap accepted by decision (ОВ1, ADR-0014): does not see a second use of a variable whose default is its control value", () => {
+    // `${WEB_PORT:-3000}:3000` in web and
+    // `${WEB_PORT:-<control>}:5432` in postgres: --variables names the first
+    // default only, and postgres renders the control value either way.
+    const variables = {
+      WEB_PORT: {
+        Name: "WEB_PORT",
+        DefaultValue: "3000",
+        PresenceValue: "",
+        Required: false,
+      },
+    };
+    const same = changed("postgres", (service) => {
+      service.ports = [controlPort(5432)];
+    });
+
+    expect(checkVariables(variables).problems).toEqual([]);
+    expect(checkInterpolation(same, structuredClone(same))).toEqual([]);
+  });
+
+  it("passes a build arg in its own field", () => {
+    const base = changed("api", (service) => {
+      service.build = { ...buildOf("api"), args: { APP_VERSION: "" } };
+    });
+    const probed = changed("api", (service) => {
+      service.build = { ...buildOf("api"), args: { APP_VERSION } };
+    });
+
+    expect(checkInterpolation(base, probed)).toEqual([]);
+  });
+
+  it.each([
+    [
+      "the published port of postgres",
+      "postgres",
+      (service: Service) => {
+        service.ports = [
+          { host_ip: "127.0.0.1", target: 5432, published: WEB_PORT },
+        ];
+      },
+      "services.postgres.ports[0].published",
+    ],
+    [
+      "a healthcheck",
+      "postgres",
+      (service: Service) => {
+        service.healthcheck = {
+          test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", WEB_PORT],
+          start_period: "1m0s",
+        };
+      },
+      "services.postgres.healthcheck.test[5]",
+    ],
+    [
+      "the environment of a service",
+      "api",
+      (service: Service) => {
+        service.environment = { ...environmentOf(service), API_PORT: WEB_PORT };
+      },
+      "services.api.environment.API_PORT",
+    ],
+  ])("refuses WEB_PORT in %s", (_case, name, change, path) => {
+    expect(checkInterpolation(cleanConfig(), changed(name, change))).toEqual([
+      `interpolation: ${path} takes WEB_PORT - it may land only in ${WEB_PORT_FIELDS}`,
+    ]);
+  });
+
+  it("refuses a build arg in the field of another", () => {
+    const probed = changed("api", (service) => {
+      service.build = { ...buildOf("api"), args: { GIT_COMMIT: APP_VERSION } };
+    });
+
+    expect(checkInterpolation(cleanConfig(), probed)).toEqual([
+      "interpolation: services.api.build.args.GIT_COMMIT takes APP_VERSION - it may land only in services.*.build.args.APP_VERSION",
+    ]);
+  });
+
+  it("refuses a field that changes without a control value in it", () => {
+    const probed = changed("web", (service) => {
+      service.restart = "always";
+    });
+
+    expect(checkInterpolation(cleanConfig(), probed)).toEqual([
+      "interpolation: services.web.restart changes with the variables of the stack and holds none of their control values - only the fields of INTERPOLATED may take a value from .env",
+    ]);
+  });
+
+  it("refuses an empty object that the control render drops", () => {
+    const base = { services: { api: { image: "x", environment: {} } } };
+    const probed = { services: { api: { image: "x" } } };
+
+    expect(checkInterpolation(base, probed)).toEqual([
+      "interpolation: services.api.environment changes with the variables of the stack and holds none of their control values - only the fields of INTERPOLATED may take a value from .env",
+    ]);
+  });
+
+  it("does not read a key with dots and brackets as a path of other keys", () => {
+    const base = { services: { web: { "ports[0].published": "3000" } } };
+    const probed = { services: { web: { "ports[0].published": WEB_PORT } } };
+
+    expect(checkInterpolation(base, probed)).toEqual([
+      `interpolation: services.web["ports[0].published"] takes WEB_PORT - it may land only in ${WEB_PORT_FIELDS}`,
+    ]);
+  });
+});
+
+/**
+ * The files of rules 11, 14 and 15 are the files the `when` of the gate names
+ * (.claude/hooks/rules.sf.json): a Compose file of the graph outside `when`
+ * would change the stack without choosing the gate (S7, E0-12C). Whether
+ * `when` chooses the gate on a file is asked of `selectGates` of
+ * .claude/hooks/gates.js - the function that chooses the gates - so no
+ * reading of the syntax of `when` lives here (B4, E0-12K).
+ */
+describe("COMPOSE_SOURCES and the when of the compose gate", () => {
+  const GateSchema = z.object({
+    gates: z.array(
+      z.object({ id: z.string(), when: z.string() }).passthrough(),
+    ),
+  });
+  const ChoiceSchema = z.array(z.object({ run: z.boolean() }).passthrough());
+
+  /** The compose gate as rules.sf.json has it. */
+  function composeGate(): z.infer<typeof GateSchema>["gates"][number] {
+    const { gates } = GateSchema.parse(
+      readRepoJson(".claude/hooks/rules.sf.json"),
+    );
+    const gate = gates.find((one) => one.id === "compose");
+    if (gate === undefined) throw new Error("no compose gate");
+    return gate;
+  }
+
+  /** `selectGates` of gates.js, a CommonJS module of the hooks. */
+  function selectGates(): (...args: unknown[]) => unknown {
+    const hooks: unknown = createRequire(import.meta.url)(
+      "../.claude/hooks/gates.js",
+    );
+    if (
+      typeof hooks !== "object" ||
+      hooks === null ||
+      !("selectGates" in hooks) ||
+      typeof hooks.selectGates !== "function"
+    ) {
+      throw new Error(".claude/hooks/gates.js exports no selectGates");
+    }
+    const select = hooks.selectGates;
+    return (...args) => Reflect.apply(select, undefined, args);
+  }
+
+  /** Whether gates.js chooses the compose gate on a change of `file` alone. */
+  function chosen(file: string): boolean {
+    const choices = ChoiceSchema.parse(
+      selectGates()([composeGate()], [file], null),
+    );
+    return choices[0]?.run === true;
+  }
+
+  const BuildSchema = z.union([
+    z.string(),
+    z
+      .object({
+        context: z.string().optional(),
+        dockerfile: z.string().optional(),
+      })
+      .passthrough(),
+  ]);
+  const ComposeFileSchema = z
+    .object({
+      services: z
+        .record(z.object({ build: BuildSchema.optional() }).passthrough())
+        .optional(),
+    })
+    .passthrough();
+
+  /**
+   * The `.dockerignore` files rule 11 reads for the builds of the Compose
+   * files of the stack, from the root: the one of each build context and the
+   * one next to each Dockerfile (`<Dockerfile>.dockerignore`), with the paths
+   * of each build resolved the way Compose resolves them - the context
+   * against the directory of its file, the Dockerfile against the context.
+   */
+  function buildIgnores(): string[] {
+    const found = new Set<string>();
+    for (const source of COMPOSE_SOURCES) {
+      const { services = {} } = ComposeFileSchema.parse(
+        parse(readRepoFile(source), { merge: true }),
+      );
+      for (const { build } of Object.values(services)) {
+        if (build === undefined) continue;
+        const { context = ".", dockerfile = "Dockerfile" } =
+          typeof build === "string" ? { context: build } : build;
+        const dir = resolve(repoRoot, dirname(source), context);
+        found.add(fromRoot(repoRoot, join(dir, ".dockerignore")));
+        found.add(
+          fromRoot(repoRoot, `${resolve(dir, dockerfile)}.dockerignore`),
+        );
+      }
+    }
+    return [...found];
+  }
+
+  it("is chosen on every file of COMPOSE_SOURCES", () => {
+    expect(COMPOSE_SOURCES.filter((file) => !chosen(file))).toEqual([]);
+  });
+
+  it("is chosen on every override name and every default name at the root and in infra/", () => {
+    const names = [...OVERRIDE_FILES, ...DEFAULT_FILES];
+    const files = [...names, ...names.map((name) => `infra/${name}`)];
+
+    expect(files.filter((file) => !chosen(file))).toEqual([]);
+  });
+
+  it("is chosen on no other Compose file at the root and in infra/", () => {
+    const others = ["compose.prod.yml", "docker-compose.prod.yaml", "x.yaml"];
+    const files = [
+      ...others,
+      ...others.map((name) => `infra/${name}`),
+      "infra/deploy/extra.yaml",
+    ];
+
+    expect(files.filter(chosen)).toEqual([]);
+  });
+
+  it("is chosen on the .dockerignore rule 11 reads for each build of the stack", () => {
+    const ignores = buildIgnores();
+
+    expect(ignores).toEqual([
+      ".dockerignore",
+      "infra/docker/app.Dockerfile.dockerignore",
+    ]);
+    expect(ignores.filter((file) => !chosen(file))).toEqual([]);
+  });
+
+  it("takes the files of the stack for COMPOSE_SOURCES, and nothing else", () => {
+    expect(COMPOSE_SOURCES.every((file) => isComposeSource(file))).toBe(true);
+    expect(isComposeSource("infra/compose.yaml")).toBe(false);
+    expect(isComposeSource("infra\\docker-compose.yml")).toBe(false);
+  });
+
+  it("takes a file of COMPOSE_SOURCES in another case on Windows only", () => {
+    expect(isComposeSource("Infra/Docker-Compose.yml", "win32")).toBe(true);
+    expect(isComposeSource("Infra/Docker-Compose.yml", "linux")).toBe(false);
+  });
+
+  it("is chosen on package.json, which pins the yaml the reader parses with", () => {
+    const { devDependencies } = z
+      .object({ devDependencies: z.record(z.string()) })
+      .parse(readRepoJson("package.json"));
+
+    expect(chosen("package.json")).toBe(true);
+    expect(devDependencies.yaml).toBe("2.9.0");
+  });
+});
+
 describe("durationSec", () => {
   it("reads Compose durations", () => {
     expect(durationSec("30s")).toBe(30);
@@ -1630,21 +2639,11 @@ describe("durationSec", () => {
   });
 });
 
-/**
- * The names `docker compose` looks for in its working directory when no
- * `-f` is given, in its order (the Compose specification, "Compose file").
- */
-const COMPOSE_DEFAULT_NAMES = [
-  "compose.yaml",
-  "compose.yml",
-  "docker-compose.yaml",
-  "docker-compose.yml",
-];
-
 describe("defaultComposeFile", () => {
   it("is the file `docker compose` takes at the root of the repository", () => {
     // The root itself, under any path, is the case of test/paths.test.ts.
-    const present = COMPOSE_DEFAULT_NAMES.filter((name) =>
+    // DEFAULT_FILES is held to compose-go by the case of rule 14.
+    const present = DEFAULT_FILES.filter((name) =>
       existsSync(join(repoRoot, name)),
     );
 
