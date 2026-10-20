@@ -1816,9 +1816,11 @@
       "E0-12I"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-18",
-    "started_at": "2026-10-20"
+    "started_at": "2026-10-20",
+    "done_at": "2026-10-20",
+    "note": "единый app.Dockerfile с целями, migrate в exec-форме под init, проба образа одним run с таймаутом и проверкой тестов, кэш buildx gha в CI"
   },
   {
     "id": "E0-12K",
