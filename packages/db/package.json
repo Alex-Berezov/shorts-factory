@@ -15,6 +15,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "db:generate": "tsx ./node_modules/drizzle-kit/bin.cjs generate",
+    "db:check": "tsx ./node_modules/drizzle-kit/bin.cjs check",
     "db:migrate": "tsx src/cli/migrate.ts",
     "db:seed": "tsx src/cli/seed.ts",
     "test": "vitest run",

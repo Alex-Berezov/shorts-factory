@@ -68,4 +68,46 @@ describe("withCleanup", () => {
     ).rejects.toBe(cleanupError);
     expect(onCleanupError).not.toHaveBeenCalled();
   });
+
+  /**
+   * `afterBody` words a failed cleanup after a body that did its work, from
+   * what the body returned - the migrate entry points say what the run did
+   * before the close - and only then: after a failed body the cleanup's
+   * failure goes to the callback as it is.
+   */
+  it("throws the cleanup's failure as afterBody puts it, only after a body that succeeded", async () => {
+    const cleanupError = new Error("write CONNECTION_ENDED");
+    const worded = new Error("closing failed after the work was done");
+    const afterBody = vi.fn(() => worded);
+    const onCleanupError = vi.fn();
+    const failingCleanup = async () => {
+      throw cleanupError;
+    };
+
+    await expect(
+      withCleanup(
+        async () => "done",
+        failingCleanup,
+        onCleanupError,
+        afterBody,
+      ),
+    ).rejects.toBe(worded);
+    expect(afterBody).toHaveBeenCalledTimes(1);
+    expect(afterBody).toHaveBeenCalledWith(cleanupError, "done");
+
+    const cause = new Error("migration failed");
+    await expect(
+      withCleanup(
+        async () => {
+          throw cause;
+        },
+        failingCleanup,
+        onCleanupError,
+        afterBody,
+      ),
+    ).rejects.toBe(cause);
+    expect(afterBody).toHaveBeenCalledTimes(1);
+    expect(onCleanupError).toHaveBeenCalledTimes(1);
+    expect(onCleanupError).toHaveBeenCalledWith(cleanupError);
+  });
 });

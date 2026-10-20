@@ -1,6 +1,7 @@
 import { HealthResponseSchema } from "@sf/contracts";
+import { errorCode } from "@sf/core";
 import { type Relay, openRelay } from "@sf/db/test-support/relay";
-import { connectionFailure, createRequestRedis, errorCode } from "@sf/runtime";
+import { connectionFailure, createRequestRedis } from "@sf/runtime";
 import type { Redis } from "ioredis";
 import { afterEach, describe, expect, it } from "vitest";
 import { type AppInstance, buildApp } from "../src/app.js";

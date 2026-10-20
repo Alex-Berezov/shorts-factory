@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionFailure, errorCode } from "../src/connection-failure.js";
+import { connectionFailure } from "../src/connection-failure.js";
 
 /** An error of a socket the way Node raises it: a message and a `code`. */
 function socketError(code: string): Error {
@@ -62,16 +62,5 @@ describe("connectionFailure", () => {
     ["nothing", undefined],
   ])("does not classify %s", (_what, err) => {
     expect(connectionFailure(err)).toBeUndefined();
-  });
-});
-
-describe("errorCode", () => {
-  it("reads a code that is a string, and nothing else", () => {
-    expect(errorCode(socketError("ECONNREFUSED"))).toBe("ECONNREFUSED");
-    expect(
-      errorCode(Object.assign(new Error("x"), { code: 42 })),
-    ).toBeUndefined();
-    expect(errorCode(new Error("x"))).toBeUndefined();
-    expect(errorCode(null)).toBeUndefined();
   });
 });

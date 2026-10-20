@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import * as publicSurface from "../src/index.js";
 
 /**
  * The public surface of `@sf/db` is declared once, in `exports`: the package
@@ -124,7 +125,9 @@ describe("@sf/db root module", () => {
    * are for the entry point next to them (`src/cli/migrate.ts`) only, and a
    * lock taken anywhere but `migrateDb` would serialise nothing. `openDb` is
    * the opening `createDb` and `createProbeDb` share: from outside it would
-   * be a way to put a session parameter of a probe on a service handle.
+   * be a way to put a session parameter of a probe on a service handle. The
+   * class of a busy lock and the wording of failures (`failures.ts`) are for
+   * the runner and its entry points.
    */
   it.each([
     "runMigrations",
@@ -134,8 +137,12 @@ describe("@sf/db root module", () => {
     "MIGRATION_LOCK_WAIT_MS",
     "migrationLockTimeoutMessage",
     "openDb",
-  ])("keeps %s inside the package", async (name) => {
-    const surface: Record<string, unknown> = await import("../src/index.js");
+    "MigrationLockTimeoutError",
+    "releaseStepFailure",
+    "describeError",
+    "throwFailures",
+  ])("keeps %s inside the package", (name) => {
+    const surface: Record<string, unknown> = publicSurface;
 
     expect(surface).not.toHaveProperty(name);
   });
@@ -146,8 +153,8 @@ describe("@sf/db budget read of the api", () => {
    * The read of every cap for `/system/status` is a function of the root,
    * not a method of the guard a job is handed: the api calls it directly.
    */
-  it("exports countBudgetChecks from the root", async () => {
-    const surface: Record<string, unknown> = await import("../src/index.js");
+  it("exports countBudgetChecks from the root", () => {
+    const surface: Record<string, unknown> = publicSurface;
 
     expect(typeof surface.countBudgetChecks).toBe("function");
   });
@@ -160,8 +167,8 @@ describe("@sf/db probe handle", () => {
    */
   it.each(["createProbeDb", "ProbeLimitError", "ProbeClosedError"])(
     "exports %s from the root",
-    async (name) => {
-      const surface: Record<string, unknown> = await import("../src/index.js");
+    (name) => {
+      const surface: Record<string, unknown> = publicSurface;
 
       expect(typeof surface[name]).toBe("function");
     },

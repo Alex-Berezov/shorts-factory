@@ -69,3 +69,4 @@ _Добавляется автоматически командами `node scri
 - 2026-10-19 ➕ **E0-12R** @sf/runtime, worker: вердикт и закрытие фабрики Queue, redact глубже уровня, smoke CLI и Ctrl+C через остановку пакета (добавлена в трекер)
 - 2026-10-20 ✅ **E0-12G** api/worker: журнал запросов, разбор ошибок, причины healthcheck — request log from one place with one id, error mapping split, healthcheck reasons for the operator, worker error listener silent only on already-written errors, check-compose prints no docker output; runtime block split to E0-12R
 - 2026-10-20 ✅ **E0-12H** Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout }) — Postgres: SQLSTATE reasons not_migrated/refused, bounded probe clients, budget caps in one statement, closeDb timeout
+- 2026-10-20 ➕ **E0-12S** @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом (добавлена в трекер)

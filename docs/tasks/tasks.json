@@ -1799,8 +1799,9 @@
       "E0-12F"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-18"
+    "status": "in_progress",
+    "added_at": "2026-10-18",
+    "started_at": "2026-10-20"
   },
   {
     "id": "E0-12J",
@@ -1930,5 +1931,18 @@
     "doc": "TECH_DEBT.md",
     "status": "todo",
     "added_at": "2026-10-19"
+  },
+  {
+    "id": "E0-12S",
+    "epic": "E0",
+    "title": "@sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-12I"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-20"
   }
 ]

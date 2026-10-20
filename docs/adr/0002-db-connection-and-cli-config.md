@@ -91,13 +91,16 @@ M already applied`; `app settings seeded`), отказ - одну строку �
 - Что проверяет: `packages/db/test/cli-run.test.ts` (одна строка, порядок ошибок,
   подсказка). Удалить вывод - регресс этого дополнения, а не возврат к исходному ADR.
 - Сопутствующее в том же слое: решение «какая ошибка наружу, если упали и тело, и закрытие»
-  одно на пакет - `packages/db/src/cleanup.ts` (`withCleanup`); им пользуются раннер
-  (`runMigrations`) и точки входа (`closeAfter`). Снятие advisory-лока в `migrateDb` под эту
-  политику не подпадает (дополнено 10.10.2026, E0-11, /fix круг 2): unlock и возврат
-  `client_min_messages` идут отдельными шагами, ни один не бросает, отказ уходит в
-  `onReleaseError` (CLI пишет строку в stderr); при применённых миграциях раннер возвращает
-  результат, а лок уходит вместе с сессией при закрытии соединения. Ожидание лока ограничено
-  `lock_timeout` (`MIGRATION_LOCK_WAIT_MS`, 120 с) с понятным текстом отказа.
+  одно на пакет - `packages/db/src/cleanup.ts` (`withCleanup`); им пользуются точки входа
+  `db:seed`, `db:migrate` и `runSetupCli` (`closeAfter`). `runMigrations` (раннер тестовых
+  наборов) `withCleanup` не зовёт: он собирает сбой прогона, сбои шагов возврата и сбой
+  закрытия сам и ни одного не теряет (§ E0-12I). Снятие advisory-лока в `migrateDb` под эту
+  политику не подпадает (дополнено 10.10.2026, E0-11, /fix круг 2; шаги - по § E0-12I): шаги
+  возврата сессии `unlock`, `client_min_messages` и `timeouts` идут по отдельности, ни один не
+  бросает, отказ уходит в `onReleaseError` с именем шага (CLI пишет строку в stderr); при
+  применённых миграциях раннер возвращает результат, а лок уходит вместе с сессией при закрытии
+  соединения. Ожидание лока ограничено `lock_timeout` (`MIGRATION_LOCK_WAIT_MS`, 120 с) с
+  понятным текстом отказа.
 
 ## Дополнение (дополнено 19.10.2026, E0-12D): `@sf/config` в манифесте `@sf/db`
 
@@ -194,3 +197,104 @@ M already applied`; `app settings seeded`), отказ - одну строку �
   (`countBudgetChecks` - один statement), `apps/api/test/entry-point.int.test.ts`
   (SIGTERM при висящей пробе - код 0). Решение - `docs/TECH_DEBT.md § E0-12H`, п.5, п.6
   (Р3 техлида, 20.10.2026).
+
+## Дополнение (дополнено 20.10.2026, E0-12I): классы сбоев migrate, шаги возврата, migrate-and-seed, дрейф схемы в CI
+
+Сбои CLI `migrate` различимы по классу и тексту, ни один сбой возврата сессии или закрытия не
+теряется.
+
+- **Занятый лок - `MigrationLockTimeoutError`** (`packages/db/src/migrate.ts`, поле `waitMs` =
+  `lockWaitMs`, `cause` - ошибка драйвера, текст - `migrationLockTimeoutMessage(waitMs)`). Ожидание
+  лока ограничено одним `lock_timeout`: шаг `lock_wait` ставит `lock_timeout = lockWaitMs` и
+  `statement_timeout = 0` (ровно 0), исходные значения сессии читаются заранее (`read_session`) и
+  возвращаются сразу после взятия лока одним statement (шаг `timeouts_after_lock`) - миграции идут
+  под своими таймаутами сессии. Поэтому занятый лок - только `55P03`: сессия с
+  коротким `statement_timeout` всё равно ждёт `lockWaitMs` и получает `MigrationLockTimeoutError`, а
+  `57014` на ожидании - только настоящая отмена (`pg_cancel_backend` оператора) и бросается как есть,
+  без подсказки про держателя лока (Р4 E0-12I; классификация `57014` «после факта» с замером ожидания и
+  вторым текстом снята). Отмена самой миграции (`57014` внутри `migrate`) - тоже как есть. Упавшая
+  попытка взять лок перед броском идёт двумя шагами: `unlock` - снимает лок, если сессия его держит
+  (отмена может прийти в момент выдачи; условие по `pg_locks`, чтобы не снимать невыданный лок с
+  предупреждением сервера в stdout), затем `timeouts` - возвращает оба таймаута; первый упавший шаг
+  уходит в `onReleaseError` и останавливает уборку (Р5 E0-12I: на мёртвом соединении каждый
+  следующий statement ждал бы `connect_timeout` и печатал следствие раньше причины). Сессия, которая
+  держала лок до прогона (`read_session` читает это тем же statement), его не снимает: лок её, а не
+  выданный попытке. Текст `unlock` один на оба пути (после прогона и после упавшей попытки);
+  ключ в `pg_locks` собирается из обеих половин - `(classid::bigint << 32) | objid::bigint`, `objsubid
+  = 1` - раскладка по документации `pg_locks`; прогоном не проверена - ключ < 2^32. CLI печатает класс одной строкой без стека, как `CliError`
+  (`runEntry`), код 1.
+- **Шаги возврата сессии названы, их три:** `ReleaseStep` = `unlock` | `client_min_messages` |
+  `timeouts` (`lock_timeout` и `statement_timeout` одним statement, Р5 E0-12I),
+  `onReleaseError(step, error)`. Текст - один источник
+  `releaseStepFailure(step, error)` в `src/migrate.ts` (Р3 E0-12I): `releasing the migration lock
+  failed: …` для `unlock`, `restoring client_min_messages failed: …`, `restoring lock_timeout and
+  statement_timeout failed: …` для `timeouts`; его печатает CLI и им же
+  названа ошибка `runMigrations`. Имя шага - открывающий комментарий текста statement (`/* step:lock
+  */ select pg_advisory_lock(...)`): его видит лог Postgres, по нему тесты находят шаг; реестра
+  объектов в рантайме нет. `MIGRATION_LOCK_KEY` экспортирован из `src/migrate.ts`, но не из баррели
+  (`public-surface.test.ts`): int-кейс «лок, взятый сессией раньше, переживает упавшую попытку» берёт
+  его так, как мог бы вызывающий (Р5 E0-12I). Сбои шагов упавшей попытки взять лок (`unlock`,
+  `timeouts`) не проглатываются: первый упавший уходит в `onReleaseError`, брошена по-прежнему
+  ошибка попытки.
+- **Код выхода при сбое шага возврата (Р1 E0-12I, уточняет Р6 E0-12C):** миграции применены,
+  упал шаг возврата - exit 0 и строка в stderr с именем шага: лок кончается вместе с сессией,
+  которую CLI закрывает следом, повторный прогон ничего не применит. Exit 1 - лок, миграция,
+  любой сбой до возврата результата и сбой закрытия.
+- **Порядок «итог -> закрытие»:** строка итога печатается до закрытия соединения. Закрытие,
+  упавшее после успешного прогона, - сбой прогона одной строкой, которая говорит, что прогон успел:
+  `closing the database connection failed after the run applied 2 migrations: …` / `… after the run
+  found no migrations to apply: …`, у `runSetupCli` - с `… and seeded the settings`; код 1. Упала миграция - соединение
+  закрывается, сбой закрытия уходит строкой «closing the database connection also failed: …»,
+  наружу - сбой миграции.
+- **`runMigrations(url)`** (test-support, `resetTestDatabase`) журнал не считает и не теряет
+  сбоев: сбой прогона, сбои шагов возврата (`Error` с текстом `releaseStepFailure(step, error)` и
+  `cause`) и сбой закрытия собираются по порядку; один бросается как есть (код SQLSTATE виден),
+  несколько - `AggregateError`, в тексте которого каждый сбой с кодом (`3 failures: … [42710];
+  …`) - стек на границе процесса не теряет второй и третий сбой (`throwFailures`); брошенный
+  `undefined` - тоже сбой. В отличие от CLI (Р1) сбой шага возврата здесь - отказ: потребители -
+  тестовые наборы, где полувозвращённая сессия - дефект, а не выкладка.
+- **Одна политика закрытия:** `withCleanup` (`src/cleanup.ts`) - у `db:seed`, `db:migrate` и
+  `runSetupCli`; четвёртый параметр `afterBody(closeError, result)` формулирует сбой закрытия после
+  успешного тела по тому, что тело вернуло: CLI миграций называет в нём итог прогона (`MigrationOutcome`)
+  и seed.
+- **`src/cli/migrate-and-seed.ts` - `runSetupCli`:** миграции и seed в одном процессе на одном
+  соединении `max: 1`; seed не идёт после упавшей миграции, сбой шага возврата его не
+  останавливает; строки итога миграций и `app settings seeded` печатаются до одного закрытия.
+  Таблицу `app_setting` перед seed не спрашивает (в отличие от `db:seed`): миграции, которые её
+  создают, только что прошли, и «run db:migrate first» послал бы оператора по кругу; если таблицы
+  всё же нет, наружу идёт ошибка драйвера.
+  Точка входа образа `migrate`; переключение `CMD` Dockerfile - E0-12J, `pnpm db:migrate` и
+  `pnpm db:seed` не меняются.
+- **Дрейф схемы в CI** (`.github/workflows/ci.yml`, job `ci`, до шага `db:migrate`):
+  шаг «Generate the migration the schema needs» - `db:generate < /dev/null` с `timeout-minutes: 5`
+  и проверкой, что generate напечатал одну из своих завершающих строк (`No schema changes,
+  nothing to migrate` / `Your SQL migration file`); затем шаг «Migrations match the schema» -
+  пустой `git status --porcelain -- packages/db/migrations` (porcelain видит и неотслеживаемый
+  новый SQL, `git diff` - нет), затем `pnpm --filter @sf/db db:check`. Проверено на drizzle-kit
+  0.28 (20.10.2026, Windows и Linux-контейнер `node:22` - поведение одинаковое): на неоднозначном переименовании колонки generate спрашивает «created or
+  renamed» и при открытом stdin ждёт ответа до таймаута, а при закрытом - сдаётся, ничего не
+  пишет и выходит с 0 (дрейф прошёл бы); на коллизии снапшотов двух веток generate печатает
+  ошибку и выходит с 0, краснеет только `db:check` (exit 1). Обе ситуации шаг generate теперь
+  роняет сам. `db:check` запускает drizzle-kit тем же обходом через `tsx`, что `db:generate`
+  (Р4 E0-12C): поломку обхода ловит тот же шаг.
+- **`errorCode` (Р2 E0-12I):** чтение `code` у `unknown` - в `@sf/core`, свой модуль
+  `packages/core/src/domain/error-code.ts` (экспорт через `index.ts`, тест
+  `packages/core/test/error-code.test.ts`); `domain/errors.ts` - только `AppError` и наследники.
+  Владелец - `@sf/core`: ядро без зависимостей видно всем пакетам, кроме `@sf/config`; копии
+  в `@sf/runtime` и `@sf/db` сняты, копии в `@sf/config` остаются строкой долга (ребро
+  `config -> core` закрыто S15/S16). Модуль `src/failures.ts` в `@sf/db` - `describeError` и
+  `throwFailures` - не импортирует `migrate.ts` (Р3 E0-12I): имена шагов и их тексты живут там.
+- Что проверяет: `packages/db/test/cli-run.test.ts` (тексты по шагу, итог до закрытия, текст
+  сбоя закрытия по итогу прогона, коды выхода Р1, класс без стека, `runSetupCli`, точки входа),
+  `packages/db/test/failures.test.ts` (`throwFailures`), `packages/db/test/cleanup.test.ts`
+  (`afterBody`), `packages/db/test/migrate.int.test.ts` (подмена шага по имени `failStep` из
+  `test/migrate-steps.ts`, `statement_timeout` 0 на ожидании и свой под локом, короткий
+  `statement_timeout` сессии -> `55P03`, `pg_cancel_backend` ожидающей сессии -> `57014` как есть,
+  снятие лока, выданного упавшей попытке, лок, взятый сессией до прогона (`held`), переживает упавшую
+  попытку, `57014` внутри миграции, шаг `lock_wait`, шаги возврата `unlock`/`client_min_messages`/`timeouts` по имени, `runMigrations` бросает `42710` как есть, точка входа
+  `migrate-and-seed.ts` с пустой базы), `packages/db/test/run-migrations.int.test.ts` (проводка
+  сбоев возврата и закрытия в `runMigrations`, лок на момент закрытия, `resetTestDatabase` без подсчёта
+  журнала), помощники `heldAdvisoryLocks`/`waitForAdvisoryWaiter` - `packages/db/test-support/advisory-locks.ts`
+  (фильтр по базе соединения), `test/ci-config.test.ts` («checks that the
+  migrations match the schema», «fails generate fast when it stopped at a question»). Решение -
+  `docs/TECH_DEBT.md § E0-12I`.

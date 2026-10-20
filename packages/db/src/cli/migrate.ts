@@ -5,9 +5,10 @@ import { processOutput, runEntry, runMigrateCli } from "./run.js";
 
 /**
  * Entry point of `pnpm db:migrate` and the first half of the Compose `migrate`
- * service. Together with `seed.ts` it is the only part of `@sf/db` that knows
- * where the connection string comes from: the library takes a url, the entry
- * point reads the validated configuration
+ * service. Together with `seed.ts` and `migrate-and-seed.ts` (both in one
+ * process, the entry point of the `migrate` image from E0-12J) it is the only
+ * part of `@sf/db` that knows where the connection string comes from: the
+ * library takes a url, the entry point reads the validated configuration
  * (docs/adr/0002-db-connection-and-cli-config.md).
  *
  * One line on success - how many migrations this run applied - so that

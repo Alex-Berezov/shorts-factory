@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 /**
  * Guards the two properties that made `@sf/db` unusable without a database
@@ -25,6 +33,12 @@ const postgresFactory = vi.fn(() => fakeClient());
 vi.mock("postgres", () => ({ default: postgresFactory }));
 
 const TEST_URL = "postgresql://sf:sf@localhost:5442/shorts_factory_test";
+
+// Warms the transform cache of the barrel: the first load is the slow one under
+// a parallel run; the cases below reset the module registry and load it again.
+beforeAll(async () => {
+  await import("../src/index.js");
+});
 
 beforeEach(() => {
   postgresFactory.mockClear();

@@ -1,11 +1,7 @@
 import type { DependencyCheck, ProbeFailureCode } from "@sf/contracts";
+import { errorCode } from "@sf/core";
 import { ProbeClosedError, ProbeLimitError } from "@sf/db";
-import {
-  DeadlineError,
-  connectionFailure,
-  errorCode,
-  withDeadline,
-} from "@sf/runtime";
+import { DeadlineError, connectionFailure, withDeadline } from "@sf/runtime";
 import type { FastifyBaseLogger } from "fastify";
 import { DEPENDENCY_TIMEOUT_MS } from "./dependency-timeout.js";
 

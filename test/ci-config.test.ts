@@ -78,6 +78,13 @@ const stepsOf = (job: string): Step[] => stepsIn(workflow, job);
 const isMigrate = (step: Step) =>
   step.run?.includes("src/cli/migrate.ts") === true;
 
+/** The steps that turn CI red on a schema change without its migration. */
+const GENERATE = "pnpm --filter @sf/db db:generate < /dev/null";
+const isGenerate = (step: Step) => step.text.includes(GENERATE);
+const isDriftCheck = (step: Step) =>
+  step.text.includes("git status --porcelain -- packages/db/migrations");
+const isDbCheck = (step: Step) => step.run === "pnpm --filter @sf/db db:check";
+
 /**
  * The value that follows `key:` in the top-level `concurrency:` of the
  * workflow, `${{ }}` parts included.
@@ -277,12 +284,13 @@ describe("ci.yml job ci", () => {
     expect(redisService).toContain("--health-cmd");
   });
 
-  it("installs, lints, typechecks, tests, migrates, runs the integration tests and builds, in that order", () => {
+  it("installs, lints, typechecks, tests, checks the migrations, migrates, runs the integration tests and builds, in that order", () => {
     const order: ((step: Step) => boolean)[] = [
       (step) => step.run === "pnpm install --frozen-lockfile",
       (step) => step.run === "pnpm lint",
       (step) => step.run === "pnpm typecheck",
       (step) => step.run === "pnpm test",
+      isGenerate,
       isMigrate,
       (step) => step.run === "pnpm test:int",
       (step) => step.run === "pnpm build",
@@ -353,6 +361,50 @@ describe("ci.yml job ci", () => {
     expect(step?.run).toBe(
       `node --env-file=../../.env.test --import ${script}`,
     );
+  });
+
+  /**
+   * A schema change without its migration: generate writes the missing
+   * migration, the porcelain of the folder - untracked files included - must
+   * stay empty, and drizzle-kit checks the folder itself. Generate and check
+   * start drizzle-kit the one way the bypass of `db:generate` does (decision
+   * R4 of E0-12C), so the step breaks with it.
+   */
+  it("checks that the migrations match the schema", () => {
+    const generate = steps.findIndex(isGenerate);
+    const drift = steps.findIndex(isDriftCheck);
+    const check = steps.findIndex(isDbCheck);
+    const install = runs.indexOf("pnpm install --frozen-lockfile");
+    const integration = runs.indexOf("pnpm test:int");
+    const scripts = readManifest("packages/db").scripts ?? {};
+    const bypass = "tsx ./node_modules/drizzle-kit/bin.cjs ";
+
+    expect([install, generate, drift, check, integration]).not.toContain(-1);
+    expect(install).toBeLessThan(generate);
+    expect(generate).toBeLessThan(drift);
+    expect(drift).toBeLessThan(check);
+    expect(check).toBeLessThan(integration);
+    expect(steps[drift]?.text).toContain('test -z "$drift" || {');
+    expect(scripts["db:generate"]).toBe(`${bypass}generate`);
+    expect(scripts["db:check"]).toBe(`${bypass}check`);
+  });
+
+  /**
+   * An ambiguous rename makes generate ask a question: with stdin open it
+   * waits for the answer, with stdin at its end it gives up and exits with 0
+   * having written nothing. The step closes stdin, is bounded, and fails
+   * unless generate printed one of the lines it finishes with.
+   */
+  it("fails generate fast when it stopped at a question", () => {
+    const step = steps.find(isGenerate)?.text ?? "";
+
+    expect(step).toMatch(/^ {8}timeout-minutes: [1-9]\d*$/m);
+    expect(step).toContain("set -o pipefail");
+    expect(step).toContain(`${GENERATE} 2>&1 | tee "$log"`);
+    expect(step).toContain(
+      'grep -qE "No schema changes, nothing to migrate|Your SQL migration file" "$log" || {',
+    );
+    expect(step).toMatch(/\|\| \{\n[^}]*\n\s+exit 1\n\s+\}/);
   });
 
   it("lets no step fail quietly", () => {

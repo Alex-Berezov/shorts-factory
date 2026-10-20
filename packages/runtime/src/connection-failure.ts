@@ -1,3 +1,5 @@
+import { errorCode } from "@sf/core";
+
 /**
  * Which failures mean "the dependency is not there" rather than "it answered
  * badly" - one set, read by the status page of the api (`system-status.ts`,
@@ -55,15 +57,6 @@ const REDIS_DOWN_MESSAGES: ReadonlySet<string> = new Set([
 const UNREACHABLE_ERROR_NAMES: ReadonlySet<string> = new Set([
   "MaxRetriesPerRequestError",
 ]);
-
-/** The `code` an error carries, when it carries one. */
-export function errorCode(err: unknown): string | undefined {
-  if (typeof err !== "object" || err === null || !("code" in err)) {
-    return undefined;
-  }
-  const { code } = err;
-  return typeof code === "string" ? code : undefined;
-}
 
 /** How a connection failed: nobody there, or nobody answering in time. */
 type ConnectionFailure = "unreachable" | "timeout";

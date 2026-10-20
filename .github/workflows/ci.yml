@@ -87,10 +87,49 @@ jobs:
       - run: node scripts/check-compose.mjs
       - run: node scripts/tasks.mjs render --check
       - run: node .claude/hooks/harness-selftest.js
+      # Schema drift: a change of packages/db/src/schema without the migration
+      # it needs. db:generate writes that migration into the checkout - a new
+      # SQL file nobody tracks, a changed journal and snapshot - and
+      # `git status --porcelain` lists both kinds, where `git diff` would miss
+      # the untracked file. db:check then checks the folder itself: snapshots
+      # that collide (two branches that each added a migration) - generate
+      # prints that collision and still exits with 0. Both drive drizzle-kit
+      # through the same tsx bypass as a developer's run, so a drizzle upgrade
+      # that breaks the bypass turns this red too.
+      # A renamed column is ambiguous, and generate asks "created or renamed"
+      # (checked with drizzle-kit 0.28): with stdin left open it waits for the
+      # answer, with stdin at its end it gives up, writes nothing and exits
+      # with 0 - the drift would pass. So stdin is /dev/null, the step is
+      # bounded, and generate must have said that it finished: one of its two
+      # closing lines, or the step fails.
+      - name: Generate the migration the schema needs
+        timeout-minutes: 5
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/db-generate.log"
+          pnpm --filter @sf/db db:generate < /dev/null 2>&1 | tee "$log"
+          grep -qE "No schema changes, nothing to migrate|Your SQL migration file" "$log" || {
+            echo "drizzle-kit generate stopped before it finished - a rename it asks about, or snapshots that collide: run pnpm db:generate --name <epic> locally, answer it and commit the migration"
+            exit 1
+          }
+      - name: Migrations match the schema
+        run: |
+          drift="$(git status --porcelain -- packages/db/migrations)"
+          test -z "$drift" || {
+            printf '%s\n' "$drift"
+            echo "the schema changed without its migration: run pnpm db:generate --name <epic> and commit the migration"
+            exit 1
+          }
+      - run: pnpm --filter @sf/db db:check
       # The entry of `pnpm db:migrate` with .env.test read by node's dotenv parser,
       # not by a shell. --env-file sets only what the environment lacks, so a
       # variable the runner already has wins over the file. For this step only:
       # NODE_ENV=test must not reach `next build`.
+      # What it proves: src/cli/migrate.ts starts from .env.test, opens its one
+      # connection and applies every migration to the empty database of CI,
+      # before resetTestDatabase of the integration suites rebuilds the schema.
+      # The CLI has no guard of the host on purpose: it migrates whatever
+      # DATABASE_URL names (E1-12, decision R5 of E0-12C).
       - working-directory: packages/db
         run: node --env-file=../../.env.test --import tsx src/cli/migrate.ts
       - run: pnpm test:int
