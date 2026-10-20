@@ -24,7 +24,7 @@ import {
  * The log is the one place a failure is recorded in full - and the one place
  * where nobody is watching what ends up in it.
  */
-describe("error log", () => {
+describe("request log", () => {
   const recorder = recordingLogger();
   let app: AppInstance;
 
@@ -141,8 +141,25 @@ describe("error log", () => {
   it("writes a 4xx of a caller with the password as a warn with the error", async () => {
     const entry = await failureLineOf("/test/not-found");
 
-    expect(entry).toMatchObject({ level: LEVEL.warn, status: 404 });
+    expect(entry).toMatchObject({
+      level: LEVEL.warn,
+      status: 404,
+      method: "GET",
+      routeUrl: "/test/not-found",
+      requestId: expect.any(String),
+    });
     expect(errOf(entry).type).toBe("NotFoundError");
+  });
+
+  it("names the request by one id under one key", async () => {
+    const entry = await failureLineOf("/test/not-found");
+    const raw = recorder.raw();
+
+    // Parsed, a repeated key keeps its last value only: the count is read
+    // off the text of the line.
+    expect(raw.match(/"requestId"/g)).toHaveLength(1);
+    expect(raw).not.toContain("reqId");
+    expect(entry).not.toHaveProperty("reqId");
   });
 
   it("writes a failure of ours as an error with the type and the stack", async () => {
@@ -206,8 +223,23 @@ describe("error log", () => {
     expect(parseErrorBody(res.payload).error.code).toBe("INTERNAL_ERROR");
     const entry = await failureLineOf("/test/null-code");
     expect(entry).toMatchObject({ level: LEVEL.error, status: 502 });
-    expect(errOf(entry).code).toBe("null");
+    // An absent code is not written as one: no `"null"` a reader would take
+    // for a code somebody chose.
+    expect(errOf(entry)).not.toHaveProperty("code");
+    expect(recorder.raw()).not.toContain('"null"');
   });
+
+  it.each(["/test/empty-code", "/test/blank-code"])(
+    "writes no code for %s, a code that makes no line",
+    async (url) => {
+      const entry = await failureLineOf(url);
+
+      expect(entry).toMatchObject({ level: LEVEL.error, status: 502 });
+      // No `code: ""` a reader would take for a code somebody chose to leave
+      // empty.
+      expect(errOf(entry)).not.toHaveProperty("code");
+    },
+  );
 
   it("writes a numeric code as the number it is", async () => {
     const entry = await failureLineOf("/test/numeric-code");
@@ -287,13 +319,13 @@ describe("error log", () => {
 });
 
 /**
- * The same error log on the logger the service really runs on
+ * The same request log on the logger the service really runs on
  * (`buildLoggerOptions` of `@sf/runtime`): its serializer writes a whitelist
  * of fields and never `details` itself - only what `loggableError` handed it
  * for the log. The cases above run on pino's own serializer, which writes
  * every field, so they cannot tell the two apart.
  */
-describe("error log on the logger of the service", () => {
+describe("request log on the logger of the service", () => {
   const recorder = recordingServiceLogger(
     loadEnv({
       NODE_ENV: "test",

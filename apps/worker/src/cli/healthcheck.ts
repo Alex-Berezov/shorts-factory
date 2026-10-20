@@ -21,7 +21,7 @@
  * whole configuration every 30 s would turn a malformed key the worker does
  * not even use into "unhealthy".
  */
-import { readRedisUrl } from "@sf/config/redis-url";
+import { RedisUrlRefusedError, readRedisUrl } from "@sf/config/redis-url";
 import { createProbeRedis } from "@sf/runtime/redis";
 import {
   HEALTHCHECK_BACKSTOP_MS,
@@ -52,10 +52,17 @@ let redisUrl: string;
 try {
   redisUrl = readRedisUrl();
 } catch (error) {
-  finish(
-    false,
-    `REDIS_URL is not usable: ${error instanceof Error ? error.message : String(error)}`,
-  );
+  // The reasons are spelled by the refusal itself (`RedisUrlRefusedError`):
+  // not set, not a valid url, or a `.env` that cannot be read with its system
+  // code (docs/DECISIONS.md, П1, П3, П4 E0-12G) - none of them carries the
+  // value, which holds the password of Redis and would land in
+  // `docker inspect`. `readRedisUrl` refuses with nothing else; anything else
+  // is a fault of this file, not a reason for the operator, and is told
+  // without its message or stack, which could carry the value as well.
+  if (!(error instanceof RedisUrlRefusedError)) {
+    finish(false, "healthcheck failed before reaching redis");
+  }
+  finish(false, error.message);
 }
 
 // Without a logger the factory still attaches an `error` listener: the

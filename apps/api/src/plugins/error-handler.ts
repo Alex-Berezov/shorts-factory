@@ -9,14 +9,14 @@ import type {
   FastifyReply,
   FastifyRequest,
 } from "fastify";
-import { logError, logRejection } from "../lib/error-log.js";
 import {
   clientError,
   mapError,
   mapFrameworkError,
-  mapSocketError,
 } from "../lib/error-mapping.js";
 import { errorBodyOf } from "../lib/error-response.js";
+import { logError, logRejection } from "../lib/request-log.js";
+import { mapSocketError } from "../lib/socket-errors.js";
 
 /** Status of the route nobody declared, shared by the two handlers below. */
 const NOT_FOUND_STATUS = 404;
@@ -130,9 +130,12 @@ function responseInFlight(socket: RefusedSocket): boolean {
  * E13-07).
  *
  * Logged like every other failure before the password (`logRejection`):
- * `info`, no error object, nothing of what was sent. The line is written
- * before the socket checks below, so its `status` is what the request would
- * be answered with: a socket closed without a word still gets it.
+ * `info`, no error object, nothing of what was sent. A socket closed without
+ * a word still gets its line, with the `status` the request would have been
+ * answered with - but without a `requestId`: an id nobody will ever see in a
+ * response is a false lead for whoever searches the log by it. The id is
+ * generated only for a response that is really written, and that line and
+ * the response carry the same one.
  */
 export function answerClientError(
   err: ConnectionError,
@@ -148,16 +151,17 @@ export function answerClientError(
   }
 
   const mapped = mapSocketError(err.code);
+  if (!socket.writable || responseInFlight(socket)) {
+    log.info({ status: mapped.status, code: mapped.code }, "request rejected");
+    socket.destroy(err);
+    return;
+  }
+
   const requestId = randomUUID();
   log.info(
     { status: mapped.status, code: mapped.code, requestId },
     "request rejected",
   );
-
-  if (!socket.writable || responseInFlight(socket)) {
-    socket.destroy(err);
-    return;
-  }
 
   const body = JSON.stringify(errorBodyOf(mapped, requestId));
   answering.add(socket);

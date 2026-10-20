@@ -34,13 +34,14 @@ export interface DevCommandParts {
  * `DEV_COMMAND` taken apart for `fork`, so a test that starts the entry point
  * starts it with the command `pnpm dev` runs rather than a copy of it. The
  * command is node, its flags and one script - anything else is a command this
- * cannot reproduce, and is refused rather than guessed at.
+ * cannot reproduce, and is refused rather than guessed at. `command` is
+ * there for the test of that refusal; every other caller takes the default.
  */
-export function devCommandParts(): DevCommandParts {
-  const [runtime, ...rest] = DEV_COMMAND.split(" ");
+export function devCommandParts(command = DEV_COMMAND): DevCommandParts {
+  const [runtime, ...rest] = command.split(" ");
   const script = rest.pop();
   if (runtime !== "node" || script === undefined || script.startsWith("-")) {
-    throw new Error(`not a node command with a script: ${DEV_COMMAND}`);
+    throw new Error(`not a node command with a script: ${command}`);
   }
   return { execArgv: rest, script };
 }

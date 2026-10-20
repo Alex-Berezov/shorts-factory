@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readHeartbeat } from "../src/domain/heartbeat.js";
+import { heartbeatOffsetSec, readHeartbeat } from "../src/domain/heartbeat.js";
 import { WORKER_HEARTBEAT_TTL_SEC } from "../src/domain/redis-keys.js";
 
 /**
@@ -103,4 +103,63 @@ describe("readHeartbeat", () => {
       });
     },
   );
+});
+
+describe("heartbeatOffsetSec", () => {
+  it.each([
+    [
+      "a stamp that is not an instant",
+      "yesterday-ish",
+      "2026-10-20T10:00:00.000Z",
+    ],
+    [
+      "a clock that is not an instant",
+      "2026-10-20T10:00:00.000Z",
+      "not a date",
+    ],
+  ])("refuses %s rather than answer NaN", (_case, stamp, now) => {
+    // `NaN > TTL` is false: a distance of NaN would read as fresh.
+    expect(() => heartbeatOffsetSec(stamp, new Date(now))).toThrow(RangeError);
+  });
+
+  it.each([
+    [
+      "behind, exactly the TTL",
+      WORKER_HEARTBEAT_TTL_SEC,
+      WORKER_HEARTBEAT_TTL_SEC,
+    ],
+    [
+      "ahead, exactly the TTL",
+      -WORKER_HEARTBEAT_TTL_SEC,
+      -WORKER_HEARTBEAT_TTL_SEC,
+    ],
+    [
+      "behind, 0.4 s past the TTL",
+      WORKER_HEARTBEAT_TTL_SEC + 0.4,
+      WORKER_HEARTBEAT_TTL_SEC + 1,
+    ],
+    [
+      "ahead, 0.4 s past the TTL",
+      -(WORKER_HEARTBEAT_TTL_SEC + 0.4),
+      -(WORKER_HEARTBEAT_TTL_SEC + 1),
+    ],
+    ["behind by a fraction", 0.2, 1],
+    ["on the clock", 0, 0],
+  ])("counts a stamp %s away from zero", (_case, agoSec, offset) => {
+    expect(heartbeatOffsetSec(stampAgo(agoSec), NOW)).toBe(offset);
+  });
+
+  it.each([
+    [WORKER_HEARTBEAT_TTL_SEC, false],
+    [-WORKER_HEARTBEAT_TTL_SEC, false],
+    [WORKER_HEARTBEAT_TTL_SEC + 0.4, true],
+    [-(WORKER_HEARTBEAT_TTL_SEC + 0.4), true],
+  ])("agrees with the verdict for a stamp %d s ago", (agoSec, stale) => {
+    const stamp = stampAgo(agoSec);
+
+    expect(readHeartbeat(stamp, NOW).stale).toBe(stale);
+    expect(
+      Math.abs(heartbeatOffsetSec(stamp, NOW)) > WORKER_HEARTBEAT_TTL_SEC,
+    ).toBe(stale);
+  });
 });

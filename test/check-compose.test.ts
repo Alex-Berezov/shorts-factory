@@ -477,6 +477,217 @@ EACCES: realpath ${ROOT_FILE}`,
     }
   });
 
+  /**
+   * A call of docker that ran and failed, the way `execFileSync` throws it:
+   * the exit code, the stderr, and a message that repeats the stderr.
+   */
+  function exited(stderr: string): Error {
+    return Object.assign(
+      new Error(`Command failed: docker compose config\n${stderr}`),
+      { status: 15, signal: null, stdout: "", stderr },
+    );
+  }
+
+  /** A value out of `.env`, the way Compose quotes it back on stderr. */
+  const ENV_VALUE = "sk-secret-value";
+
+  it.each([
+    ["the rendering probe", () => compose(exited(`invalid "${ENV_VALUE}"`))],
+    [
+      "the root file",
+      () =>
+        compose(
+          PROBE_KEPT,
+          exited(`variable 'API_KEY' is "${ENV_VALUE}"
+KEY=${ENV_VALUE}`),
+        ),
+    ],
+    ["the version", () => compose(PROBE_LOST, exited(`KEY=${ENV_VALUE}`))],
+  ])(
+    "prints nothing docker wrote when %s fails, only how it ended",
+    (_call, docker) => {
+      const { code, text } = run(docker(), cleanRead);
+
+      expect(code).toBe(1);
+      expect(text).not.toContain(ENV_VALUE);
+      expect(text).not.toContain("Command failed");
+      expect(text).toContain("docker compose exited with code 15");
+    },
+  );
+
+  it("gives the command of a failed root file with a placeholder for the env file of the gate", () => {
+    const docker = compose(PROBE_KEPT, exited(`KEY=${ENV_VALUE}`));
+
+    const { text } = run(docker, cleanRead);
+
+    // The scratch directory is gone by the time anyone reads this; the
+    // command names nothing in it.
+    expect(text).not.toContain(scratchOf(docker));
+    const rootArg = shellWord(ROOT_FILE);
+    expect(text).toContain(
+      `  to read it, run: docker compose --env-file '<empty env file>' -f ${rootArg} config --no-env-resolution --format json
+  (create an empty file and pass its path as --env-file)`,
+    );
+    expect(text).not.toContain("gone by now");
+  });
+
+  /**
+   * The path as the gate writes it in the command: bare when it holds only
+   * `[\w./:-]`, else in single quotes (the rule of `shellArg`).
+   */
+  function shellWord(path: string): string {
+    return /[^\w./:-]/.test(path) ? `'${path}'` : path;
+  }
+
+  /** The text of a run whose root file is at `spelled` and fails. */
+  function failedAt(spelled: string): { file: string; text: string } {
+    const file = join(spelled, "compose.yaml");
+    const docker = compose(PROBE_KEPT, exited("broken"));
+    const realpath = (path: string): string => {
+      if (path === file) return file;
+      if (path === repoRoot) return spelled;
+      throw new Error(`unexpected realpath ${path}`);
+    };
+    return { file, text: run(docker, cleanRead, [file], realpath).text };
+  }
+
+  it("quotes an argument of the command with a space, a dollar or a backquote in it, so no shell expands them", () => {
+    const { file, text } = failedAt(resolve('/Odd "checkout" $HOME `x` root'));
+
+    // In single quotes neither a POSIX shell nor PowerShell expands anything.
+    expect(text).toContain(
+      `  to read it, run: docker compose --env-file '<empty env file>' -f '${file}' config --no-env-resolution --format json\n`,
+    );
+  });
+
+  it("quotes a bare path with backslashes in it, so a POSIX shell keeps them", () => {
+    // No space, no dollar: only the backslashes of a Windows path.
+    const spelled = process.platform === "win32" ? "D:\\x" : "/D:\\x";
+    const { file, text } = failedAt(spelled);
+
+    expect(file).toContain("\\");
+    expect(text).toContain(
+      `  to read it, run: docker compose --env-file '<empty env file>' -f '${file}' config --no-env-resolution --format json\n`,
+    );
+  });
+
+  it("quotes a bare path with a plus in it, which a path of the pipeline may carry", () => {
+    const { file, text } = failedAt(resolve("/a+b"));
+
+    expect(file).toContain("+");
+    expect(text).toContain(
+      `  to read it, run: docker compose --env-file '<empty env file>' -f ${shellWord(file)} config --no-env-resolution --format json\n`,
+    );
+    expect(shellWord(file)).toBe(`'${file}'`);
+  });
+
+  it("writes a single quote of an argument the POSIX way and says so on a line of its own", () => {
+    const { file, text } = failedAt(resolve("/O'Brien checkout"));
+
+    expect(text).toContain(
+      `-f '${file.replaceAll("'", "'\\''")}' config --no-env-resolution --format json\n  (POSIX sh quoting)\n`,
+    );
+    const commandLine = text
+      .split("\n")
+      .find((line) => line.startsWith("  to read it, run: "));
+    expect(commandLine).toBeDefined();
+    expect(commandLine).not.toContain("POSIX sh quoting");
+  });
+
+  it("gives no command for a failed probe, only how it ended and where to look", () => {
+    const docker = compose(exited(`KEY=${ENV_VALUE}`));
+
+    const { code, text } = run(docker, cleanRead);
+
+    expect(code).toBe(1);
+    expect(text).toContain(
+      "  the rendering probe built into the gate failed: docker compose exited with code 15; run `docker compose version`",
+    );
+    expect(text).not.toContain("to read it, run:");
+    expect(text).not.toContain(scratchOf(docker));
+    expect(text).not.toContain("probe.yaml");
+    expect(text).not.toContain(tmpdir());
+  });
+
+  it("gives the command of a failed version as it ran, without .env in the reason", () => {
+    const { text } = run(compose(PROBE_LOST, exited("broken")), cleanRead);
+
+    // `docker compose version` interpolates no `.env`.
+    expect(text).toContain(
+      "  docker compose exited with code 15; what it printed is not repeated here\n  to read it, run: docker compose version --short",
+    );
+    expect(text).not.toContain("values from .env");
+  });
+
+  it.each([
+    ["ENOBUFS", "printed more than the gate reads (ENOBUFS)"],
+    ["ETIMEDOUT", "ran past the time limit of the gate (ETIMEDOUT)"],
+  ])(
+    "tells a call the gate itself ended on %s from a signal, with no command to repeat",
+    (code, ending) => {
+      // How `execFileSync` throws it: Node ends the call with SIGTERM.
+      const limited = Object.assign(
+        new Error(`spawnSync docker ${code}\nKEY=${ENV_VALUE}`),
+        { code, status: null, signal: "SIGTERM", stdout: "", stderr: "" },
+      );
+
+      const { code: exit, text } = run(compose(PROBE_KEPT, limited), cleanRead);
+
+      expect(exit).toBe(1);
+      expect(text).toContain(
+        `  docker compose ${ending} - a limit of this gate, not a fault of the Compose files; what it printed is not repeated here`,
+      );
+      expect(text).not.toContain("SIGTERM");
+      expect(text).not.toContain("to read it, run:");
+      expect(text).not.toContain(ENV_VALUE);
+    },
+  );
+
+  it("names the signal that ended docker", () => {
+    const ended = Object.assign(
+      new Error(`Command failed: docker compose config
+KEY=${ENV_VALUE}`),
+      { status: null, signal: "SIGTERM", stdout: "", stderr: ENV_VALUE },
+    );
+
+    const { code, text } = run(compose(PROBE_KEPT, ended), cleanRead);
+
+    expect(code).toBe(1);
+    expect(text).toContain("docker compose was ended by SIGTERM");
+    expect(text).not.toContain(ENV_VALUE);
+  });
+
+  it.each([
+    ["the rendering probe", (stdout: string) => compose(stdout)],
+    ["the root file", (stdout: string) => compose(PROBE_KEPT, stdout)],
+  ])(
+    "prints only the size of an answer to %s that is not JSON",
+    (_call, docker) => {
+      // `JSON.parse` quotes what it choked on, and that is docker's stdout.
+      const stdout = `KEY=${ENV_VALUE}`;
+
+      const { code, text } = run(docker(stdout), cleanRead);
+
+      expect(code).toBe(1);
+      expect(text).not.toContain(ENV_VALUE);
+      expect(text).toContain(
+        `  stdout is not JSON (${Buffer.byteLength(stdout, "utf8")} bytes)`,
+      );
+    },
+  );
+
+  it("prints why a docker that never started failed", () => {
+    // No code and no stderr: the spawn itself was refused, and its message
+    // carries nothing docker printed.
+    const refused = Object.assign(new Error("spawnSync docker EACCES"), {
+      code: "EACCES",
+    });
+    const { code, text } = run(compose(refused));
+
+    expect(code).toBe(1);
+    expect(text).toContain("spawnSync docker EACCES");
+  });
+
   it("tells a failed probe from a failed version and a failed file", () => {
     const probe = run(compose(new Error("probe: injected")));
     const version = run(compose(PROBE_LOST, new Error("version: injected")));

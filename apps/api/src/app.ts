@@ -8,7 +8,8 @@ import Fastify, {
 } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import type { AppDeps } from "./deps.js";
-import { AccessLogController } from "./lib/error-log.js";
+import { AccessLogController } from "./lib/request-log.js";
+import { decorateRequestState } from "./lib/request-state.js";
 import { registerAuth } from "./plugins/auth.js";
 import { registerClosing } from "./plugins/closing.js";
 import {
@@ -133,9 +134,9 @@ export function buildApp(deps: AppDeps, options: BuildAppOptions): AppInstance {
     return503OnClosing: false,
   }).withTypeProvider<ZodTypeProvider>();
 
-  // Read and set by the controller above and by the error log
-  // (`lib/error-log.ts`), whatever else is registered.
-  app.decorateRequest("failureLogged", false);
+  // Read and set by the controller above, the request log and the auth hook,
+  // whatever else is registered (`lib/request-state.ts`).
+  decorateRequestState(app);
 
   app.addHook("onSend", (request, reply, payload, done) => {
     reply.header(REQUEST_ID_HEADER, request.id);

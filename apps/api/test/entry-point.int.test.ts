@@ -18,7 +18,7 @@ import { basicAuthHeader } from "./helpers.js";
  * the entry point started with the command `pnpm dev` runs (`DEV_COMMAND`,
  * taken apart by `devCommandParts`), with one build label that is a label and
  * one that is not. What only the entry point does - reading
- * which labels the config dropped (`rejectedBuildLabels()`) and handing the
+ * which labels the config dropped (`rejectedBuildLabels`) and handing the
  * parsed config to `composeApp`, which turns it into the fingerprint of
  * `/system/status` - is seen from the outside: in the log of the process and
  * in the page.

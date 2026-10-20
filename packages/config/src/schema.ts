@@ -66,7 +66,7 @@ export function isBuildLabel(value: string): boolean {
 
 /**
  * The variables parsed with `buildLabel()`. Named once so that the report of
- * what was dropped (`rejectedBuildLabels` in `load-env.ts`) cannot miss a
+ * what was dropped (`rejectedBuildLabelsOf` in `load-env.ts`) cannot miss a
  * label added here.
  */
 export const BUILD_LABEL_NAMES = ["APP_VERSION", "GIT_COMMIT"] as const;

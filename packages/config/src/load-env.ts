@@ -77,7 +77,7 @@ export function loadEnv(source: EnvLike = process.env): Env {
  * the build system put there. Same source and the same notion of "set" as
  * `loadEnv`: an empty or blank value is not set, so it is not a rejection.
  */
-export function rejectedBuildLabels(
+export function rejectedBuildLabelsOf(
   source: EnvLike = process.env,
 ): BuildLabelName[] {
   const values = normalizeValues(source);

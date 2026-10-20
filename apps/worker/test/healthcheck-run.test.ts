@@ -49,7 +49,7 @@ describe("runHealthcheck", () => {
     expect(redis.keys).toEqual([WORKER_HEARTBEAT_KEY]);
   });
 
-  it("is unhealthy on a stamp older than the TTL", async () => {
+  it("is unhealthy on a stamp older than the TTL, and says the worker stopped", async () => {
     const stamp = stampAgo(WORKER_HEARTBEAT_TTL_SEC + 1);
 
     await expect(
@@ -60,11 +60,11 @@ describe("runHealthcheck", () => {
       }),
     ).resolves.toEqual({
       healthy: false,
-      reason: `last heartbeat at ${stamp}`,
+      reason: `last heartbeat ${WORKER_HEARTBEAT_TTL_SEC + 1} s ago at ${stamp}, worker stopped writing`,
     });
   });
 
-  it("is unhealthy on a stamp further ahead of the clock than the TTL", async () => {
+  it("is unhealthy on a stamp further ahead of the clock than the TTL, and says the clocks disagree", async () => {
     const stamp = stampAgo(-(WORKER_HEARTBEAT_TTL_SEC + 1));
 
     await expect(
@@ -75,6 +75,82 @@ describe("runHealthcheck", () => {
       }),
     ).resolves.toEqual({
       healthy: false,
+      reason: `heartbeat at ${stamp} is ${WORKER_HEARTBEAT_TTL_SEC + 1} s ahead of this clock, clocks disagree`,
+    });
+  });
+
+  /** The reason the check gives for `stamp`. */
+  const reasonOf = async (stamp: string): Promise<string> =>
+    (
+      await runHealthcheck({
+        redis: redisWith(stamp),
+        now: () => NOW,
+        deadlineMs: DEADLINE_MS,
+      })
+    ).reason;
+
+  it("counts whole seconds up either way: past the bound never prints the bound", async () => {
+    const behind = stampAgo(WORKER_HEARTBEAT_TTL_SEC + 1.7);
+    const ahead = stampAgo(-(WORKER_HEARTBEAT_TTL_SEC + 0.2));
+
+    expect(await reasonOf(behind)).toBe(
+      `last heartbeat ${WORKER_HEARTBEAT_TTL_SEC + 2} s ago at ${behind}, worker stopped writing`,
+    );
+    expect(await reasonOf(ahead)).toBe(
+      `heartbeat at ${ahead} is ${WORKER_HEARTBEAT_TTL_SEC + 1} s ahead of this clock, clocks disagree`,
+    );
+  });
+
+  it.each([
+    [
+      "behind",
+      WORKER_HEARTBEAT_TTL_SEC + 0.4,
+      (stamp: string) =>
+        `last heartbeat ${WORKER_HEARTBEAT_TTL_SEC + 1} s ago at ${stamp}, worker stopped writing`,
+    ],
+    [
+      "ahead",
+      -(WORKER_HEARTBEAT_TTL_SEC + 0.4),
+      (stamp: string) =>
+        `heartbeat at ${stamp} is ${WORKER_HEARTBEAT_TTL_SEC + 1} s ahead of this clock, clocks disagree`,
+    ],
+  ])(
+    "agrees with the verdict at the bound %s: the TTL exactly is fresh, 0.4 s past it is not and says so",
+    async (_side, pastSec, reasonFor) => {
+      const atBound = stampAgo(Math.sign(pastSec) * WORKER_HEARTBEAT_TTL_SEC);
+      const past = stampAgo(pastSec);
+
+      await expect(
+        runHealthcheck({
+          redis: redisWith(atBound),
+          now: () => NOW,
+          deadlineMs: DEADLINE_MS,
+        }),
+      ).resolves.toEqual({
+        healthy: true,
+        reason: `last heartbeat at ${atBound}`,
+      });
+      await expect(
+        runHealthcheck({
+          redis: redisWith(past),
+          now: () => NOW,
+          deadlineMs: DEADLINE_MS,
+        }),
+      ).resolves.toEqual({ healthy: false, reason: reasonFor(past) });
+    },
+  );
+
+  it("calls a stamp within the TTL ahead of the clock fresh, in the words of a fresh one", async () => {
+    const stamp = stampAgo(-(WORKER_HEARTBEAT_TTL_SEC - 1));
+
+    await expect(
+      runHealthcheck({
+        redis: redisWith(stamp),
+        now: () => NOW,
+        deadlineMs: DEADLINE_MS,
+      }),
+    ).resolves.toEqual({
+      healthy: true,
       reason: `last heartbeat at ${stamp}`,
     });
   });
@@ -88,7 +164,7 @@ describe("runHealthcheck", () => {
       }),
     ).resolves.toEqual({
       healthy: false,
-      reason: "heartbeat stamp is not a date",
+      reason: "heartbeat stamp is not the worker's format",
     });
   });
 

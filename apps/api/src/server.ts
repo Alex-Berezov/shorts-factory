@@ -16,11 +16,7 @@ const log = pino(buildLoggerOptions(env));
 
 // The signals are subscribed by `composeApp`, before it opens anything.
 const composed = composeOrFail(
-  () =>
-    composeApp(env, {
-      log,
-      rejectedBuildLabels: rejectedBuildLabels(),
-    }),
+  () => composeApp(env, { log, rejectedBuildLabels }),
   log,
   () => {
     // Nothing was opened, so nothing holds the loop: the process leaves

@@ -9,6 +9,7 @@
  * reachable through `Parameters<typeof ...>` and stay in their modules until
  * an app has to name one.
  */
+export { markClientErrors } from "./client-errors.js";
 export { connectionFailure, errorCode } from "./connection-failure.js";
 export { DeadlineError, settleWithin, withDeadline } from "./deadline.js";
 export type { RuntimeLogger } from "./runtime-logger.js";

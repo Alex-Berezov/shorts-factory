@@ -1,10 +1,21 @@
+import { request as httpRequest } from "node:http";
+import { Readable } from "node:stream";
 import { env } from "@sf/config";
 import { REQUEST_ID_HEADER } from "@sf/contracts";
 import { AppError, ValidationError } from "@sf/core";
 import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { FastifyReply, FastifyRequest } from "fastify";
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+} from "vitest";
+import { z } from "zod";
 import type { AppInstance } from "../src/app.js";
-import { AccessLogController } from "../src/lib/error-log.js";
+import { LINE_BREAK } from "./error-routes.js";
 import {
   AUTH_HEADER,
   TEST_PASSWORD,
@@ -18,6 +29,20 @@ const MARKER = "caller-typed-marker";
 
 /** A provider url with a key, the way a thrower puts it into `details`. */
 const LEAKED_URL = "https://www.googleapis.com/youtube/v3?key=super-secret-key";
+
+/**
+ * An error our own handler cannot map: reading it throws, so the handler
+ * throws, and Fastify's default handler takes the request.
+ */
+function unmappableError(): Error {
+  const unmappable = new Error("unmappable failure");
+  Object.defineProperty(unmappable, "validation", {
+    get(): never {
+      throw new Error("the error handler itself failed");
+    },
+  });
+  return unmappable;
+}
 
 /** What one request left behind: its parsed log lines and its id header. */
 interface Written {
@@ -36,6 +61,8 @@ interface Written {
 describe("access log", () => {
   const recorder = recordingLogger();
   let app: AppInstance;
+  /** The reply of the last request to `/test/left-stream`. */
+  let leftReply: FastifyReply | undefined;
 
   beforeAll(async () => {
     app = buildTestApp({
@@ -66,7 +93,7 @@ describe("access log", () => {
           },
         );
         // A response broken by an error that carries what a thrower put into
-        // `details` - the line about it obeys the rules of the error log.
+        // `details` - the line about it obeys the rules of the request log.
         instance.get("/test/broken-with-details", async (_request, reply) => {
           reply.raw.emit(
             "error",
@@ -76,51 +103,70 @@ describe("access log", () => {
           );
           return { ok: true };
         });
-        // The head of an error response Node refused to write. Fastify gets
-        // there only when two error handlers failed one after another, so
-        // the controller is handed the failure directly, with the request and
-        // the reply of a real route - twice, as a second failure of the same
-        // request would be.
-        instance.get("/test/head-failed", async (request, reply) => {
-          const controller = new AccessLogController();
-          const failure = new ValidationError("head refused", {
-            config: { url: LEAKED_URL },
-          });
-          controller.writeHeadError(failure, request, reply);
-          controller.writeHeadError(failure, request, reply);
-          return { ok: true };
+        // The head of an error response Node refuses to write: a header
+        // value with a line break in it, set before the handler fails. Our
+        // handler writes its line and its answer breaks on the head; Fastify's
+        // default handler takes over and breaks on the same head; its own
+        // fallback then writes the body without the headers of the reply.
+        instance.get("/test/head-failed", async (_request, reply) => {
+          reply.header("x-broken", `line${LINE_BREAK}break`);
+          throw new AppError("UPSTREAM_FAILED", "provider failed", 502);
         });
-        // A stream body and a serializer failing are reported to the
-        // controller the same way, and are as hard to reach for real: each
-        // is handed its failure directly, twice, like the head above.
-        instance.get("/test/stream-failed", async (request, reply) => {
-          const controller = new AccessLogController();
-          const failure = new ValidationError("stream broke", {
-            config: { url: LEAKED_URL },
-          });
-          controller.streamError(failure, request, reply);
-          controller.streamError(failure, request, reply);
-          return { ok: true };
+        // The serializer of the error answer of Fastify's fallback throws: the
+        // route declares a 500 body the error does not match, and our handler
+        // fails before it answers, so the default handler and then the
+        // fallback take the request.
+        instance.get(
+          "/test/serializer-failed",
+          { schema: { response: { 500: z.object({ ok: z.literal(true) }) } } },
+          async () => {
+            throw unmappableError();
+          },
+        );
+        // A stream body that fails after its first chunk went out with the
+        // head: the failure is ours, and the head is already gone.
+        instance.get("/test/failing-stream", async (_request, reply) => {
+          const body = new Readable({ read() {} });
+          body.push("first chunk");
+          setTimeout(() => {
+            body.destroy(
+              new ValidationError("stream broke", {
+                config: { url: LEAKED_URL },
+              }),
+            );
+          }, 20);
+          return reply.type("text/plain").send(body);
         });
-        instance.get("/test/serializer-failed", async (request, reply) => {
-          const controller = new AccessLogController();
-          const failure = new ValidationError("serializer threw", {
-            config: { url: LEAKED_URL },
-          });
-          controller.serializerError(failure, request, reply);
-          controller.serializerError(failure, request, reply);
-          return { ok: true };
+        // A stream body the client stops reading half way: the first chunk
+        // goes out with the head, the rest never comes.
+        instance.get("/test/endless-stream", async (_request, reply) => {
+          const body = new Readable({ read() {} });
+          body.push("first chunk");
+          return reply.type("text/plain").send(body);
+        });
+        // The same stream, its reply kept: the case emits an `error` on the
+        // response once the client has left.
+        instance.get("/test/left-stream", async (_request, reply) => {
+          leftReply = reply;
+          const body = new Readable({ read() {} });
+          body.push("first chunk");
+          return reply.type("text/plain").send(body);
+        });
+        // A stream body of ours cut short with the client still reading:
+        // destroyed without an error, so Node reports the same premature
+        // close as for a client that left - and the failure is ours.
+        instance.get("/test/cut-stream", async (_request, reply) => {
+          const body = new Readable({ read() {} });
+          body.push("first chunk");
+          setTimeout(() => {
+            body.destroy();
+          }, 20);
+          return reply.type("text/plain").send(body);
         });
         // An error our own handler cannot map: reading it throws, so the
         // handler throws, and Fastify's default handler takes the request.
         instance.get("/test/unmappable", async () => {
-          const unmappable = new Error("unmappable failure");
-          Object.defineProperty(unmappable, "validation", {
-            get(): never {
-              throw new Error("the error handler itself failed");
-            },
-          });
-          throw unmappable;
+          throw unmappableError();
         });
       },
     });
@@ -279,12 +325,12 @@ describe("access log", () => {
         level: "error",
         msg: "request failed",
         status: 502,
-        reqId: requestId,
+        requestId,
       }),
     ]);
   });
 
-  it("writes the error of a broken response the way the error log does", async () => {
+  it("writes the error of a broken response the way the request log does", async () => {
     const { entries, raw, requestId } = await writtenOverSocket(
       "/test/broken-with-details",
     );
@@ -303,53 +349,249 @@ describe("access log", () => {
     expect(raw).not.toContain("super-secret-key");
   });
 
-  it("writes a response head that failed once, as an error, and no access line", async () => {
-    const { entries, raw, requestId } = await written("/test/head-failed", {
-      authorization: AUTH_HEADER,
-    });
+  /** The lines of one request at `error`, in the order they were written. */
+  function errorLines(entries: Record<string, unknown>[]): unknown[] {
+    return entries.filter((e) => e.level === "error").map((e) => e.msg);
+  }
 
-    expect(entries).toEqual([
-      expect.objectContaining({
-        level: "error",
-        msg: "response head failed",
+  it("writes each failure of a response whose head broke, and no access line", async () => {
+    recorder.clear();
+    const res = await fetch(`${baseUrl()}/test/head-failed`, {
+      headers: { authorization: AUTH_HEADER },
+    });
+    await res.text();
+    const entries = recorder.entries();
+    // The fallback writes the body without the headers of the reply, the id
+    // header among them: the lines are tied together by the id they carry.
+    expect(res.headers.get(REQUEST_ID_HEADER)).toBeNull();
+    const requestId = entries[0]?.requestId;
+    expect(requestId).toEqual(expect.any(String));
+
+    // Three failures of one request, one line each: ours, the default
+    // handler's that took over when ours broke on the head, and the head
+    // itself the fallback could not write (Т2 E0-12G, the named exception
+    // to one line per request).
+    expect(errorLines(entries)).toEqual([
+      "request failed",
+      "error handler failed",
+      "response head failed",
+    ]);
+    expect(entries).toHaveLength(3);
+    for (const entry of entries) {
+      expect(entry).toMatchObject({
         routeUrl: "/test/head-failed",
         requestId,
+      });
+    }
+    expect(entries[2]).toMatchObject({
+      responseTime: expect.any(Number),
+      err: expect.objectContaining({ code: "ERR_INVALID_CHAR" }),
+    });
+  });
+
+  it("writes a serializer that threw on the error answer, and no access line", async () => {
+    const { entries, requestId } = await writtenOverSocket(
+      "/test/serializer-failed",
+    );
+
+    expect(errorLines(entries)).toEqual([
+      "error handler failed",
+      "response serializer failed",
+    ]);
+    expect(entries).toHaveLength(2);
+    expect(entries[1]).toMatchObject({
+      method: "GET",
+      routeUrl: "/test/serializer-failed",
+      requestId,
+      responseTime: expect.any(Number),
+      // The failure of the serializer itself, not the error it was given.
+      err: expect.objectContaining({
+        type: "ResponseSerializationError",
+        message: expect.stringContaining("Response doesn't match the schema"),
+      }),
+    });
+  });
+
+  it("writes a stream that failed after the head once, as an error", async () => {
+    recorder.clear();
+    const res = await fetch(`${baseUrl()}/test/failing-stream`, {
+      headers: { authorization: AUTH_HEADER },
+    });
+    await res.text().catch(() => undefined);
+    await waitForLine("response stream failed");
+    const entries = recorder.entries();
+
+    expect(entries.filter((e) => e.level === "error")).toEqual([
+      expect.objectContaining({
+        msg: "response stream failed",
+        method: "GET",
+        routeUrl: "/test/failing-stream",
+        requestId: res.headers.get(REQUEST_ID_HEADER),
         err: expect.objectContaining({
-          message: "head refused",
+          message: "stream broke",
           details: "[omitted]",
         }),
       }),
     ]);
-    expect(raw).not.toContain("super-secret-key");
+    expect(recorder.raw()).not.toContain("super-secret-key");
   });
 
-  it.each([
-    ["/test/stream-failed", "response stream failed", "stream broke"],
-    [
-      "/test/serializer-failed",
-      "response serializer failed",
-      "serializer threw",
-    ],
-  ])(
-    "writes %s once, as an error, and no access line",
-    async (path, msg, message) => {
-      const { entries, raw, requestId } = await written(path, {
-        authorization: AUTH_HEADER,
+  it("writes a stream the client stopped reading as a short info line", async () => {
+    recorder.clear();
+    let requestId: unknown;
+    await new Promise<void>((resolve, reject) => {
+      const req = httpRequest(
+        `${baseUrl()}/test/endless-stream`,
+        { headers: { authorization: AUTH_HEADER } },
+        (res) => {
+          requestId = res.headers[REQUEST_ID_HEADER];
+          res.once("data", () => {
+            req.destroy();
+          });
+        },
+      );
+      req.on("close", () => {
+        resolve();
       });
+      req.on("error", (err) => {
+        if ("code" in err && err.code === "ECONNRESET") {
+          return;
+        }
+        reject(err);
+      });
+      req.end();
+    });
+    await waitForLine("stream closed prematurely");
+    // A request after it, to its access line: whatever the server was going
+    // to write of the first one is written by then.
+    const after = await fetch(`${baseUrl()}/health`);
+    await after.text();
+    await waitForLine("request completed");
 
-      expect(entries).toEqual([
-        expect.objectContaining({
-          level: "error",
-          msg,
-          method: "GET",
-          routeUrl: path,
-          requestId,
-          err: expect.objectContaining({ message, details: "[omitted]" }),
-        }),
-      ]);
-      expect(raw).not.toContain("super-secret-key");
-    },
-  );
+    // The only line of the request: a response whose client left never
+    // finishes, and Fastify never completes the request - no access line.
+    expect(typeof requestId).toBe("string");
+    const entries = recorder
+      .entries()
+      .filter((entry) => entry.requestId === requestId);
+    expect(entries).toEqual([
+      expect.objectContaining({
+        level: "info",
+        msg: "stream closed prematurely",
+        method: "GET",
+        routeUrl: "/test/endless-stream",
+        status: 200,
+        requestId,
+      }),
+    ]);
+    expect(entries[0]).not.toHaveProperty("err");
+  });
+
+  it("writes no error line for a response that fails after its client left", async () => {
+    recorder.clear();
+    let requestId: unknown;
+    await new Promise<void>((resolve, reject) => {
+      const req = httpRequest(
+        `${baseUrl()}/test/left-stream`,
+        { headers: { authorization: AUTH_HEADER } },
+        (res) => {
+          requestId = res.headers[REQUEST_ID_HEADER];
+          res.once("data", () => {
+            req.destroy();
+          });
+        },
+      );
+      req.on("close", () => {
+        resolve();
+      });
+      req.on("error", (err) => {
+        if ("code" in err && err.code === "ECONNRESET") {
+          return;
+        }
+        reject(err);
+      });
+      req.end();
+    });
+    await waitForLine("stream closed prematurely");
+    // The response of the request that has its line already fails as well:
+    // Fastify reports it to the controller as a request completed with it.
+    expect(leftReply).toBeDefined();
+    leftReply?.raw.emit(
+      "error",
+      new Error("response failed after the client left"),
+    );
+    const after = await fetch(`${baseUrl()}/health`);
+    await after.text();
+    await waitForLine("request completed");
+
+    expect(typeof requestId).toBe("string");
+    expect(
+      recorder.entries().filter((entry) => entry.requestId === requestId),
+    ).toEqual([
+      expect.objectContaining({
+        level: "info",
+        msg: "stream closed prematurely",
+      }),
+    ]);
+  });
+
+  it("writes a stream of ours cut short with the client still there as an error", async () => {
+    recorder.clear();
+    const res = await fetch(`${baseUrl()}/test/cut-stream`, {
+      headers: { authorization: AUTH_HEADER },
+    });
+    await res.text().catch(() => undefined);
+    await waitForLine("response stream failed");
+
+    expect(recorder.entries()).toEqual([
+      expect.objectContaining({
+        level: "error",
+        msg: "response stream failed",
+        routeUrl: "/test/cut-stream",
+        requestId: res.headers.get(REQUEST_ID_HEADER),
+        err: expect.objectContaining({ code: "ERR_STREAM_PREMATURE_CLOSE" }),
+      }),
+    ]);
+  });
+
+  /** Waits until a line with this message is written; fails if none comes. */
+  async function waitForLine(msg: string): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (recorder.entries().some((e) => e.msg === msg)) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(
+      `no "${msg}" line within 1 s; written: ${JSON.stringify(
+        recorder.entries().map((e) => e.msg),
+      )}`,
+    );
+  }
+
+  it("writes a url the router refused as one short line and no access line", async () => {
+    // The router builds this request on the server-wide context, without the
+    // decorators: the type says the flags may be absent.
+    expectTypeOf<FastifyRequest["failureLogged"]>().toEqualTypeOf<
+      boolean | undefined
+    >();
+    expectTypeOf<FastifyRequest["authenticated"]>().toEqualTypeOf<
+      boolean | undefined
+    >();
+    const { entries, requestId } = await written("/%");
+
+    // Short and without the error: the flags of this request are absent,
+    // and absent is not "gave the password".
+    expect(entries).toEqual([
+      expect.objectContaining({
+        level: "info",
+        msg: "request rejected",
+        status: 400,
+        requestId,
+      }),
+    ]);
+    expect(entries[0]).not.toHaveProperty("err");
+  });
 
   it("writes the failure of the error handler itself, without the url", async () => {
     const { entries, raw, requestId } = await written(

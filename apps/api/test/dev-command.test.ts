@@ -31,6 +31,16 @@ describe("api dev command", () => {
     });
   });
 
+  it.each([
+    ["is not node", "tsx src/server.ts"],
+    ["ends in a flag", "node --import tsx --watch"],
+    ["has no script", "node"],
+  ])("refuses a command that %s", (_case, command) => {
+    expect(() => devCommandParts(command)).toThrow(
+      `not a node command with a script: ${command}`,
+    );
+  });
+
   it("starts nothing under a watcher, in any script", () => {
     expect(Object.keys(scripts)).not.toContain("dev:watch");
     expect(watcherScripts(scripts)).toEqual([]);

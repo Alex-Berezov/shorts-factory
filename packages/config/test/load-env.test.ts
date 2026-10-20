@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EnvLike } from "../src/env-file.js";
-import { loadEnv, rejectedBuildLabels } from "../src/load-env.js";
+import { loadEnv, rejectedBuildLabelsOf } from "../src/load-env.js";
 import { repoRoot } from "../src/paths.js";
 import { EnvSchema, isBuildLabel } from "../src/schema.js";
 import { baseSource, envIssues, issuePaths } from "./helpers.js";
@@ -278,7 +278,7 @@ describe("loadEnv - build fingerprint", () => {
   it("reads an empty label as unset and never as a label", () => {
     // The parse drops an empty value before the label rule sees it, so the
     // rule's lower bound is only visible through the rule itself - and both
-    // `buildLabel()` and `rejectedBuildLabels` go through it.
+    // `buildLabel()` and `rejectedBuildLabelsOf` go through it.
     expect(
       loadEnv(baseSource({ APP_VERSION: "" })).APP_VERSION,
     ).toBeUndefined();
@@ -295,21 +295,21 @@ describe("loadEnv - build fingerprint", () => {
   });
 });
 
-describe("rejectedBuildLabels", () => {
+describe("rejectedBuildLabelsOf", () => {
   // The parse reads an unusable label as unset; this is how the dropped value
   // stays distinguishable from a variable nobody passed.
   it("names a label that was set to something that is not a label", () => {
     expect(
-      rejectedBuildLabels(baseSource({ APP_VERSION: "1.4.0 (2026-09-08)" })),
+      rejectedBuildLabelsOf(baseSource({ APP_VERSION: "1.4.0 (2026-09-08)" })),
     ).toEqual(["APP_VERSION"]);
     expect(
-      rejectedBuildLabels(baseSource({ GIT_COMMIT: "feature/x-abc1234" })),
+      rejectedBuildLabelsOf(baseSource({ GIT_COMMIT: "feature/x-abc1234" })),
     ).toEqual(["GIT_COMMIT"]);
   });
 
   it("names both when both were dropped", () => {
     expect(
-      rejectedBuildLabels(
+      rejectedBuildLabelsOf(
         baseSource({ APP_VERSION: "1.4 beta", GIT_COMMIT: "feature/x" }),
       ),
     ).toEqual(["APP_VERSION", "GIT_COMMIT"]);
@@ -317,7 +317,7 @@ describe("rejectedBuildLabels", () => {
 
   it("names nothing when the labels are labels", () => {
     expect(
-      rejectedBuildLabels(
+      rejectedBuildLabelsOf(
         baseSource({ APP_VERSION: "1.4.0-rc.1", GIT_COMMIT: "abc1234-dirty" }),
       ),
     ).toEqual([]);
@@ -325,15 +325,15 @@ describe("rejectedBuildLabels", () => {
 
   it("does not count an absent, empty or blank value as a rejection", () => {
     // Unset is what the variable is on every machine that is not a build.
-    expect(rejectedBuildLabels(baseSource({}))).toEqual([]);
+    expect(rejectedBuildLabelsOf(baseSource({}))).toEqual([]);
     expect(
-      rejectedBuildLabels(baseSource({ APP_VERSION: "", GIT_COMMIT: "   " })),
+      rejectedBuildLabelsOf(baseSource({ APP_VERSION: "", GIT_COMMIT: "   " })),
     ).toEqual([]);
   });
 
   it("judges the trimmed value, the one the config keeps", () => {
     expect(
-      rejectedBuildLabels(baseSource({ APP_VERSION: "  1.4.0  " })),
+      rejectedBuildLabelsOf(baseSource({ APP_VERSION: "  1.4.0  " })),
     ).toEqual([]);
   });
 });
@@ -449,5 +449,106 @@ describe("EnvSchema", () => {
     expect(keys).toContain("ADMIN_PASSWORD");
     expect(keys).toContain("GEMINI_API_KEY");
     expect(keys).toContain("API_PORT");
+  });
+});
+
+describe("rejectedBuildLabels of the package entry", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("names the labels dropped from the values env was parsed from", async () => {
+    const source = baseSource({ APP_VERSION: "1.4.0 (2026-09-08)" });
+    for (const [name, value] of Object.entries(source)) {
+      vi.stubEnv(name, value);
+    }
+    vi.resetModules();
+    const config = await import("../src/index.js");
+
+    // The label `env` read as unset is the one the list names.
+    expect(config.env.APP_VERSION).toBeUndefined();
+    expect(config.rejectedBuildLabels).toEqual(["APP_VERSION"]);
+    expect(config.rejectedBuildLabels).toEqual(rejectedBuildLabelsOf(source));
+  });
+
+  it("is the only way to the labels from the entry: no function reads them again", async () => {
+    for (const [name, value] of Object.entries(baseSource({}))) {
+      vi.stubEnv(name, value);
+    }
+    vi.resetModules();
+    const config: Record<string, unknown> = await import("../src/index.js");
+
+    // A function in the barrel is a second read of the environment, and
+    // the entry point of the api calling it is the defect of
+    // docs/TECH_DEBT.md § E0-12G, item 1; the value is the one `env` came from.
+    const functions = Object.entries(config)
+      .filter(([, value]) => typeof value === "function")
+      .map(([name]) => name)
+      .sort();
+    expect(functions).toEqual(["buildLimits", "loadEnv"]);
+    expect(Array.isArray(config.rejectedBuildLabels)).toBe(true);
+  });
+
+  /**
+   * The entry imported over `stand-in` in place of `process.env`. `VITEST`
+   * stays in it, so `bootstrapEnv` reads no `.env` here either.
+   */
+  async function entryOver(standIn: EnvLike) {
+    const real = process.env;
+    process.env = standIn;
+    try {
+      vi.resetModules();
+      return await import("../src/index.js");
+    } finally {
+      process.env = real;
+    }
+  }
+
+  it("takes env and the labels from one reading of each variable", async () => {
+    // A variable that changes between two reads: the label is bad on the
+    // first, fine on every one after. One reading drops it from `env` and
+    // names it; a second reading for the labels would name nothing - the
+    // defect of docs/TECH_DEBT.md § E0-12G, item 1.
+    let reads = 0;
+    const standIn: EnvLike = { ...baseSource({}), VITEST: "true" };
+    Object.defineProperty(standIn, "APP_VERSION", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        reads += 1;
+        return reads === 1 ? "1.4.0 (2026-09-08)" : "1.4.0";
+      },
+    });
+
+    const config = await entryOver(standIn);
+
+    expect(config.env.APP_VERSION).toBeUndefined();
+    expect(config.rejectedBuildLabels).toEqual(["APP_VERSION"]);
+    expect(reads).toBe(1);
+  });
+
+  it("reads a variable the way process.env answers for it, whatever the spelling of its key", async () => {
+    // What `process.env` is on Windows: a key kept as the shell spelled it,
+    // answered under any case of its letters.
+    const { REDIS_URL: _unused, ...rest } = baseSource({});
+    const spelled: EnvLike = {
+      ...rest,
+      VITEST: "true",
+      Redis_Url: "redis://spelled:6379",
+    };
+    const standIn = new Proxy(spelled, {
+      get(target, name) {
+        if (typeof name !== "string") return undefined;
+        const key = Object.keys(target).find(
+          (own) => own.toUpperCase() === name.toUpperCase(),
+        );
+        return key === undefined ? undefined : target[key];
+      },
+    });
+
+    const config = await entryOver(standIn);
+
+    expect(config.env.REDIS_URL).toBe("redis://spelled:6379");
   });
 });

@@ -17,6 +17,37 @@ export interface HeartbeatReading {
 const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
+ * How far `stamp` is from `now`, in whole seconds: positive for a stamp
+ * behind the clock (its age), negative for one ahead of it. Rounded away from
+ * zero (`Math.ceil` of the magnitude), so that for the whole-second TTL
+ * `Math.abs(offset) > TTL` holds exactly when the unrounded distance is past
+ * the TTL: 180.4 s is 181, never 180 - a stale stamp never prints the bound.
+ * One computation for every reader - `readHeartbeat` and the reason of the
+ * container healthcheck - so the verdict and the number next to it cannot
+ * disagree.
+ *
+ * For a stamp `readHeartbeat` accepted (`heartbeatAt`) and a real clock:
+ * anything else is not an instant and has no distance, and is refused with a
+ * `RangeError` rather than answered with `NaN`, which every comparison reads
+ * as "within the TTL".
+ */
+export function heartbeatOffsetSec(stamp: string, now: Date): number {
+  const offset = offsetSecOf(Date.parse(stamp), now);
+  if (Number.isNaN(offset)) {
+    throw new RangeError(
+      "heartbeat offset of a stamp or a clock that is not an instant",
+    );
+  }
+  return offset;
+}
+
+/** `heartbeatOffsetSec` of an instant already parsed. */
+function offsetSecOf(writtenAtMs: number, now: Date): number {
+  const offsetMs = now.getTime() - writtenAtMs;
+  return Math.sign(offsetMs) * Math.ceil(Math.abs(offsetMs) / 1_000);
+}
+
+/**
  * Judges the stamp under `WORKER_HEARTBEAT_KEY` against a clock. One rule for
  * every reader - `/system/status` in `apps/api` and the container healthcheck
  * of `apps/worker` - because two copies of "how old is too old" drift, and
@@ -51,10 +82,8 @@ export function readHeartbeat(
     return { heartbeatAt: null, stale: true };
   }
 
-  const ageSec = (now.getTime() - writtenAt) / 1_000;
   return {
     heartbeatAt: stamp,
-    stale:
-      ageSec > WORKER_HEARTBEAT_TTL_SEC || -ageSec > WORKER_HEARTBEAT_TTL_SEC,
+    stale: Math.abs(offsetSecOf(writtenAt, now)) > WORKER_HEARTBEAT_TTL_SEC,
   };
 }

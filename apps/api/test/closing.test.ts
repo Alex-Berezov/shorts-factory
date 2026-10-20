@@ -160,7 +160,6 @@ describe("a request that arrives while the service is closing", () => {
         time: expect.any(Number),
         pid: expect.any(Number),
         hostname: expect.any(String),
-        reqId: requestId,
         status: 503,
         code: "INTERNAL_ERROR",
         method: "GET",

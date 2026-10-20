@@ -1,7 +1,7 @@
-import { bootstrapEnv } from "./env-file.js";
+import { type EnvLike, bootstrapEnv } from "./env-file.js";
 import { type Limits, buildLimits } from "./limits.js";
-import { loadEnv } from "./load-env.js";
-import type { Env } from "./schema.js";
+import { loadEnv, rejectedBuildLabelsOf } from "./load-env.js";
+import { type BuildLabelName, type Env, EnvSchema } from "./schema.js";
 
 /**
  * Typed, fail-fast environment configuration.
@@ -28,12 +28,35 @@ import type { Env } from "./schema.js";
  */
 bootstrapEnv(process.env);
 
-export const env: Env = loadEnv();
+/**
+ * The one reading of the environment everything below is derived from: `env`
+ * and the labels it dropped come from the same values, so a variable changed
+ * between two reads cannot make them disagree.
+ *
+ * Read name by name, the names of the schema, through `process.env` itself:
+ * on Windows it answers `REDIS_URL` for a variable the shell spelled
+ * `Redis_Url`, and a copy of its keys keeps the spelling and loses the value.
+ */
+const snapshot: EnvLike = Object.fromEntries(
+  Object.keys(EnvSchema.shape).map((name) => [name, process.env[name]]),
+);
+
+export const env: Env = loadEnv(snapshot);
+
+/**
+ * The build labels `env` reads as unset because they were set to something
+ * that is not a label, from the same snapshot: the process that owns a logger
+ * writes them, names only. The function behind it is not exported - a second
+ * call would read the environment again, and the labels could stop being the
+ * ones `env` dropped (docs/TECH_DEBT.md § E0-12G, item 1).
+ */
+export const rejectedBuildLabels: readonly BuildLabelName[] =
+  rejectedBuildLabelsOf(snapshot);
 
 /** Operational limits derived from the current env. */
 export const limits: Limits = buildLimits(env);
 
-export { loadEnv, rejectedBuildLabels } from "./load-env.js";
+export { loadEnv } from "./load-env.js";
 export { buildLimits } from "./limits.js";
 export type { BuildLabelName, Env } from "./schema.js";
 export type { Limits } from "./limits.js";

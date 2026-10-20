@@ -12,11 +12,13 @@ import {
   isResponseSerializationError,
 } from "fastify-type-provider-zod";
 import { publicDetails, toDetailItems } from "./error-response.js";
+import { safeCode, safeMessage } from "./error-text.js";
+import {
+  CLIENT_ERROR_STATUS,
+  type MappedError,
+  SERVER_ERROR_STATUS,
+} from "./mapped-error.js";
 
-/** Lowest status code that means "our fault", not the caller's. */
-export const SERVER_ERROR_STATUS = 500;
-/** Lowest status code that describes the request rather than the service. */
-const CLIENT_ERROR_STATUS = 400;
 /** Highest status code an HTTP response can carry. */
 const MAX_ERROR_STATUS = 599;
 /** Said instead of a 4xx message when the status has no reason phrase. */
@@ -28,10 +30,6 @@ const CLIENT_ERROR_MESSAGE = "Request failed";
  */
 const INTERNAL_ERROR_MESSAGE =
   STATUS_CODES[SERVER_ERROR_STATUS] ?? INTERNAL_ERROR_CODE;
-/** How much of an error message may travel to the caller. */
-const MAX_MESSAGE_LENGTH = 200;
-/** How long a code may be before it stops being an identifier. */
-const MAX_CODE_LENGTH = 64;
 
 /**
  * What a request that arrives while the service is closing is answered with
@@ -41,8 +39,8 @@ const MAX_CODE_LENGTH = 64;
  * `INTERNAL_ERROR` / "Service Unavailable" in `mapError` (decision R2 of
  * E0-11A); no code of its own.
  *
- * Not a failure of the service either: the error log writes it as the short
- * line of a refused request (`logError` in `lib/error-log.ts`).
+ * Not a failure of the service either: the request log writes it as the short
+ * line of a refused request (`logError` in `lib/request-log.ts`).
  */
 export class ServiceClosingError extends Error {
   readonly statusCode = 503;
@@ -51,15 +49,6 @@ export class ServiceClosingError extends Error {
     super("Service Unavailable");
     this.name = "ServiceClosingError";
   }
-}
-
-/** What one failure looks like on the wire, before it is put into a body. */
-export interface MappedError {
-  status: number;
-  code: string;
-  message: string;
-  /** `undefined` when there is nothing a caller may see. */
-  details: unknown;
 }
 
 /**
@@ -141,119 +130,19 @@ function internalError(): MappedError {
 }
 
 /**
- * Everything that is not a character a body or a log line may carry: the
- * `C` classes (control, format, surrogate, private use, unassigned - `U+0085`
- * and the rest of the C1 set among them) and the `Z` classes, which hold every
- * separator there is (`U+2028`, `U+2029`) and every space that is not the
- * plain one (`U+00A0`).
- */
-const UNPRINTABLE = /[\p{C}\p{Z}]/u;
-
-/** The one space that is a space: runs of it are collapsed, not replaced. */
-const PLAIN_SPACE = " ";
-
-/**
- * Printable, so an escape sequence cannot reach a terminal reading the body
- * and a line separator cannot split a log line in two.
- *
- * A range check (`>= 0x20 && !== 0x7f`) is not enough for either: `U+0085`,
- * `U+2028` and `U+00A0` all sit above it, `JSON.stringify` escapes none of
- * them, and a JavaScript reader of the resulting line breaks on the second.
- * The character classes state the rule once instead of listing code points.
- */
-function isPrintable(char: string): boolean {
-  return char === PLAIN_SPACE || !UNPRINTABLE.test(char);
-}
-
-/**
- * The text as one line of printable characters: every character `isPrintable`
- * refuses becomes a space, and runs of spaces collapse into one. Shared by
- * the body (`safeMessage`) and the log (`lib/error-log.ts`), so the two cannot
- * disagree about what a line break is.
- */
-export function printableLine(text: string): string {
-  const printable = Array.from(text)
-    .map((char) => (isPrintable(char) ? char : " "))
-    .join("");
-  return printable.replace(/\s+/g, " ").trim();
-}
-
-/**
- * What of an error message may be shown to the caller.
- *
- * Only one source gets here - a 4xx `AppError` written by our own domain code
- * - and even that is bounded and flattened rather than passed through:
- * `AppError` is constructed from whatever a `catch` block had at hand, and an
- * unbounded multi-line string would go into a JSON body and into a log line
- * as it is.
- */
-function safeMessage(message: unknown, status: number): string {
-  if (typeof message !== "string") {
-    return statusMessage(status);
-  }
-  const collapsed = printableLine(message);
-  if (collapsed.length === 0) {
-    return statusMessage(status);
-  }
-  return collapsed.length > MAX_MESSAGE_LENGTH
-    ? `${collapsed.slice(0, MAX_MESSAGE_LENGTH)}...`
-    : collapsed;
-}
-
-/**
- * The written form of a code, as the convention in `@sf/contracts` states it:
- * `UPPER_SNAKE`, starting with a letter.
- *
- * Matching the shape is the whole test rather than one check among several,
- * because the things a code must not be do not share a character class. A url
- * a provider put in its error (`https://www.googleapis.com/youtube/v3?key=…`)
- * is one token, printable and under the length limit, so a filter built from
- * "not too long", "printable" and "no spaces" passes it on with the key in
- * it - proved by `test/error-sanitize.test.ts`, "refuses to send a code that
- * is a url with a key in it". An identifier is a narrow enough form to state
- * directly.
- *
- * What the shape does not do is tell a code from a secret: a url, a sentence
- * and a Google or Gemini key (`AIza…`, lower case in it) are refused, but a
- * token written entirely in `[A-Z0-9_]` - `SK_LIVE_51H8ZQ2E…` - is an
- * identifier by every rule here and goes out as it is. Whether a `code` can
- * carry a secret is decided where the `AppError` is built: the thrower names
- * the failure with a constant, never with a value it got from a provider.
- */
-const CODE_SHAPE = /^[A-Z][A-Z0-9_]*$/;
-
-/**
- * What of an error code may be shown to the caller.
- *
- * The `code` of an `AppError` travels in both directions of the status range,
- * and it is built the same way its message is - `new AppError(String(err.code
- * ?? err.message), …, 502)` around a provider client is the shape E2 and E7
- * produce, so the field can arrive as a sentence, a url or a kilobyte of
- * provider output. A code is an identifier a client branches on, not prose:
- * it is either usable as it stands or it is not ours to send, so a value
- * outside the shape is replaced rather than trimmed - a truncated code would
- * name a different failure.
- *
- * What it is replaced with follows the status, not the direction of the
- * failure: a 4xx says what every other unnamed failure with that status says
+ * The code a value outside the identifier shape is replaced with
+ * (`safeCode`). It follows the status, not the direction of the failure: a
+ * 4xx says what every other unnamed failure with that status says
  * (`CLIENT_ERROR_CODES`, `BAD_REQUEST` for a 400), so one status does not
  * reach a client under two different codes depending on what was thrown
  * inside. `INTERNAL_ERROR` on a 400 would tell the caller - and the retry
  * logic of a client - that the service broke, when the answer is that the
  * request did.
  */
-function safeCode(code: unknown, status: number): string {
-  const fallback = isClientStatus(status)
+function codeFallback(status: number): string {
+  return isClientStatus(status)
     ? (CLIENT_ERROR_CODES[status] ?? CLIENT_ERROR_CODE)
     : INTERNAL_ERROR_CODE;
-  if (
-    typeof code !== "string" ||
-    code.length > MAX_CODE_LENGTH ||
-    !CODE_SHAPE.test(code)
-  ) {
-    return fallback;
-  }
-  return code;
 }
 
 /** Status of a Fastify or plugin error, read off a value of unknown shape. */
@@ -311,15 +200,15 @@ export function mapError(err: unknown): MappedError {
     if (!isClientStatus(err.httpStatus)) {
       return {
         status: err.httpStatus,
-        code: safeCode(err.code, err.httpStatus),
+        code: safeCode(err.code, codeFallback(err.httpStatus)),
         message: statusMessage(err.httpStatus),
         details: undefined,
       };
     }
     return {
       status: err.httpStatus,
-      code: safeCode(err.code, err.httpStatus),
-      message: safeMessage(err.message, err.httpStatus),
+      code: safeCode(err.code, codeFallback(err.httpStatus)),
+      message: safeMessage(err.message, statusMessage(err.httpStatus)),
       details: publicDetails(err),
     };
   }
@@ -373,34 +262,4 @@ export function mapFrameworkError(err: FastifyError): MappedError {
     return internalError();
   }
   return clientError(status);
-}
-
-/**
- * The statuses a request is refused with when it breaks before it is a
- * request at all - on the socket, while Node is still parsing it - keyed by
- * the code of the Node error. Anything not named here is a 400, as in
- * Fastify's default handler, which this one replaces. Node's own fallback
- * (`socketOnError` in `_http_server.js`) names one code more - a chunk
- * extension over its limit (`HPE_CHUNK_EXTENSIONS_OVERFLOW`) is a 413 there -
- * and here it is a 400 like every other request the parser could not read.
- *
- * A `Map`, not an object literal: the key is a value off an error object, and
- * a lookup on a plain object would also find `constructor` or `toString`.
- */
-const SOCKET_ERROR_STATUSES: ReadonlyMap<string, number> = new Map([
-  ["ERR_HTTP_REQUEST_TIMEOUT", 408],
-  ["HPE_HEADER_OVERFLOW", 431],
-]);
-
-/**
- * Status, code and text of a request Node refused on the socket
- * (`clientError`). Nothing of the Node error leaves: its code and message
- * name the parser (`HPE_HEADER_OVERFLOW`, `Parse Error: Header overflow`).
- */
-export function mapSocketError(nodeCode: unknown): MappedError {
-  return clientError(
-    (typeof nodeCode === "string"
-      ? SOCKET_ERROR_STATUSES.get(nodeCode)
-      : undefined) ?? CLIENT_ERROR_STATUS,
-  );
 }

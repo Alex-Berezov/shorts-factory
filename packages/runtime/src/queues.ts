@@ -1,7 +1,7 @@
 import { type QueueName, isQueueName } from "@sf/core";
 import { type DefaultJobOptions, Queue } from "bullmq";
 import type { Redis } from "ioredis";
-import { connectionFailure } from "./connection-failure.js";
+import { markClientErrors } from "./client-errors.js";
 import { settleWithin } from "./deadline.js";
 import type { RuntimeLogger } from "./runtime-logger.js";
 
@@ -147,8 +147,9 @@ async function initRefusal(queue: Queue): Promise<InitRefusal | undefined> {
  *   fades. A wrong password or a name Docker cannot resolve yet would
  *   otherwise be one `error` line per queue per reconnect, with nothing to
  *   tell them apart. Such an error is recognised as the very object the
- *   client emitted a moment before - the factory listens on the client
- *   first, which needs nothing of BullMQ but the order of the listeners;
+ *   client emitted a moment before (`markClientErrors`) - the factory
+ *   listens on the client first, which needs nothing of BullMQ but the order
+ *   of the listeners;
  * - a connection failure is not either - a refused command reports it to the
  *   read that failed - and neither is a refused `init()` of any kind: every
  *   read of that `Queue` is refused with it;
@@ -171,13 +172,7 @@ export function createQueueFactory(options: QueueFactoryOptions): QueueFactory {
    * exists, so this listener runs ahead of the one each `Queue` puts on the
    * client, and the copy the `Queue` hears is already marked.
    */
-  const fromClient = new WeakSet<object>();
-  const markClientError = (err: unknown): void => {
-    if (typeof err === "object" && err !== null) {
-      fromClient.add(err);
-    }
-  };
-  options.connection.on("error", markClientError);
+  const clientErrors = markClientErrors(options.connection);
 
   /**
    * The closes `forget()` started and nobody waited for yet. Not waited for
@@ -230,7 +225,7 @@ export function createQueueFactory(options: QueueFactoryOptions): QueueFactory {
         : { defaultJobOptions: options.defaultJobOptions }),
     });
     queue.on("error", (err: Error) => {
-      if (fromClient.has(err) || connectionFailure(err) !== undefined) {
+      if (clientErrors.writtenByClient(err)) {
         return;
       }
       // BullMQ emits a refused `init()` here as well, on every `Queue` it
@@ -312,7 +307,7 @@ export function createQueueFactory(options: QueueFactoryOptions): QueueFactory {
       } finally {
         // Only now, after the forgotten ones too: a `Queue` still closing
         // hears the client as well.
-        options.connection.off("error", markClientError);
+        clientErrors.dispose();
       }
     },
   };

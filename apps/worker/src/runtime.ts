@@ -1,7 +1,11 @@
 import { type Env, buildLimits } from "@sf/config";
 import { QUEUE_NAMES, type QueueName } from "@sf/core";
 import { type BudgetGuard, type Db, createUsageLogger } from "@sf/db";
-import type { QueueFactory } from "@sf/runtime";
+import {
+  type QueueFactory,
+  connectionFailure,
+  markClientErrors,
+} from "@sf/runtime";
 import { Worker } from "bullmq";
 import type { Redis } from "ioredis";
 import type { Logger } from "pino";
@@ -20,6 +24,13 @@ import {
   startQueueSwitchSync,
 } from "./lib/queue-switches.js";
 import { syncSchedules } from "./schedules.js";
+
+/**
+ * How long an unmarked connection failure of a `Worker` silences the next one
+ * when the worker does not say `ready` in between (the `error` listener in
+ * `startWorkerRuntime`).
+ */
+export const CONNECTION_FAILURE_LOG_WINDOW_MS = 60_000;
 
 /**
  * The worker itself: queues, workers, the DLQ wiring, the queue switches and
@@ -85,6 +96,11 @@ export async function startWorkerRuntime(
     });
   const queues = deps.queues ?? createJobQueueFactory(deps.redis, deps.log);
   const getQueue = (name: QueueName) => queues.get(name);
+  // Before the first `Worker` is built on the client: BullMQ hands every error
+  // of the shared client to every `Worker` on it, and this listener has to run
+  // ahead of theirs for the copy they hear to be marked. The client writes its
+  // own line; one more per worker would be a line per queue per reconnect.
+  const clientErrors = markClientErrors(deps.redis);
 
   const workers = new Map<QueueName, Worker>();
   const dlqWriters: DlqWriter[] = [];
@@ -98,11 +114,17 @@ export async function startWorkerRuntime(
     }
     workersClosed = true;
     // Awaited: a tick in flight is holding a queue open and is about to ask
-    // the factory for more, and the factory is closed a moment from now.
+    // the factory for more, and the factory is closed a moment from now. It
+    // never rejects (see `lib/queue-switches.ts`), so the close below runs.
     await stopSwitchSync();
     // `close()` without `force`: it stops taking new jobs and waits for the
     // ones in flight - the whole point of a graceful stop.
-    await Promise.all([...workers.values()].map((worker) => worker.close()));
+    try {
+      await Promise.all([...workers.values()].map((worker) => worker.close()));
+    } finally {
+      // No `Worker` hears the client any more.
+      clientErrors.dispose();
+    }
     // Only now can no new failure arrive; what is left is the copies already
     // on their way to `system.dlq`, which the next stage would cut off.
     await Promise.all(dlqWriters.map((writer) => writer.drain()));
@@ -222,8 +244,42 @@ export async function startWorkerRuntime(
         dlqWriter.onFailed(job, err);
       });
       // Without an `error` listener a connection problem reaches the process as
-      // an unhandled `EventEmitter` error and does the same.
+      // an unhandled `EventEmitter` error and does the same. Not written is an
+      // error of the shared client: the client's own line has it, and every
+      // worker on the client hears the same object. Each `Worker` also holds a
+      // blocking copy of the client of its own (BullMQ duplicates it), whose
+      // errors reach the worker unmarked and are nobody else's to write - so
+      // here the worker departs from the factory of `Queue`, which writes no
+      // connection failure at all (docs/DECISIONS.md, Т9 E0-12G). An unmarked
+      // connection failure is written once, and again after either of two
+      // things: the worker says `ready` - its copy came back - or
+      // `CONNECTION_FAILURE_LOG_WINDOW_MS` has passed since the last line, by
+      // the monotonic clock (`performance.now()`): a wall clock set back would
+      // keep the window shut for as long as it went back. The window is for an
+      // unmarked failure that is not the copy's (a `ConnectionClosedError` of
+      // `run()`): no `ready` follows it, and without the window it would
+      // silence the next outage of the copy for good. At worst a line per
+      // worker per window, not one per reconnect. A wrong password on the
+      // copies is still one line per worker per reconnect (docs/TECH_DEBT.md
+      // § E0-12R).
+      let connectionFailureWrittenAt: number | undefined;
+      worker.on("ready", () => {
+        connectionFailureWrittenAt = undefined;
+      });
       worker.on("error", (err) => {
+        if (clientErrors.has(err)) {
+          return;
+        }
+        if (connectionFailure(err) !== undefined) {
+          const now = performance.now();
+          if (
+            connectionFailureWrittenAt !== undefined &&
+            now - connectionFailureWrittenAt < CONNECTION_FAILURE_LOG_WINDOW_MS
+          ) {
+            return;
+          }
+          connectionFailureWrittenAt = now;
+        }
         deps.log.error({ queue: name, err }, "worker error");
       });
 

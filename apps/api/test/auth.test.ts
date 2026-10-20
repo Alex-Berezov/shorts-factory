@@ -1,10 +1,13 @@
-import type {
-  FastifyHttpOptions,
-  RawServerDefault,
-  RouteOptions,
+import {
+  type FastifyHttpOptions,
+  type RawServerDefault,
+  type RouteOptions,
+  fastify,
 } from "fastify";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AppInstance } from "../src/app.js";
+import { decorateRequestState } from "../src/lib/request-state.js";
+import { registerAuth } from "../src/plugins/auth.js";
 import { DOCS_ROUTE, OPENAPI_ROUTE } from "../src/plugins/openapi.js";
 import {
   AUTH_HEADER,
@@ -205,6 +208,31 @@ describe("the password over the routes of the app", () => {
           .map(({ route }) => route)
           .sort(),
       ).toEqual(["GET /health", "HEAD /health"]);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("registerAuth", () => {
+  it("refuses an app whose requests do not carry the flag it sets", async () => {
+    const app = fastify();
+    try {
+      expect(() => {
+        registerAuth(app, { password: TEST_PASSWORD });
+      }).toThrow("registerAuth needs decorateRequestState(app) first");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("takes an app decorated first", async () => {
+    const app = fastify();
+    try {
+      decorateRequestState(app);
+      expect(() => {
+        registerAuth(app, { password: TEST_PASSWORD });
+      }).not.toThrow();
     } finally {
       await app.close();
     }

@@ -35,8 +35,8 @@ export interface ComposeOptions {
   log: Logger;
   /**
    * The build labels `@sf/config` read as unset because they were not labels
-   * (`rejectedBuildLabels()`), passed in so that composing stays a function
-   * of its arguments.
+   * (`rejectedBuildLabels`, from the same snapshot of the environment as `env`),
+   * passed in so that composing stays a function of its arguments.
    */
   rejectedBuildLabels: readonly BuildLabelName[];
   /** Seam for tests: the Redis client factory. */
@@ -204,7 +204,9 @@ export function composeApp(env: Env, options: ComposeOptions): ComposedApp {
         worker: createWorkerProbe({ redis: client }),
         // No cache here on purpose: a request that joins a read in flight
         // gets the state as of the start of that read - one read behind at
-        // most, nothing kept.
+        // most, nothing kept. The limits are those of the `env` this was
+        // given, not the `limits` of `@sf/config`: a test composes with an
+        // `env` of its own, and the caps it reads have to be the ones in it.
         budget: createBudgetProbe({ db: database, limits: buildLimits(env) }),
       },
       { adminPassword: env.ADMIN_PASSWORD, logger: log },

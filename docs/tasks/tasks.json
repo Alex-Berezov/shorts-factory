@@ -1764,8 +1764,9 @@
       "E0-12B"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-17"
+    "status": "in_progress",
+    "added_at": "2026-10-17",
+    "started_at": "2026-10-19"
   },
   {
     "id": "E0-12H",
@@ -1904,6 +1905,22 @@
       "E0-13",
       "E0-12B",
       "E0-12E"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-19"
+  },
+  {
+    "id": "E0-12R",
+    "epic": "E0",
+    "title": "@sf/runtime, worker: вердикт и закрытие фабрики Queue, redact глубже уровня, smoke CLI и Ctrl+C через остановку пакета",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13",
+      "E0-12B",
+      "E0-12G",
+      "E0-12Q"
     ],
     "doc": "TECH_DEBT.md",
     "status": "todo",

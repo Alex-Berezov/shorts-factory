@@ -6,7 +6,12 @@
  * Kept apart so that every verdict - including "Redis took the connection and
  * never answered" - can be tested without a Redis to hang against.
  */
-import { WORKER_HEARTBEAT_KEY, readHeartbeat } from "@sf/core";
+import {
+  type HeartbeatReading,
+  WORKER_HEARTBEAT_KEY,
+  heartbeatOffsetSec,
+  readHeartbeat,
+} from "@sf/core";
 import { settleWithin } from "@sf/runtime/deadline";
 import type { Redis } from "ioredis";
 
@@ -89,12 +94,39 @@ export async function runHealthcheck(
   }
 
   const { stamp } = outcome;
-  const reading = readHeartbeat(stamp, options.now());
-  const reason =
-    stamp === null
-      ? "no heartbeat stamp in redis"
-      : reading.heartbeatAt === null
-        ? "heartbeat stamp is not a date"
-        : `last heartbeat at ${reading.heartbeatAt}`;
-  return { healthy: !reading.stale, reason };
+  const now = options.now();
+  const reading = readHeartbeat(stamp, now);
+  return { healthy: !reading.stale, reason: stampReason(stamp, reading, now) };
+}
+
+/**
+ * Why the stamp reads the way it does, in the words of docs/DECISIONS.md (П1
+ * E0-12G): a stale stamp says which way it is off - a worker that stopped
+ * writing, or a clock that jumped ahead - since the two send an operator to
+ * different places. The rule is `readHeartbeat`'s and the number is
+ * `heartbeatOffsetSec`'s - the one it judges by, from the stamp it accepted
+ * and the same `now` - so the line cannot contradict the verdict. A stamp
+ * not in the writer's form is not echoed: something other than the worker
+ * wrote it.
+ */
+function stampReason(
+  stamp: string | null,
+  reading: HeartbeatReading,
+  now: Date,
+): string {
+  if (stamp === null) {
+    return "no heartbeat stamp in redis";
+  }
+  const { heartbeatAt } = reading;
+  if (heartbeatAt === null) {
+    return "heartbeat stamp is not the worker's format";
+  }
+  if (!reading.stale) {
+    return `last heartbeat at ${heartbeatAt}`;
+  }
+  const offsetSec = heartbeatOffsetSec(heartbeatAt, now);
+  if (offsetSec < 0) {
+    return `heartbeat at ${heartbeatAt} is ${-offsetSec} s ahead of this clock, clocks disagree`;
+  }
+  return `last heartbeat ${offsetSec} s ago at ${heartbeatAt}, worker stopped writing`;
 }

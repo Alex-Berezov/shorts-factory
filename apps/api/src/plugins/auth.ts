@@ -25,18 +25,6 @@ import type {
  */
 export const PUBLIC_ROUTES: ReadonlySet<string> = new Set(["/health"]);
 
-declare module "fastify" {
-  interface FastifyRequest {
-    /**
-     * Whether the caller gave the admin password. `false` on a public route,
-     * on a failure raised before the check ran (the router's own, the socket's)
-     * and on a rejected password: the error log writes what happened to such
-     * a request without the error object (`lib/error-log.ts`).
-     */
-    authenticated: boolean;
-  }
-}
-
 /** Realm shown by the browser prompt. */
 const REALM = "shorts-factory";
 
@@ -84,6 +72,15 @@ export interface AuthOptions {
  * (docs/DECISIONS.md, 08.09.2026), and the name is arbitrary caller input.
  */
 export function registerAuth(app: FastifyInstance, options: AuthOptions): void {
+  // The flag the hook below sets is declared and put on every request by
+  // `decorateRequestState` (`lib/request-state.ts`), which `buildApp` calls
+  // first. Without it the flag would be a property added to each request on
+  // the fly - and absent from every request the hook never reaches.
+  if (!app.hasRequestDecorator("authenticated")) {
+    throw new Error(
+      "registerAuth needs decorateRequestState(app) first: request.authenticated is not decorated",
+    );
+  }
   app.register(basicAuth, {
     authenticate: { realm: REALM },
     validate(_username, password, _request, _reply, done) {
@@ -95,8 +92,7 @@ export function registerAuth(app: FastifyInstance, options: AuthOptions): void {
     },
   });
 
-  app.decorateRequest("authenticated", false);
-
+  // This hook is the one place that sets `request.authenticated`.
   app.addHook("onRequest", (request, reply, done) => {
     if (
       request.routeOptions.url !== undefined &&

@@ -16,7 +16,7 @@
     "@sf/db": "workspace:*",
     "@sf/runtime": "workspace:*",
     "@sf/youtube": "workspace:*",
-    "fastify": "^5.0.0",
+    "fastify": "^5.12.3",
     "fastify-type-provider-zod": "^4.0.0",
     "@fastify/basic-auth": "^6.0.0",
     "@fastify/swagger": "^9.0.0",

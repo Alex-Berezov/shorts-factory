@@ -12,7 +12,7 @@ import { errorResponses } from "../src/lib/route-schemas.js";
  * The routes that fail on purpose and the values they fail with, shared by
  * the suites of the error handler: the envelope and the statuses
  * (`error-envelope.test.ts`), what is done to a code and a message
- * (`error-sanitize.test.ts`) and the log (`error-log.test.ts`).
+ * (`error-sanitize.test.ts`) and the log (`request-log.test.ts`).
  */
 
 /** A url with a secret in it, the way a provider error carries one. */
@@ -236,6 +236,22 @@ export function registerFailingRoutes(app: AppInstance): void {
   app.get("/test/null-code", failing(), async () => {
     const err = new AppError("PLACEHOLDER", "code went missing", 502);
     Object.defineProperty(err, "code", { value: null });
+    throw err;
+  });
+
+  // A code that is there and makes no line: nothing for a reader either.
+  app.get("/test/empty-code", failing(), async () => {
+    const err = new AppError("PLACEHOLDER", "code is empty", 502);
+    Object.defineProperty(err, "code", { value: "", enumerable: true });
+    throw err;
+  });
+
+  app.get("/test/blank-code", failing(), async () => {
+    const err = new AppError("PLACEHOLDER", "code is blank", 502);
+    Object.defineProperty(err, "code", {
+      value: " \t\u0000 ",
+      enumerable: true,
+    });
     throw err;
   });
 

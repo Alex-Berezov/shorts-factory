@@ -356,9 +356,11 @@ describe("answerClientError", () => {
         msg: "request rejected",
         status: 408,
         code: "REQUEST_TIMEOUT",
-        requestId: expect.any(String),
       }),
     ]);
+    // No response carries an id, so the line names none: an id nobody saw is
+    // a false lead in the log.
+    expect(entries()[0]).not.toHaveProperty("requestId");
   });
 
   it("writes nothing after a response that is half way out", () => {
@@ -378,8 +380,8 @@ describe("answerClientError", () => {
         msg: "request rejected",
         status: 431,
         code: "REQUEST_HEADER_FIELDS_TOO_LARGE",
-        requestId: expect.any(String),
       }),
     ]);
+    expect(entries()[0]).not.toHaveProperty("requestId");
   });
 });
