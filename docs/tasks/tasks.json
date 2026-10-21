@@ -1884,9 +1884,11 @@
       "E0-12F"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-19",
-    "started_at": "2026-10-21"
+    "started_at": "2026-10-21",
+    "done_at": "2026-10-21",
+    "note": "one git listing for root tests and scripts, fail-closed yaml, search.list gate and S04 on one rule, isGone twins in hooks; E0-12W/E0-12X split out"
   },
   {
     "id": "E0-12O",
