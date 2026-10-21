@@ -1850,9 +1850,11 @@
       "E0-12D"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-19",
-    "started_at": "2026-10-21"
+    "started_at": "2026-10-21",
+    "done_at": "2026-10-21",
+    "note": "пробы графа build/test:int в самопроверке берут граф у turbo dry-run, модуль графа отдельно, ручной разбор снесён; часть B - E0-12T, разрез - E0-12U"
   },
   {
     "id": "E0-12M",
