@@ -1859,7 +1859,7 @@
   {
     "id": "E0-12M",
     "epic": "E0",
-    "title": "gates.js и rules.sf.json: timeout гейтов, --only с glob, формула серверного пакета S07/S11, замок zod, glob test:int/tracker/selftest/S04",
+    "title": "gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker",
     "estimate": "1 д",
     "estimate_days": 1,
     "deps": [
@@ -1867,8 +1867,9 @@
       "E0-12D"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-19"
+    "status": "in_progress",
+    "added_at": "2026-10-19",
+    "started_at": "2026-10-21"
   },
   {
     "id": "E0-12N",
@@ -1979,6 +1980,20 @@
     "deps": [
       "E0-13",
       "E0-12T"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-21"
+  },
+  {
+    "id": "E0-12V",
+    "epic": "E0",
+    "title": "rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S13/S14, формы S15/S16, сверка носителей, замок zod",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13",
+      "E0-12D"
     ],
     "doc": "TECH_DEBT.md",
     "status": "todo",

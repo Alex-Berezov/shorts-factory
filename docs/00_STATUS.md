@@ -4,32 +4,34 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-21. **Не �
 
 ## Сводка
 
-- **Прогресс:** `██████░░░░░░░░░░░░░░░░░░░░░░░░` 30/148 задач, 30.4 / 164.4 оценочных дней.
+- **Прогресс:** `██████░░░░░░░░░░░░░░░░░░░░░░░░` 30/149 задач, 30.4 / 165.4 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** ничего — возьмите задачу из «Следующие»
+- **В работе:** [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-when-гейтов-timeoutsec---only-с-glob-when-testintcomposetracker) gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker
 - **Заблокировано:** нет
 
 ## Сейчас в работе
 
-_Нет задач в работе._
+| Задача | Название | Оценка | Начата |
+|---|---|---|---|
+| [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-when-гейтов-timeoutsec---only-с-glob-when-testintcomposetracker) | gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker | 1 д | 2026-10-21 |
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
 | Задача | Название | Оценка | Эпик |
 |---|---|---|---|
-| [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-rulessfjson-timeout-гейтов---only-с-glob-формула-серверного-пакета-s07s11-замок-zod-glob-testinttrackerselftests04) | gates.js и rules.sf.json: timeout гейтов, --only с glob, формула серверного пакета S07/S11, замок zod, glob test:int/tracker/selftest/S04 | 1 д | E0 |
 | [E0-12N](TECH_DEBT.md#e0-12n-корневые-тесты-и-скрипты-repo-files-turbo-inputs-ci-config-dockerfile-probe-image-no-search-list-общий-test-support-приложений) | Корневые тесты и скрипты: repo-files, turbo-inputs, ci-config, dockerfile, probe-image, no-search-list, общий test-support приложений | 1 д | E0 |
 | [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) | CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта | 0.5 д | E0 |
 | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | E0 |
 | [E0-12Q](TECH_DEBT.md#e0-12q-sfruntime-api-worker-форма-модулей-после-e0-12b---стадия-redis-в-shutdownts-единая-форма-опций-redis-фабрик-стадия-db-воркера-через-stageof-один-источник-состояния-queue-stats-однопроходный-обход-cause) | @sf/runtime, api, worker: форма модулей после E0-12B - стадия Redis в shutdown.ts, единая форма опций Redis-фабрик, стадия db воркера через stageOf, один источник состояния queue-stats, однопроходный обход cause | 0.5 д | E0 |
+| [E0-12S](TECH_DEBT.md#e0-12s-sfdb-раскол-migratets-на-migration-lockts-проверка-дрейфа-схемы-ci-в-scriptscheck-schema-driftmjs-с-юнитом-и-гейтом) | @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом | 1 д | E0 |
 
-Взять в работу: `node scripts/tasks.mjs start E0-12M`
+Взять в работу: `node scripts/tasks.mjs start E0-12N`
 
 ## Прогресс по эпикам
 
 | | Эпик | Задачи | Дни (сделано / всего) | Документ |
 |---|---|---|---|---|
-| 🔄 | **E0** Каркас проекта и инфраструктура | `█████████░░░` 30/39 | 30.4 / 37.9 | [30_E0_TASKS.md](30_E0_TASKS.md) |
+| 🔄 | **E0** Каркас проекта и инфраструктура | `█████████░░░` 30/40 | 30.4 / 38.9 | [30_E0_TASKS.md](30_E0_TASKS.md) |
 | ⬜ | **E12** Импорт ручной фазы (Phase 0) | `░░░░░░░░░░░░` 0/5 | 0 / 4 | [42_E12_TASKS.md](42_E12_TASKS.md) |
 | ⬜ | **E1** Source Radar | `░░░░░░░░░░░░` 0/12 | 0 / 15.5 | [31_E1_TASKS.md](31_E1_TASKS.md) |
 | ⬜ | **E2** Video Intelligence / Content DNA | `░░░░░░░░░░░░` 0/10 | 0 / 11 | [32_E2_TASKS.md](32_E2_TASKS.md) |
@@ -81,7 +83,7 @@ _Нет задач в работе._
 | ✅ | [E0-12J](TECH_DEBT.md#e0-12j-образы-единый-appdockerfile-с-целями-exec-форма-migrate-проба-одним-run-buildx-кэш-в-ci) | Образы: единый app.Dockerfile с целями, exec-форма migrate, проба одним run, buildx-кэш в CI | 1 д | ✅E0-12C ✅E0-12I | 2026-10-20 | 2026-10-20 |
 | ✅ | [E0-12K](TECH_DEBT.md#e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция-{}-профили-composefile-симлинки) | Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки | 2 д | ✅E0-13 ✅E0-12C | 2026-10-20 | 2026-10-20 |
 | ✅ | [E0-12L](TECH_DEBT.md#e0-12l-harness-selftest-граф-turbopnpm-вместо-ручного-разбора-разрез-раздела-гейтов) | harness-selftest: граф turbo/pnpm вместо ручного разбора, разрез раздела гейтов | 1.5 д | ✅E0-13 ✅E0-12D | 2026-10-21 | 2026-10-21 |
-| ⬜ | [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-rulessfjson-timeout-гейтов---only-с-glob-формула-серверного-пакета-s07s11-замок-zod-glob-testinttrackerselftests04) | gates.js и rules.sf.json: timeout гейтов, --only с glob, формула серверного пакета S07/S11, замок zod, glob test:int/tracker/selftest/S04 | 1 д | ✅E0-13 ✅E0-12D |  |  |
+| 🔄 | [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-when-гейтов-timeoutsec---only-с-glob-when-testintcomposetracker) | gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker | 1 д | ✅E0-13 ✅E0-12D | 2026-10-21 |  |
 | ⬜ | [E0-12N](TECH_DEBT.md#e0-12n-корневые-тесты-и-скрипты-repo-files-turbo-inputs-ci-config-dockerfile-probe-image-no-search-list-общий-test-support-приложений) | Корневые тесты и скрипты: repo-files, turbo-inputs, ci-config, dockerfile, probe-image, no-search-list, общий test-support приложений | 1 д | ✅E0-13 ✅E0-12F |  |  |
 | ⬜ | [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) | CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта | 0.5 д | ✅E0-13 ✅E0-12F |  |  |
 | ⬜ | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | ✅E0-13 ✅E0-12D |  |  |
@@ -90,6 +92,7 @@ _Нет задач в работе._
 | ⬜ | [E0-12S](TECH_DEBT.md#e0-12s-sfdb-раскол-migratets-на-migration-lockts-проверка-дрейфа-схемы-ci-в-scriptscheck-schema-driftmjs-с-юнитом-и-гейтом) | @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом | 1 д | ✅E0-12I |  |  |
 | ⬜ | [E0-12T](TECH_DEBT.md#e0-12t-harness-selftest-int-конфиги-через-vitestnode-и-testimportsts-полнота-дерева-пробы-снимок-игнорируемых-хвосты-р9-e0-12d) | harness-selftest: int-конфиги через vitest/node и test/imports.ts, полнота дерева пробы, снимок игнорируемых, хвосты Р9 E0-12D | 1 д | ✅E0-13 ✅E0-12L |  |  |
 | ⬜ | [E0-12U](TECH_DEBT.md#e0-12u-harness-selftest-пробы-гейтов-в-selftest-gatesjs-разрез-раздела-гейтов) | harness-selftest: пробы гейтов в selftest-gates.js, разрез раздела гейтов | 0.5 д | ✅E0-13 ⬜E0-12T |  |  |
+| ⬜ | [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s13s14-формы-s15s16-сверка-носителей-замок-zod) | rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S13/S14, формы S15/S16, сверка носителей, замок zod | 1 д | ✅E0-13 ✅E0-12D |  |  |
 | ✅ | [E0-13](30_E0_TASKS.md#e0-13-документация-разработчика-adr-закрытие-эпика) | Документация разработчика, ADR, закрытие эпика | 0.5 д | ✅E0-12 | 2026-10-10 | 2026-10-10 |
 
 ### E12. Импорт ручной фазы (Phase 0)

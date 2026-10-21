@@ -28,7 +28,8 @@ allowed-tools: Bash, Read, Edit, Write, Grep, Glob, Task
    правка поведения - с тестом, который краснеет без неё».
 4. **Перепроверить.** `/qa` по затронутым зонам: ревьюеры, чьи находки чинили, плюс
    `review-product`, если находка касалась DoD; из `/auto` после второго круга - полный набор.
-   Затем `node .claude/hooks/gates.js`.
+   Затем `node .claude/hooks/gates.js` - инструментом Bash с `run_in_background: true`, ждать
+   уведомления о выходе, не опрашивая вывод (почему - `docs/60_HARNESS.md`, «Гейты»).
 
 ## Границы
 

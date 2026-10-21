@@ -14,7 +14,9 @@ allowed-tools: Bash, Read, Edit, Write, Grep, Glob, Task, Skill
 
 ## 2. Гейты
 
-`node .claude/hooks/gates.js` без сужений, вывод в файл дела. Красный гейт - незакрытая задача,
+`node .claude/hooks/gates.js` без сужений - инструментом Bash с `run_in_background: true`, ждать
+уведомления о выходе, не опрашивая вывод (почему - `docs/60_HARNESS.md`, «Гейты»); вывод в файл
+дела. Красный гейт - незакрытая задача,
 а не «известная особенность».
 
 ## 3. Чек-лист готовности
