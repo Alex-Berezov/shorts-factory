@@ -1867,9 +1867,11 @@
       "E0-12D"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-19",
-    "started_at": "2026-10-21"
+    "started_at": "2026-10-21",
+    "done_at": "2026-10-21",
+    "note": "gates get mandatory time limits with process tree takedown and honest verdicts, --only runs named gates for any when and on a clean tree, tracker when narrowed, full gate runs go to background; standards part split into E0-12V"
   },
   {
     "id": "E0-12N",

@@ -80,3 +80,4 @@ _Добавляется автоматически командами `node scri
 - 2026-10-21 ✅ **E0-12L** harness-selftest: граф turbo/pnpm вместо ручного разбора, разрез раздела гейтов — пробы графа build/test:int в самопроверке берут граф у turbo dry-run, модуль графа отдельно, ручной разбор снесён; часть B - E0-12T, разрез - E0-12U
 - 2026-10-21 ➕ **E0-12V** rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S13/S14, формы S15/S16, сверка носителей, замок zod (добавлена в трекер)
 - 2026-10-21 ✎ **E0-12M** gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker (изменена в трекере: заголовок)
+- 2026-10-21 ✅ **E0-12M** gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker — gates get mandatory time limits with process tree takedown and honest verdicts, --only runs named gates for any when and on a clean tree, tracker when narrowed, full gate runs go to background; standards part split into E0-12V

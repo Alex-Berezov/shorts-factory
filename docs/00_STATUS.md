@@ -4,16 +4,14 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-21. **Не �
 
 ## Сводка
 
-- **Прогресс:** `██████░░░░░░░░░░░░░░░░░░░░░░░░` 30/149 задач, 30.4 / 165.4 оценочных дней.
+- **Прогресс:** `██████░░░░░░░░░░░░░░░░░░░░░░░░` 31/149 задач, 31.4 / 165.4 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-when-гейтов-timeoutsec---only-с-glob-when-testintcomposetracker) gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker
+- **В работе:** ничего — возьмите задачу из «Следующие»
 - **Заблокировано:** нет
 
 ## Сейчас в работе
 
-| Задача | Название | Оценка | Начата |
-|---|---|---|---|
-| [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-when-гейтов-timeoutsec---only-с-glob-when-testintcomposetracker) | gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker | 1 д | 2026-10-21 |
+_Нет задач в работе._
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
@@ -31,7 +29,7 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-21. **Не �
 
 | | Эпик | Задачи | Дни (сделано / всего) | Документ |
 |---|---|---|---|---|
-| 🔄 | **E0** Каркас проекта и инфраструктура | `█████████░░░` 30/40 | 30.4 / 38.9 | [30_E0_TASKS.md](30_E0_TASKS.md) |
+| 🔄 | **E0** Каркас проекта и инфраструктура | `█████████░░░` 31/40 | 31.4 / 38.9 | [30_E0_TASKS.md](30_E0_TASKS.md) |
 | ⬜ | **E12** Импорт ручной фазы (Phase 0) | `░░░░░░░░░░░░` 0/5 | 0 / 4 | [42_E12_TASKS.md](42_E12_TASKS.md) |
 | ⬜ | **E1** Source Radar | `░░░░░░░░░░░░` 0/12 | 0 / 15.5 | [31_E1_TASKS.md](31_E1_TASKS.md) |
 | ⬜ | **E2** Video Intelligence / Content DNA | `░░░░░░░░░░░░` 0/10 | 0 / 11 | [32_E2_TASKS.md](32_E2_TASKS.md) |
@@ -83,7 +81,7 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-21. **Не �
 | ✅ | [E0-12J](TECH_DEBT.md#e0-12j-образы-единый-appdockerfile-с-целями-exec-форма-migrate-проба-одним-run-buildx-кэш-в-ci) | Образы: единый app.Dockerfile с целями, exec-форма migrate, проба одним run, buildx-кэш в CI | 1 д | ✅E0-12C ✅E0-12I | 2026-10-20 | 2026-10-20 |
 | ✅ | [E0-12K](TECH_DEBT.md#e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция-{}-профили-composefile-симлинки) | Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки | 2 д | ✅E0-13 ✅E0-12C | 2026-10-20 | 2026-10-20 |
 | ✅ | [E0-12L](TECH_DEBT.md#e0-12l-harness-selftest-граф-turbopnpm-вместо-ручного-разбора-разрез-раздела-гейтов) | harness-selftest: граф turbo/pnpm вместо ручного разбора, разрез раздела гейтов | 1.5 д | ✅E0-13 ✅E0-12D | 2026-10-21 | 2026-10-21 |
-| 🔄 | [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-when-гейтов-timeoutsec---only-с-glob-when-testintcomposetracker) | gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker | 1 д | ✅E0-13 ✅E0-12D | 2026-10-21 |  |
+| ✅ | [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-when-гейтов-timeoutsec---only-с-glob-when-testintcomposetracker) | gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker | 1 д | ✅E0-13 ✅E0-12D | 2026-10-21 | 2026-10-21 |
 | ⬜ | [E0-12N](TECH_DEBT.md#e0-12n-корневые-тесты-и-скрипты-repo-files-turbo-inputs-ci-config-dockerfile-probe-image-no-search-list-общий-test-support-приложений) | Корневые тесты и скрипты: repo-files, turbo-inputs, ci-config, dockerfile, probe-image, no-search-list, общий test-support приложений | 1 д | ✅E0-13 ✅E0-12F |  |  |
 | ⬜ | [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) | CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта | 0.5 д | ✅E0-13 ✅E0-12F |  |  |
 | ⬜ | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | ✅E0-13 ✅E0-12D |  |  |
