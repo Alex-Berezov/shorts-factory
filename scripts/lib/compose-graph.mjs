@@ -24,9 +24,9 @@
  * clean.
  */
 import { dirname, resolve } from "node:path";
-import { parseAllDocuments } from "yaml";
 import { isGone } from "./files.mjs";
 import { isRecord } from "./json.mjs";
+import { readYaml } from "./yaml-doc.mjs";
 
 /**
  * What the reader reads the files through.
@@ -111,40 +111,31 @@ function rootOf(file, text) {
   /** @param {string} why */
   const refused = (why) => ({ root: null, problems: [`${file}: ${why}`] });
   // `merge`: the `<<` key, which Compose expands (measured).
-  const [doc, ...more] = parseAllDocuments(text, { merge: true });
-  // An empty file: Compose refuses it (`empty compose file`, measured).
-  if (doc === undefined)
-    return refused("no YAML document - Compose refuses an empty file");
-  if (more.length > 0) {
-    return refused(
-      `${more.length + 1} YAML documents - Compose reads every one, the gate reads a file of one`,
-    );
-  }
-  const notes = [...doc.errors, ...doc.warnings];
-  if (notes.length > 0) {
-    return {
-      root: null,
-      problems: notes.map(
-        (note) =>
-          `${file}: ${note.code} at line ${note.linePos?.[0].line ?? "?"} - the gate does not read a file the parser does not take as it is`,
-      ),
-    };
-  }
-  /** @type {unknown} */
-  let value;
-  try {
-    value = doc.toJS({ maxAliasCount: 100 });
-  } catch (error) {
-    if (!(error instanceof Error)) throw error;
-    // The aliases expand past the limit (`Excessive alias count`, measured on
-    // yaml 2.9.0): the message of the parser says so in its own words.
-    if (error instanceof ReferenceError && /alias count/i.test(error.message)) {
+  const reading = readYaml(text, { merge: true });
+  switch (reading.kind) {
+    case "value":
+      break;
+    // An empty file: Compose refuses it (`empty compose file`, measured).
+    case "empty":
+      return refused("no YAML document - Compose refuses an empty file");
+    case "documents":
+      return refused(
+        `${reading.count} YAML documents - Compose reads every one, the gate reads a file of one`,
+      );
+    case "notes":
+      return {
+        root: null,
+        problems: reading.notes.map(
+          (note) =>
+            `${file}: ${note.code} at line ${note.line ?? "?"} - the gate does not read a file the parser does not take as it is`,
+        ),
+      };
+    case "aliases":
       return refused("aliases the gate does not expand (past maxAliasCount)");
-    }
-    // Any other value the parser cannot build - a merge key that is not a
-    // mapping, an alias before its anchor - by the reason it gives.
-    return refused(`the parser cannot build it (${error.message})`);
+    case "unbuilt":
+      return refused(`the parser cannot build it (${reading.message})`);
   }
+  const value = reading.value;
   if (isCyclic(value)) return refused("a cyclic alias - Compose refuses it");
   if (!isRecord(value)) return refused("the root is not a mapping");
   return { root: value, problems: [] };

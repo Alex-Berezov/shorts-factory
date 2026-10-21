@@ -1,11 +1,11 @@
 import { posix } from "node:path";
-import { workspaceDirs } from "../scripts/lib/manifest.mjs";
 import { DYNAMIC_SPECIFIER, importSpecifiers } from "./imports.js";
 import {
   type Manifest,
   readManifest,
   readRepoFile,
   repoFilesUnder,
+  repoWorkspaceDirs,
 } from "./repo-files.js";
 
 /**
@@ -56,24 +56,49 @@ const ALLOWED_EDGES: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * `@sf/db -> @sf/config` exists only where ADR-0002 puts it: the CLI, the
- * tests, the test support and the vitest configs of the package
- * (`vitest*.config.ts`, and its `.mts`/`.cts` forms). `drizzle.config.ts` is
- * not among them: ADR-0002 keeps the connection string out of it. The
- * manifest keeps `@sf/config` in `dependencies` - the image of `migrate`
- * installs with `--prod` and runs the CLI - so the edge is a named exception
- * there, and the boundary is held by the imports.
+ * `@sf/db -> @sf/config` exists only where ADR-0002 puts it: the entry points
+ * of the CLI that read the configuration (`src/cli/migrate.ts`,
+ * `src/cli/seed.ts`, `src/cli/migrate-and-seed.ts` - files, not the whole
+ * `src/cli/`), the tests, the test support and the vitest configs of the
+ * package (`vitest*.config.ts`, and its `.mts`/`.cts` forms).
+ * `drizzle.config.ts` is not among them: ADR-0002 keeps the connection string
+ * out of it. The manifest keeps `@sf/config` in `dependencies` - the image of
+ * `migrate` installs with `--prod` and runs the CLI - so the edge is a named
+ * exception there, and the boundary is held by the imports. No other file of
+ * the package - its library part, `drizzle.config.ts` - takes anything from
+ * `src/cli/` (`DB_CLI`), so the configuration cannot reach it through a
+ * module of the CLI.
  */
 const DB_CONFIG_EXCEPTION = {
   from: "@sf/db",
   to: "@sf/config",
   files: [
-    /^src\/cli\//,
+    /^src\/cli\/(?:migrate|seed|migrate-and-seed)\.ts$/,
     /^test\//,
     /^test-support\//,
     /^vitest[^/]*\.config\.[mc]?ts$/,
   ],
 } as const;
+
+/** The CLI of `@sf/db`, which its files that may not read the configuration do not import (`intoDbCli`). */
+const DB_CLI = { name: "@sf/db", dir: "src/cli/" } as const;
+
+/**
+ * The files of a package that never ship: its tests, its test support and
+ * its vitest configs. Every other file - `src/`, `next.config.*`, the scripts
+ * an image runs, `drizzle.config.ts` - ships, and takes no test support.
+ * A test under `src/` is no file that ships only under the name the preset
+ * of ADR-0011 runs, `*.test.ts`: the probe of each image holds its packages
+ * to no file of that name at any depth (`noTests` of `scripts/probe-image.mjs`).
+ * Any other name - `*.test.tsx`, `*.test.js` - is neither run nor kept out
+ * of an image, so it ships.
+ */
+const NOT_SHIPPED = [
+  /^test\//,
+  /^test-support\//,
+  /(?:^|\/)[^/]+\.test\.ts$/,
+  /^vitest[^/]*\.config\.[cm]?[jt]s$/,
+];
 
 /**
  * Web takes `@sf/config` in its own code only through the server entry
@@ -246,9 +271,11 @@ function relativeEscape(
  * not allow; `@sf/config` in `@sf/db` outside the files of ADR-0002; in web's
  * own code, `@sf/config` other than `@sf/config/server`; the test support of
  * any package (`@sf/<package>/test-support/*`, or a relative path into the
- * package's own `test-support/`) from any `src/` (§6); a relative path out of
- * the package into another one or out of the repository; and every import
- * whose target cannot be read.
+ * package's own `test-support/`) from any file that ships (`NOT_SHIPPED`,
+ * §6); a module of `src/cli/` of `@sf/db` from a file of it that may not
+ * read the configuration (`intoDbCli`); a relative
+ * path out of the package into another one or out of the repository; and
+ * every import whose target cannot be read.
  */
 export function importViolations(
   workspace: readonly WorkspacePackage[],
@@ -267,8 +294,14 @@ export function importViolations(
         if (specifier === DYNAMIC_SPECIFIER) {
           return "import with a computed specifier";
         }
-        if (file.path.startsWith("src/") && intoTestSupport(file, specifier)) {
-          return `${specifier} (test support from src)`;
+        if (
+          !NOT_SHIPPED.some((pattern) => pattern.test(file.path)) &&
+          intoTestSupport(file, specifier)
+        ) {
+          return `${specifier} (test support from a file that ships)`;
+        }
+        if (intoDbCli(pkg, file, specifier)) {
+          return `${specifier} (library code of @sf/db takes nothing from src/cli: ADR-0002)`;
         }
         const outOfPackage = relativeEscape(pkg, file, specifier, dirs);
         if (outOfPackage !== null) return outOfPackage;
@@ -305,6 +338,34 @@ export function importViolations(
   return violations;
 }
 
+/**
+ * Whether `specifier` in a file of `@sf/db` that may not read the
+ * configuration reaches `src/cli/` by a relative path: every file outside
+ * `src/cli/` and outside the files of `DB_CONFIG_EXCEPTION` - the library
+ * modules of `src/`, and `drizzle.config.ts` and whatever else ships at the
+ * top of the package. The tests, the test support and the vitest configs may
+ * take the CLI, as they may take `@sf/config`.
+ */
+function intoDbCli(
+  pkg: WorkspacePackage,
+  file: SourceFile,
+  specifier: string,
+): boolean {
+  if (pkg.manifest.name !== DB_CLI.name || !specifier.startsWith(".")) {
+    return false;
+  }
+  if (
+    file.path.startsWith(DB_CLI.dir) ||
+    DB_CONFIG_EXCEPTION.files.some((allowed) => allowed.test(file.path))
+  ) {
+    return false;
+  }
+  const resolved = posix.normalize(
+    posix.join(posix.dirname(file.path), specifier),
+  );
+  return `${resolved}/`.startsWith(DB_CLI.dir);
+}
+
 /** Whether `specifier` in `file` reaches test support: of any package, or the package's own by a relative path. */
 function intoTestSupport(file: SourceFile, specifier: string): boolean {
   if (TEST_SUPPORT.test(specifier)) return true;
@@ -317,33 +378,44 @@ function intoTestSupport(file: SourceFile, specifier: string): boolean {
 
 /**
  * The packages of the workspace as they are on disk: the manifest of every
- * directory of `workspaceDirs()` and its source files among those the
- * hash covers. One `git ls-files` per top directory, not one per package.
+ * directory of `repoWorkspaceDirs()` and its source files among those the
+ * hash covers, from the one listing of `test/repo-files.ts`.
  */
 export function readWorkspace(): WorkspacePackage[] {
-  const dirs = workspaceDirs();
+  const dirs = repoWorkspaceDirs();
   const files = ["apps", "packages"].flatMap((top) => repoFilesUnder(top));
+  const owned = sourceFilesByPackage(files, dirs);
   return dirs.map((dir) => {
     const prefix = `${dir}/`;
-    // A file belongs to the deepest package that contains it.
-    const own = files.filter(
-      (path) =>
-        path.startsWith(prefix) &&
-        SOURCE_FILE.test(path) &&
-        !dirs.some(
-          (other) =>
-            other !== dir &&
-            other.startsWith(prefix) &&
-            path.startsWith(`${other}/`),
-        ),
-    );
     return {
       dir,
       manifest: readManifest(dir),
-      files: own.map((path) => ({
+      files: (owned.get(dir) ?? []).map((path) => ({
         path: path.slice(prefix.length),
         text: readRepoFile(path),
       })),
     };
   });
+}
+
+/**
+ * The source files of `files` (paths from the root) by the package that
+ * owns each - the deepest of `dirs` that contains it (`ownerOf`), so a
+ * package nested in another keeps its files to itself. One pass over the
+ * files; a file of no package is left out.
+ */
+export function sourceFilesByPackage(
+  files: readonly string[],
+  dirs: readonly string[],
+): Map<string, string[]> {
+  const owned = new Map<string, string[]>();
+  for (const path of files) {
+    if (!SOURCE_FILE.test(path)) continue;
+    const owner = ownerOf(path, dirs);
+    if (owner === null) continue;
+    const list = owned.get(owner);
+    if (list === undefined) owned.set(owner, [path]);
+    else list.push(path);
+  }
+  return owned;
 }

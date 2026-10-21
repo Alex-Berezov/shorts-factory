@@ -100,7 +100,11 @@ function runIn(dir: string, checks: ImageCheck[], control = CONTROL): Run {
   return spawnSync(
     process.execPath,
     ["-e", CONTAINER_SCRIPT, dir, JSON.stringify({ checks, control })],
-    { encoding: "utf8", env: { ...process.env, NODE_PATH: "" } },
+    {
+      encoding: "utf8",
+      timeout: 20_000,
+      env: { ...process.env, NODE_PATH: "" },
+    },
   );
 }
 
@@ -363,6 +367,21 @@ describe("image probe table", () => {
           (check) => check.noTests !== undefined,
         ),
       ).toEqual(dirs().map((dir) => ({ noTests: dir })));
+    },
+  );
+
+  it.each(Object.keys(PROBES))(
+    "lists the workspace once for the checks of the %s image",
+    (image) => {
+      let calls = 0;
+      const counted = () => {
+        calls += 1;
+        return dirs();
+      };
+
+      checksOf(image, bare, counted);
+
+      expect(calls).toBe(1);
     },
   );
 
@@ -876,13 +895,23 @@ describe("image probe main", () => {
 describe("image probe entry guard", () => {
   const script = join(repoRoot, "scripts", "probe-image.mjs");
 
+  it("runs main when started by its own path, as CI starts it", () => {
+    const result = spawnSync(process.execPath, [script, "no-such-image"], {
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+
+    expect(result.stderr).toContain('unknown image "no-such-image"');
+    expect(result.status).toBe(2);
+  });
+
   it("runs main when started through a link to the script's directory", () => {
     symlinkSync(resolve(script, ".."), scriptsLink, "junction");
 
     const result = spawnSync(
       process.execPath,
       [join(scriptsLink, "probe-image.mjs"), "no-such-image"],
-      { encoding: "utf8" },
+      { encoding: "utf8", timeout: 20_000 },
     );
 
     expect(result.stderr).toContain('unknown image "no-such-image"');

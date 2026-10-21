@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { join, posix } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -22,7 +22,7 @@ import {
   stagesOfImage,
   targetsOf,
 } from "./dockerfile.js";
-import { readManifest, readRepoFile } from "./repo-files.js";
+import { readManifest, readRepoFile, repoFileExists } from "./repo-files.js";
 
 /**
  * How the images of the application are built and start their service, a
@@ -512,7 +512,7 @@ describe("migrate image", () => {
     const dir = WORKSPACE_OF.migrate;
     expect(dir).toBe("packages/db");
     if (dir === undefined) throw new Error("migrate runs from no package");
-    expect(existsSync(join(repoRoot, dir, MIGRATE_AND_SEED))).toBe(true);
+    expect(repoFileExists(`${dir}/${MIGRATE_AND_SEED}`)).toBe(true);
   });
 });
 

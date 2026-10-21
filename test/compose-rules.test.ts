@@ -1,8 +1,7 @@
-import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { parse } from "yaml";
+
 import { z } from "zod";
 import {
   COMPOSE_SOURCES,
@@ -36,7 +35,12 @@ import {
   cleanStack,
   realpathIn,
 } from "./compose-fixture.js";
-import { readRepoFile, readRepoJson } from "./repo-files.js";
+import {
+  readRepoFile,
+  readRepoJson,
+  readRepoYaml,
+  repoFileExists,
+} from "./repo-files.js";
 
 /**
  * The rules `pnpm check:compose` holds the full stack to, each fed a
@@ -2560,7 +2564,7 @@ describe("COMPOSE_SOURCES and the when of the compose gate", () => {
     const found = new Set<string>();
     for (const source of COMPOSE_SOURCES) {
       const { services = {} } = ComposeFileSchema.parse(
-        parse(readRepoFile(source), { merge: true }),
+        readRepoYaml(source, { merge: true }),
       );
       for (const { build } of Object.values(services)) {
         if (build === undefined) continue;
@@ -2643,9 +2647,7 @@ describe("defaultComposeFile", () => {
   it("is the file `docker compose` takes at the root of the repository", () => {
     // The root itself, under any path, is the case of test/paths.test.ts.
     // DEFAULT_FILES is held to compose-go by the case of rule 14.
-    const present = DEFAULT_FILES.filter((name) =>
-      existsSync(join(repoRoot, name)),
-    );
+    const present = DEFAULT_FILES.filter((name) => repoFileExists(name));
 
     expect(present).toHaveLength(1);
     expect(defaultComposeFile()).toBe(join(repoRoot, present[0] ?? ""));

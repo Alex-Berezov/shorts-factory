@@ -43,7 +43,7 @@ YAML, которых не видел построчный читатель (кл
   гейта - ровно читаемые файлы: три файла графа, четыре имени override и прочие имена
   `DEFAULT_FILES` в корне и в `infra/`, `.dockerignore` и
   `infra/docker/app.Dockerfile.dockerignore` (их читает правило 11 по сборкам стека),
-  `.env.test`, `package.json` (пин `yaml`), скрипты гейта и `scripts/lib/{compose-graph,files,json,paths}.mjs`.
+  `.env.test`, `package.json` (пин `yaml`), скрипты гейта и `scripts/lib/{compose-graph,yaml-doc,files,json,paths}.mjs` (`yaml-doc.mjs` - `readYaml`, fail-closed разбор, которым `compose-graph.mjs` читает файлы графа; E0-12N).
   `infra/.env` в `when` нет: файл в `.gitignore`, а `gates.js` берёт изменения из git, так
   что выбор на нём не срабатывал бы никогда; правило 14 находит его на любом прогоне гейта.
   Сверку `when` с `COMPOSE_SOURCES`, `OVERRIDE_FILES`, `DEFAULT_FILES` и `.dockerignore`

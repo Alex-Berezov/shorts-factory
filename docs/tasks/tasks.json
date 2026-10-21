@@ -1884,8 +1884,9 @@
       "E0-12F"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-19"
+    "status": "in_progress",
+    "added_at": "2026-10-19",
+    "started_at": "2026-10-21"
   },
   {
     "id": "E0-12O",
@@ -1996,6 +1997,35 @@
     "deps": [
       "E0-13",
       "E0-12D"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-21"
+  },
+  {
+    "id": "E0-12W",
+    "epic": "E0",
+    "title": "Общий test-support приложений: @sf/runtime/test-support (dev-command, child-run, imports), int-хелперы, assertHashed, ADR-0011",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-13",
+      "E0-12F",
+      "E0-12N"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-21"
+  },
+  {
+    "id": "E0-12X",
+    "epic": "E0",
+    "title": "Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13",
+      "E0-12F"
     ],
     "doc": "TECH_DEBT.md",
     "status": "todo",

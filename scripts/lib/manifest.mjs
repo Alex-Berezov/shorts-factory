@@ -5,10 +5,11 @@
  * the shape is checked by hand here; the tests of the root project read
  * manifests through the Zod schema of `test/repo-files.ts` (`ManifestSchema`).
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { trackedFiles } from "./files.mjs";
 import { isRecord } from "./json.mjs";
-import { fromRoot, repoRoot } from "./paths.mjs";
+import { repoRoot } from "./paths.mjs";
 
 /**
  * The fields of a `package.json` the root scripts read.
@@ -105,25 +106,54 @@ export function workspaceGlobs(yaml) {
 /**
  * Package directories of the workspace under `root`, from the globs of its
  * `pnpm-workspace.yaml` (`workspaceGlobs`), as `/`-separated paths from
- * `root`, sorted: the directories of each glob that hold a `package.json`.
- * The one reading of the workspace for the scripts and the tests of the root
- * project (the tests take it from here, not through `test/repo-files.ts`).
+ * `root`, sorted: the directories of each glob that hold a `package.json`
+ * among `files` - the files of the repository the hash covers
+ * (`trackedFiles`), not whatever the disk holds: a package directory left
+ * behind with an ignored `package.json` is no package of the workspace.
+ * A glob that holds no package holds none, as pnpm takes it (`tools/*`
+ * before the first tool); globs that together hold no package throw: a
+ * broken `pnpm-workspace.yaml` or checkout is not an empty workspace. The
+ * one reading of the workspace for
+ * the scripts and the tests of the root project; the tests hand the listing
+ * they already have (`test/repo-files.ts`), so git is not asked twice.
  *
  * @param {string} [root] the repository root by default
+ * @param {readonly string[]} [files] `/`-separated paths from `root`;
+ *   the manifests of `trackedFiles(root)` by default
  * @returns {string[]}
+ * @throws {Error} `pnpm-workspace.yaml holds no package`
  */
-export function workspaceDirs(root = repoRoot) {
+export function workspaceDirs(
+  root = repoRoot,
+  files = trackedFiles(root, { keep: isManifest }),
+) {
   const yaml = readFileSync(join(root, "pnpm-workspace.yaml"), "utf8");
-  /** @type {string[]} */
-  const dirs = [];
-  for (const glob of workspaceGlobs(yaml)) {
-    const parent = join(root, glob.slice(0, -2));
-    for (const entry of readdirSync(parent, { withFileTypes: true })) {
-      const dir = join(parent, entry.name);
-      if (entry.isDirectory() && existsSync(join(dir, "package.json"))) {
-        dirs.push(fromRoot(root, dir));
+  const globs = workspaceGlobs(yaml);
+  /** @type {Set<string>} */
+  const dirs = new Set();
+  for (const glob of globs) {
+    const parent = glob.slice(0, -1);
+    for (const path of files) {
+      if (!isManifest(path)) continue;
+      const dir = path.slice(0, -"/package.json".length);
+      // `packages/*` and `packages/integrations/*` both start the path of
+      // `packages/integrations/youtube`; only the second has it as a child.
+      if (dir.startsWith(parent) && !dir.slice(parent.length).includes("/")) {
+        dirs.add(dir);
       }
     }
   }
-  return dirs.sort();
+  if (dirs.size === 0) throw new Error("pnpm-workspace.yaml holds no package");
+  return [...dirs].sort();
+}
+
+/**
+ * Whether `path` (`/`-separated, from the root) is the manifest of a
+ * package directory: `<dir>/package.json`, the root one not included.
+ *
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isManifest(path) {
+  return path.endsWith("/package.json");
 }

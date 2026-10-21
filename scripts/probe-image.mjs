@@ -427,10 +427,13 @@ export function checksOf(
   if (table === undefined) throw new Error(`no probe for image "${image}"`);
   /** @type {ImageCheck[]} */
   const own = dir === undefined ? table : [{ pkg: "tsx", from: dir }, ...table];
-  const workspace = dir === undefined ? [] : workspaceChecks(dir, read, dirs);
+  // One listing of the workspace for both: each call of `dirs` asks git.
+  const listed = dirs();
+  const workspace =
+    dir === undefined ? [] : workspaceChecks(dir, read, () => listed);
   const keys = new Set(own.map(keyOf));
   /** @type {ImageCheck[]} */
-  const noTests = dirs().map((each) => ({ noTests: each }));
+  const noTests = listed.map((each) => ({ noTests: each }));
   return [
     ...own,
     ...workspace.filter((check) => !keys.has(keyOf(check))),

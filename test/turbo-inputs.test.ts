@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { workspaceDirs } from "../scripts/lib/manifest.mjs";
 import {
   type Manifest,
   type Turbo,
@@ -8,7 +7,9 @@ import {
   readRepoFile,
   readTurbo,
   repoFilesUnder,
+  repoWorkspaceDirs,
 } from "./repo-files.js";
+import { rootReads } from "./root-reads.js";
 
 /**
  * The turbo hash of a task is only as good as its inputs: a file that changes
@@ -159,124 +160,79 @@ function intOrderViolations(
   return problems;
 }
 
-/** The files of the repository that a hash covers, one listing. */
-const FILES = repoFilesUnder(".");
-const SOURCES = FILES.filter((path) => /\.[cm]?[jt]sx?$/.test(path));
+/** A source file of a package, by its extension. */
+const SOURCE = /\.[cm]?[jt]sx?$/;
 
-/** The source files of the package at `dir` that its hash covers. */
-function filesOf(dir: string): string[] {
-  return SOURCES.filter((path) => path.startsWith(`${dir}/`));
-}
+/** The names through which a file of `@sf/config` reads the root. */
+const ROOT_NAMES = ["repoRoot", "rootEnvFilePath", "testEnvFilePath"];
 
 /**
- * `source` without its comments, so a file that only mentions a name in a
- * comment does not count as reading it. A scan, not a parser: string and
- * template literals are kept whole, so `/*` or `//` inside one (a glob, a
- * URL) starts no comment; a backslash outside a string (a regular
- * expression) escapes the next character. Line ends are kept.
+ * Whether a unit file reads a file of the root, by what `rootReads`
+ * (`test/root-reads.ts`) finds in its syntax tree: it names `repoRoot`,
+ * `rootEnvFilePath` or `testEnvFilePath`; or a path tied to the file climbs
+ * more `..` than the directories between the package and the file (`depth`:
+ * 1 for `test/`), so `"../../.."` from `test/` and `"../../apps/worker"`
+ * from `test/` both count; or a path tied to nothing climbs at all - it is
+ * taken from the package directory, where vitest runs, so `"../core/src"`
+ * and `resolve(packageDir, "..", "core")` count. Comments, regular
+ * expressions (a backquote in one included) and the text of templates are
+ * the parser's to tell apart; `"..\.."` climbs as `"../.."`. Not seen: what
+ * `rootReads` names as not seen - a path built from variables or calls
+ * (`dirname(dirname(here))`, `"..".repeat(3)`), a tie to the file through
+ * anything but a `const` of the file.
  */
-function withoutComments(source: string): string {
-  let out = "";
-  let i = 0;
-  while (i < source.length) {
-    const char = source[i] ?? "";
-    const next = source[i + 1] ?? "";
-    if (char === "/" && next === "/") {
-      while (i < source.length && source[i] !== "\n") i += 1;
-    } else if (char === "/" && next === "*") {
-      const end = source.indexOf("*/", i + 2);
-      const stop = end === -1 ? source.length : end + 2;
-      out += source.slice(i, stop).replace(/[^\n]/g, "");
-      i = stop;
-    } else if (char === '"' || char === "'" || char === "`") {
-      let j = i + 1;
-      while (j < source.length && source[j] !== char) {
-        if (char !== "`" && source[j] === "\n") break;
-        j += source[j] === "\\" ? 2 : 1;
-      }
-      out += source.slice(i, j + 1);
-      i = j + 1;
-    } else if (char === "\\") {
-      out += source.slice(i, i + 2);
-      i += 2;
-    } else {
-      out += char;
-      i += 1;
-    }
-  }
-  return out;
-}
-
-/**
- * How many directories a relative path in `code` climbs at most: the `..`
- * that start a string literal (`"../../.."`, `"../../apps/worker"`), or a
- * run of `".."` arguments (`resolve(here, "..", "..")`).
- */
-function climbOf(code: string): number {
-  let most = 0;
-  for (const [, dots = ""] of code.matchAll(
-    /["'`]((?:\.\.\/)*\.\.)(?=["'`/])/g,
-  )) {
-    most = Math.max(most, dots.split("/").length);
-  }
-  for (const [run = ""] of code.matchAll(
-    /(?:(["'])\.\.\1\s*,\s*)*(["'])\.\.\2/g,
-  )) {
-    most = Math.max(most, (run.match(/\.\./g) ?? []).length);
-  }
-  return most;
-}
-
-/**
- * Whether a unit file reads a file of the root: it names `repoRoot`, or a
- * relative path in it climbs out of the package - more `..` than the
- * directories between the package and the file (`depth`: 1 for `test/`), so
- * `"../../.."` from `test/` and `"../../apps/worker"` from `test/` both
- * count. The vitest preset is not counted: it is in the inputs of every
- * `test` (`$TURBO_ROOT$/vitest.preset.ts`). Not seen: a path built from
- * variables or calls (`dirname(dirname(here))`, `"..".repeat(3)`), and one
- * relative to the package directory from deeper than `test/`
- * (docs/TECH_DEBT.md, the root readers row).
- */
-function readsRoot(code: string, depth: number): boolean {
-  const kept = code
-    .split("\n")
-    .filter((line) => !line.includes("vitest.preset"))
-    .join("\n");
-  return /\brepoRoot\b/.test(kept) || climbOf(kept) > depth;
+function readsRoot(
+  code: string,
+  depth: number,
+  file = "test/x.test.ts",
+): boolean {
+  const found = rootReads(file, code);
+  return (
+    ROOT_NAMES.some((name) => found.names.has(name)) ||
+    found.fileClimb > depth ||
+    found.packageClimb > 0
+  );
 }
 
 /** An integration file: `pnpm test` never runs it, its reads are not of the unit hash. */
 const INT_FILE = /\.int(?:\.test)?\.ts$|vitest\.int\.config\.[cm]?[jt]s$/;
 
 /**
- * What the unit tests of a package read of the root, by a scan of the code
- * (comments left out) of its unit files: the setup of `@sf/config` in its
- * unit vitest config loads `.env.test`, any other file that names a root env
- * file is taken to read it, and a file outside `src/` that reaches the root
- * (`readsRoot`) is a root reader.
+ * What the unit tests of a package read of the root, by the syntax tree of
+ * its unit files: the setup of `@sf/config` in its unit vitest config loads
+ * `.env.test`, any other file that names a root env file (in a string, or
+ * `testEnvFilePath`) is taken to read it, and a file outside `src/` that
+ * reaches the root (`readsRoot`) is a root reader.
  */
-function readsOf(dir: string): Pick<PackageInputs, "reads" | "rootReaders"> {
-  const unit = filesOf(dir).filter((file) => !INT_FILE.test(file));
-  const codes = unit.map((file) => ({
-    file,
-    code: withoutComments(readRepoFile(file)),
-  }));
+function readsOf(
+  dir: string,
+  files: readonly string[],
+): Pick<PackageInputs, "reads" | "rootReaders"> {
+  const unit = files.filter(
+    (file) =>
+      file.startsWith(`${dir}/`) && SOURCE.test(file) && !INT_FILE.test(file),
+  );
+  const codes = unit.map((file) => {
+    const code = readRepoFile(file);
+    return { file, code, found: rootReads(file, code) };
+  });
+  const mentions = (needle: string): boolean =>
+    codes.some(({ found }) =>
+      found.strings.some((text) => text.includes(needle)),
+    );
   return {
     reads: {
-      envTest: codes.some(
-        ({ code }) =>
-          code.includes("@sf/config/vitest/setup") ||
-          code.includes(".env.test") ||
-          code.includes("testEnvFilePath"),
-      ),
-      envExample: codes.some(({ code }) => code.includes(".env.example")),
+      envTest:
+        mentions("@sf/config/vitest/setup") ||
+        mentions(".env.test") ||
+        codes.some(({ found }) => found.names.has("testEnvFilePath")),
+      envExample: mentions(".env.example"),
     },
     rootReaders: codes
       .filter(
         ({ file, code }) =>
           !file.startsWith(`${dir}/src/`) &&
-          readsRoot(code, depthOf(dir, file)),
+          readsRoot(code, depthOf(dir, file), file),
       )
       .map(({ file }) => file),
   };
@@ -287,21 +243,35 @@ function depthOf(dir: string, file: string): number {
   return file.slice(dir.length + 1).split("/").length - 1;
 }
 
-const DIRS = workspaceDirs();
-
-function packagesOfRepository(): PackageInputs[] {
-  return DIRS.map((dir) => ({
-    dir,
-    turbo: FILES.includes(`${dir}/turbo.json`) ? readTurbo(dir) : undefined,
-    ...readsOf(dir),
-  }));
+/** The repository as the rules see it. */
+interface Repository {
+  root: Turbo;
+  packages: PackageInputs[];
+  manifests: Record<string, Manifest>;
 }
 
-const root = readTurbo(".");
-const packages = packagesOfRepository();
-const manifests = Object.fromEntries(
-  DIRS.map((dir) => [dir, readManifest(dir)]),
-);
+let read: Repository | undefined;
+
+/**
+ * The repository, read on the first case that asks rather than when the
+ * file is collected: a git that cannot list the tree is then a red case with
+ * its reason, not a file that failed to load.
+ */
+function repository(): Repository {
+  if (read !== undefined) return read;
+  const files = repoFilesUnder(".");
+  const dirs = repoWorkspaceDirs();
+  read = {
+    root: readTurbo("."),
+    packages: dirs.map((dir) => ({
+      dir,
+      turbo: files.includes(`${dir}/turbo.json`) ? readTurbo(dir) : undefined,
+      ...readsOf(dir, files),
+    })),
+    manifests: Object.fromEntries(dirs.map((dir) => [dir, readManifest(dir)])),
+  };
+  return read;
+}
 
 /**
  * The unit files of packages that read a file of the root today, each looked
@@ -309,7 +279,10 @@ const manifests = Object.fromEntries(
  * check `repoRoot` itself; the healthcheck walk of the worker reads only the
  * packages its own walk holds to its hashed dependencies. The public surface
  * test of `@sf/db` resolves modules from `apps/worker` - closed by an input:
- * `$TURBO_ROOT$/apps/worker/package.json` in `packages/db/turbo.json`.
+ * `$TURBO_ROOT$/apps/worker/package.json` in `packages/db/turbo.json`. The
+ * setup of `@sf/config` (`vitest/setup.ts`) and the stack guard test of
+ * `@sf/db` read `.env.test` through `testEnvFilePath` - in the inputs of both
+ * packages (rule (c)).
  */
 const ROOT_READERS = [
   "apps/worker/test/healthcheck-imports.test.ts",
@@ -317,7 +290,9 @@ const ROOT_READERS = [
   "packages/config/test/env-file.test.ts",
   "packages/config/test/exports.test.ts",
   "packages/config/test/load-env.test.ts",
+  "packages/config/vitest/setup.ts",
   "packages/db/test/public-surface.test.ts",
+  "packages/db/test/stack-guard.test.ts",
 ];
 
 /**
@@ -353,6 +328,7 @@ function closedReaderViolations(
 
 describe("turbo inputs of the repository", () => {
   it("finds the packages and their readers by a scan", () => {
+    const { packages } = repository();
     const readers = packages.filter((pkg) => pkg.reads.envTest);
 
     expect(packages.length).toBeGreaterThanOrEqual(9);
@@ -379,9 +355,11 @@ describe("turbo inputs of the repository", () => {
   });
 
   it("knows every unit file of a package that reads a file of the root", () => {
-    expect(packages.flatMap((pkg) => pkg.rootReaders).sort()).toEqual(
-      ROOT_READERS,
-    );
+    expect(
+      repository()
+        .packages.flatMap((pkg) => pkg.rootReaders)
+        .sort(),
+    ).toEqual(ROOT_READERS);
   });
 
   it("keeps the input that closes each root reader in the turbo.json of its package", () => {
@@ -390,24 +368,39 @@ describe("turbo inputs of the repository", () => {
         ROOT_READERS.includes(reader),
       ),
     ).toBe(true);
-    expect(closedReaderViolations(packages, CLOSED_BY_INPUT)).toEqual([]);
+    expect(
+      closedReaderViolations(repository().packages, CLOSED_BY_INPUT),
+    ).toEqual([]);
   });
 
   it("hashes the root test inputs exactly, and the whole repository for the root tasks", () => {
-    expect(rootInputViolations(root)).toEqual([]);
+    expect(rootInputViolations(repository().root)).toEqual([]);
   });
 
   it("gives every package that reads a root env file that file, and no other package", () => {
-    expect(packageInputViolations(packages)).toEqual([]);
+    expect(packageInputViolations(repository().packages)).toEqual([]);
   });
 
   it("orders the integration runs of api and worker after the one of @sf/db", () => {
+    const { root, manifests } = repository();
     expect(intOrderViolations(root, manifests)).toEqual([]);
   });
 });
 
+/**
+ * The base of the broken copies of rule (d): the root `turbo.json` with the
+ * fields of rule (a) set to what that rule wants, so a case of (d) sees the
+ * one violation it makes, whatever (a) says of the file on disk.
+ */
+function baseOfD(from: Turbo): Turbo {
+  const base = TurboSchema.parse(structuredClone(from));
+  base.tasks.test = { ...base.tasks.test, inputs: [DEFAULT, PRESET] };
+  return base;
+}
+
 describe("turbo input rules on broken copies", () => {
-  const clean = (): Turbo => TurboSchema.parse(structuredClone(root));
+  const clean = (): Turbo =>
+    TurboSchema.parse(structuredClone(repository().root));
   const pkg = (
     turbo: Turbo | undefined,
     reads: PackageInputs["reads"],
@@ -481,10 +474,17 @@ describe("turbo input rules on broken copies", () => {
     ).toEqual([expect.stringContaining("do not read")]);
   });
 
+  it("(d) builds its copies on a base that rule (a) passes, whatever the root says", () => {
+    const brokenA = clean();
+    brokenA.tasks.test = { inputs: [DEFAULT, ENV_TEST] };
+
+    expect(rootInputViolations(baseOfD(brokenA))).toEqual([]);
+  });
+
   it.each(ROOT_TASKS)(
     "(d) refuses an exclusion in the inputs of %s",
     (name) => {
-      const broken = clean();
+      const broken = baseOfD(clean());
       broken.tasks[name] = { inputs: [DEFAULT, "!scripts/**"] };
 
       expect(rootInputViolations(broken)).toEqual([
@@ -496,7 +496,7 @@ describe("turbo input rules on broken copies", () => {
   it.each(ROOT_TASKS)(
     "(d) refuses inputs of %s without the default",
     (name) => {
-      const broken = clean();
+      const broken = baseOfD(clean());
       broken.tasks[name] = { inputs: ["scripts/**"] };
 
       expect(rootInputViolations(broken)).toEqual([
@@ -509,13 +509,13 @@ describe("turbo input rules on broken copies", () => {
     const broken = clean();
     broken.tasks["test:int"] = { dependsOn: [] };
 
-    expect(intOrderViolations(broken, manifests)).toEqual([
+    expect(intOrderViolations(broken, repository().manifests)).toEqual([
       expect.stringContaining("does not depend on ^test:int"),
     ]);
   });
 
   it("(g) refuses a closed root reader whose package dropped the input", () => {
-    const db = packages.find(({ dir }) => dir === "packages/db");
+    const db = repository().packages.find(({ dir }) => dir === "packages/db");
     if (db?.turbo === undefined)
       throw new Error("no turbo.json of packages/db");
     const broken = TurboSchema.parse(structuredClone(db.turbo));
@@ -535,18 +535,50 @@ describe("turbo input rules on broken copies", () => {
     ]);
   });
 
-  it.each([
+  it.each<[string, number, boolean, string?]>([
+    // Named roots.
     ['import { repoRoot } from "@sf/config/paths";', 1, true],
+    ['import { rootEnvFilePath } from "@sf/config/paths";', 1, true],
+    ["const env = readFileSync(testEnvFilePath, 'utf8');", 1, true],
+    // Climbs tied to the file, from its directory.
     ['const root = new URL("../../../", import.meta.url);', 1, true],
     ['const root = new URL("../../..", import.meta.url);', 1, true],
-    ['const root = resolve(here, "..", "..", "..");', 1, true],
-    ['const root = resolve(\n  here,\n  "..",\n  "..",\n  "..",\n);', 1, true],
-    ['const root = join(dir, "../../..");', 1, true],
-    ['const app = resolve(packageDir, "../../apps/worker");', 1, true],
-    ['const pkg = resolve(here, "..", "src");', 1, false],
+    ['const root = resolve(import.meta.dirname, "..", "..", "..");', 1, true],
+    [
+      'const here = dirname(fileURLToPath(import.meta.url));\nconst root = resolve(\n  here,\n  "..",\n  "..",\n  "..",\n);',
+      1,
+      true,
+    ],
+    ['const root = join(__dirname, "..\\\\..\\\\..");', 1, true],
+    [
+      'const here = dirname(fileURLToPath(import.meta.url));\nconst pkg = resolve(here, "..", "src");',
+      1,
+      false,
+    ],
+    ['const src = new URL("../src/x.ts", import.meta.url);', 1, false],
     ['await import("../../src/index.js");', 2, false],
     ['import { a } from "../src/a.js";', 1, false],
-    ['import { unitTestConfig } from "../../../vitest.preset.js";', 1, false],
+    // Climbs tied to nothing, from the package directory vitest runs in.
+    ['const root = join(dir, "../../..");', 1, true],
+    ['const app = resolve(packageDir, "../../apps/worker");', 1, true],
+    ['const core = resolve(packageDir, "..", "core");', 1, true],
+    ['const core = readFileSync("../core/src/index.ts", "utf8");', 1, true],
+    ['const pkg = resolve(here, "..", "src");', 1, true],
+    // The preset, the import of a vitest config only.
+    [
+      'import { unitTestConfig } from "../../vitest.preset.js";',
+      0,
+      false,
+      "vitest.config.ts",
+    ],
+    ['import { unitTestConfig } from "../../vitest.preset.js";', 1, true],
+    [
+      'import { unitTestConfig } from "../../vitest.preset.js"; const r = repoRoot;',
+      0,
+      true,
+      "vitest.config.ts",
+    ],
+    // What the parser tells apart.
     ["// the root is repoRoot, but nothing here reads it", 1, false],
     ["/* ../../../.env.test */ export const a = 1;", 1, false],
     [
@@ -556,16 +588,18 @@ describe("turbo input rules on broken copies", () => {
     ],
     ['const url = "https://x//y"; const root = repoRoot;', 1, true],
     ["const comment = /\\/\\//; // repoRoot", 1, false],
+    ["const re = /`/; const root = repoRoot;", 1, true],
   ])(
     "(f) takes %j from depth %i for a reader of the root: %s",
-    (code, depth, reads) => {
-      expect(readsRoot(withoutComments(code), depth)).toBe(reads);
+    (code, depth, reads, file = "test/x.test.ts") => {
+      expect(readsRoot(code, depth, file)).toBe(reads);
     },
   );
 
   it.each(["apps/api", "apps/worker"])(
     "(e) refuses a manifest of %s without @sf/db",
     (dir) => {
+      const { root, manifests } = repository();
       const manifest = manifests[dir];
       if (manifest === undefined) throw new Error(`no manifest of ${dir}`);
       const { "@sf/db": _db, ...dependencies } = manifest.dependencies ?? {};
@@ -582,13 +616,15 @@ describe("turbo input rules on broken copies", () => {
 
 describe("turbo cache hash", () => {
   it("includes tsconfig.base.json, which every package's typecheck extends", () => {
-    expect(root.globalDependencies).toContain("tsconfig.base.json");
+    expect(repository().root.globalDependencies).toContain(
+      "tsconfig.base.json",
+    );
   });
 
   // The test of a package hashes the files of its internal dependencies
   // through these nodes (docs/TECH_DEBT.md, the worker#test row).
   it("makes test depend on the test of the internal dependencies", () => {
-    expect(root.tasks.test?.dependsOn).toContain("^test");
+    expect(repository().root.tasks.test?.dependsOn).toContain("^test");
   });
 
   // api and worker integration tests share one Postgres and one Redis (db 1:
@@ -601,8 +637,8 @@ describe("turbo cache hash", () => {
   });
 
   it("stores the build without the cache of Next", () => {
-    expect(root.tasks.build?.outputs).toContain(".next/**");
-    expect(root.tasks.build?.outputs).toContain("!.next/cache/**");
+    expect(repository().root.tasks.build?.outputs).toContain(".next/**");
+    expect(repository().root.tasks.build?.outputs).toContain("!.next/cache/**");
   });
 
   it("is pinned at or above 2.10, the turbo whose hashing E0-12 checked", () => {

@@ -1,12 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   parseManifest,
   workspaceDirs,
   workspaceGlobs,
 } from "../scripts/lib/manifest.mjs";
+import { gitScratch } from "./git-fixture.js";
 
 /**
  * The one reading of package manifests and of the workspace for the root
@@ -14,10 +12,7 @@ import {
  * `package.json` a script reads, and the package directories of
  * `pnpm-workspace.yaml`.
  */
-const scratch = mkdtempSync(join(tmpdir(), "sf-manifest-"));
-afterAll(() => {
-  rmSync(scratch, { recursive: true, force: true });
-});
+const scratch = gitScratch("sf-manifest-");
 
 describe("parseManifest", () => {
   it.each([
@@ -117,26 +112,88 @@ describe("workspaceGlobs", () => {
 });
 
 describe("workspaceDirs", () => {
+  const WORKSPACE: Record<string, string> = {
+    "pnpm-workspace.yaml":
+      "packages:\n  - packages/*\n  - packages/integrations/*\n  - apps/*\nonlyBuiltDependencies:\n  - esbuild\n",
+    "apps/web/package.json": "{}",
+    "apps/api/package.json": "{}",
+    "packages/db/package.json": "{}",
+    "packages/notes/readme.md": "",
+    "packages/db/nested/package.json": "{}",
+    "packages/integrations/youtube/package.json": "{}",
+    "esbuild/package.json": "{}",
+  };
+
   it("lists the directories of each glob that hold a package.json, sorted", () => {
-    const root = join(scratch, "repo");
-    const files: Record<string, string> = {
-      "pnpm-workspace.yaml":
-        "packages:\n  - packages/*\n  - apps/*\nonlyBuiltDependencies:\n  - esbuild\n",
-      "apps/web/package.json": "{}",
-      "apps/api/package.json": "{}",
-      "packages/db/package.json": "{}",
-      "packages/notes/readme.md": "",
-      "esbuild/package.json": "{}",
-    };
-    for (const [path, text] of Object.entries(files)) {
-      mkdirSync(join(root, path, ".."), { recursive: true });
-      writeFileSync(join(root, path), text);
-    }
+    const root = scratch.files("repo", WORKSPACE);
+
+    expect(workspaceDirs(root, Object.keys(WORKSPACE))).toEqual([
+      "apps/api",
+      "apps/web",
+      "packages/db",
+      "packages/integrations/youtube",
+    ]);
+  });
+
+  it("takes the files from git by default: an ignored package.json is no package", () => {
+    const root = scratch.tree("git-repo", {
+      ...WORKSPACE,
+      ".gitignore": "apps/old/\n",
+      "apps/old/package.json": "{}",
+    });
 
     expect(workspaceDirs(root)).toEqual([
       "apps/api",
       "apps/web",
       "packages/db",
+      "packages/integrations/youtube",
     ]);
+  });
+
+  it.each([
+    ["no file under its directory", "tools/*", {}],
+    [
+      "only an ignored or deeper package.json",
+      "tools/*",
+      { "tools/readme.md": "", "tools/a/b/package.json": "{}" },
+    ],
+  ])(
+    "takes a glob that holds no package for none, as pnpm does: %s",
+    (_what, glob, extra) => {
+      const contents: Record<string, string> = {
+        ...WORKSPACE,
+        "pnpm-workspace.yaml": `packages:\n  - apps/*\n  - ${glob}\n`,
+        ...extra,
+      };
+      const root = scratch.files(
+        `empty-glob-${Object.keys(extra).length}`,
+        contents,
+      );
+
+      expect(workspaceDirs(root, Object.keys(contents))).toEqual([
+        "apps/api",
+        "apps/web",
+      ]);
+    },
+  );
+
+  it("refuses a workspace whose globs together hold no package", () => {
+    const contents: Record<string, string> = {
+      ...WORKSPACE,
+      "pnpm-workspace.yaml": "packages:\n  - tools/*\n  - lib/*\n",
+      "tools/readme.md": "",
+    };
+    const root = scratch.files("no-package", contents);
+
+    expect(() => workspaceDirs(root, Object.keys(contents))).toThrow(
+      "pnpm-workspace.yaml holds no package",
+    );
+  });
+
+  it("refuses a tree git cannot list", () => {
+    // No `git init`, and git does not climb out of the scratch directory
+    // (`test/git-fixture.ts`): it refuses to list the tree.
+    const root = scratch.files("no-repo", WORKSPACE);
+    expect(() => workspaceDirs(root)).toThrow(/git ls-files in .* failed/);
   });
 });

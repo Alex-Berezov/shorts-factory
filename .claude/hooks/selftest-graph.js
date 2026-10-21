@@ -18,6 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 const cp = require('child_process');
+const { isGone } = require('./lib.js');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 
@@ -143,7 +144,7 @@ function underNodeModules(file, root, opts) {
   try {
     nm = realpath(path.join(root, 'node_modules'));
   } catch (e) {
-    if (e && e.code === 'ENOENT') return false;
+    if (isGone(e)) return false;
     throw e;
   }
   const rel = path.relative(nm, realpath(file));

@@ -1,9 +1,11 @@
+// The search endpoint by name, never called: search.list (no-search-list: allowed).
 /**
  * DataApiClient — public reads (tracked channels, video metadata, stats)
  * via API key. Epic E1 fills in the implementation.
  *
  * Design constraints:
- * - new-video sync via uploads playlist only (1 unit), never search.list;
+ * - new-video sync via uploads playlist only (1 unit), never the search
+ *   endpoint (100 units, named above);
  * - stats snapshots via videos.list with batched ids (<=50 per call);
  * - every call reports units to the UsageLogger and respects the daily soft cap.
  */

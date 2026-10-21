@@ -1,14 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { workspaceDirs } from "../scripts/lib/manifest.mjs";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   type SourceFile,
   type WorkspacePackage,
   importViolations,
   manifestViolations,
   readWorkspace,
+  sourceFilesByPackage,
   tableViolations,
 } from "./dependency-direction.js";
-import type { Manifest } from "./repo-files.js";
+import { type Manifest, repoWorkspaceDirs } from "./repo-files.js";
 
 /**
  * The direction of dependencies (docs/10_SYSTEM_DESIGN.md §6): every row of
@@ -144,6 +144,38 @@ describe("manifestViolations", () => {
     expect(
       manifestViolations(withPackage(pkg(dirOf(name), name, { dependencies }))),
     ).toEqual([]);
+  });
+
+  it("keeps the edges it refuses out of the rows it allows", () => {
+    const allowed = new Map(ALLOWED);
+    const both = REFUSED.filter(([name, to]) =>
+      allowed.get(name)?.includes(to),
+    );
+
+    expect(both).toEqual([]);
+  });
+
+  it("allows every pair of packages exactly by the rows above: a row of the lock grown by any edge is red", () => {
+    // Cross, not one refusal per row: an edge added to a row of
+    // ALLOWED_EDGES that REFUSED does not name is caught here.
+    const allowed = new Map(ALLOWED);
+    const wrong: string[] = [];
+    for (const [, name] of PACKAGES) {
+      for (const [, to] of PACKAGES) {
+        if (to === name) continue;
+        const found = manifestViolations(
+          withPackage(
+            pkg(dirOf(name), name, { dependencies: { [to]: "workspace:*" } }),
+          ),
+        );
+        const expected = allowed.get(name)?.includes(to) === true;
+        if (expected !== (found.length === 0)) {
+          wrong.push(`${name} -> ${to}: ${expected ? "refused" : "allowed"}`);
+        }
+      }
+    }
+
+    expect(wrong).toEqual([]);
   });
 
   it.each(REFUSED)("refuses %s -> %s", (name, to) => {
@@ -321,7 +353,104 @@ describe("importViolations", () => {
           ),
         ),
       ).toEqual([
-        `apps/worker/src/main.ts: ${specifier} (test support from src)`,
+        `apps/worker/src/main.ts: ${specifier} (test support from a file that ships)`,
+      ]);
+    },
+  );
+
+  it("refuses @sf/config in a module of src/cli/ that is no entry point reading it", () => {
+    expect(
+      importViolations(
+        withPackage(
+          pkg("packages/db", "@sf/db", {}, [
+            file("src/cli/run.ts", 'import { env } from "@sf/config";'),
+            file("src/cli/seed.ts", 'import { env } from "@sf/config";'),
+          ]),
+        ),
+      ),
+    ).toEqual([
+      "packages/db/src/cli/run.ts: @sf/config (ADR-0002: only the CLI, tests and vitest configs)",
+    ]);
+  });
+
+  it("refuses a library module of @sf/db that takes a module of src/cli/, and passes the CLI taking its own", () => {
+    expect(
+      importViolations(
+        withPackage(
+          pkg("packages/db", "@sf/db", {}, [
+            file("src/lib.ts", 'import { run } from "./cli/run.js";'),
+            file("src/repos/x.ts", 'export * from "../cli/seed.js";'),
+            file("src/cli/migrate.ts", 'import { run } from "./run.js";'),
+            file("src/client.ts", 'import { clientOptions } from "./cli.js";'),
+            file(
+              "test/cli.test.ts",
+              'import { run } from "../src/cli/run.js";',
+            ),
+          ]),
+        ),
+      ),
+    ).toEqual([
+      "packages/db/src/lib.ts: ./cli/run.js (library code of @sf/db takes nothing from src/cli: ADR-0002)",
+      "packages/db/src/repos/x.ts: ../cli/seed.js (library code of @sf/db takes nothing from src/cli: ADR-0002)",
+    ]);
+  });
+
+  it.each([
+    ["drizzle.config.ts", 'import "./src/cli/migrate.ts";'],
+    ["drizzle.config.ts", 'import { run } from "./src/cli/run.js";'],
+    ["scripts/x.mjs", 'import "../src/cli/seed.js";'],
+  ])(
+    "refuses %s of @sf/db, outside src/, taking a module of src/cli/: %s",
+    (path, text) => {
+      expect(
+        importViolations(
+          withPackage(pkg("packages/db", "@sf/db", {}, [file(path, text)])),
+        ),
+      ).toEqual([
+        expect.stringContaining(
+          `packages/db/${path}: ${/"(.+)"/.exec(text)?.[1]} (library code of @sf/db takes nothing from src/cli: ADR-0002)`,
+        ),
+      ]);
+    },
+  );
+
+  it.each([
+    ["test/migrate.test.ts", 'import { run } from "../src/cli/run.js";'],
+    ["test-support/db.ts", 'import "../src/cli/migrate.js";'],
+    ["vitest.config.ts", 'import "./src/cli/migrate.js";'],
+  ])(
+    "passes %s of @sf/db, which may read the configuration, taking src/cli/",
+    (path, text) => {
+      expect(
+        importViolations(
+          withPackage(pkg("packages/db", "@sf/db", {}, [file(path, text)])),
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["apps/web", "@sf/web", "next.config.ts"],
+    ["apps/worker", "@sf/worker", "scripts/x.mjs"],
+    ["packages/db", "@sf/db", "drizzle.config.ts"],
+  ])(
+    "refuses the test support from %s/%s, a file that ships",
+    (dir, name, path) => {
+      // Its own test support: no edge of the table in the way.
+      const specifier = `${name}/test-support/fixture`;
+      expect(
+        importViolations(
+          withPackage(
+            pkg(dir, name, {}, [
+              file(path, `import { x } from "${specifier}";`),
+              file("test/x.ts", `import { x } from "${specifier}";`),
+              file("src/x.test.ts", `import { x } from "${specifier}";`),
+              file("vitest.int.config.ts", `import "${specifier}";`),
+            ]),
+          ),
+        ),
+      ).toEqual([
+        `${dir}/${path}: ${specifier} (test support from a file that ships)`,
       ]);
     },
   );
@@ -345,10 +474,44 @@ describe("importViolations", () => {
           ),
         ),
       ).toEqual([
-        `${dir}/src/repos/x.ts: ../../test-support/fixture.js (test support from src)`,
+        `${dir}/src/repos/x.ts: ../../test-support/fixture.js (test support from a file that ships)`,
       ]);
     },
   );
+
+  it("lets a test under src take its own test support, and refuses its neighbour that ships", () => {
+    // A test under src/ never ships: the images hold no test (`noTests` of
+    // scripts/probe-image.mjs), ADR-0011.
+    expect(
+      importViolations(
+        withPackage(
+          pkg("packages/db", "@sf/db", {}, [
+            file("src/a.test.ts", 'import { x } from "../test-support/x.js";'),
+            file("src/a.ts", 'import { x } from "../test-support/x.js";'),
+          ]),
+        ),
+      ),
+    ).toEqual([
+      "packages/db/src/a.ts: ../test-support/x.js (test support from a file that ships)",
+    ]);
+  });
+
+  it("refuses test support to a test under src the preset does not run", () => {
+    // The preset of ADR-0011 runs `*.test.ts` and `noTests` of
+    // scripts/probe-image.mjs holds the images to that name only: a
+    // `*.test.tsx` under src/ is a file that ships.
+    expect(
+      importViolations(
+        withPackage(
+          pkg("packages/db", "@sf/db", {}, [
+            file("src/a.test.tsx", 'import { x } from "../test-support/x.js";'),
+          ]),
+        ),
+      ),
+    ).toEqual([
+      "packages/db/src/a.test.tsx: ../test-support/x.js (test support from a file that ships)",
+    ]);
+  });
 
   it.each([
     [
@@ -475,11 +638,16 @@ describe("importViolations", () => {
 });
 
 describe("the workspace", () => {
-  const workspace = readWorkspace();
+  // Read before the cases rather than when the file is collected: a git that
+  // cannot list the tree is then a red case with its reason.
+  let workspace: WorkspacePackage[] = [];
+  beforeAll(() => {
+    workspace = readWorkspace();
+  });
 
   it("reads every package of pnpm-workspace.yaml with its files", () => {
     // An empty read would pass the cases below on nothing.
-    const dirs = workspaceDirs();
+    const dirs = repoWorkspaceDirs();
     expect(dirs.length).toBeGreaterThan(0);
     expect(workspace.map((entry) => entry.dir)).toEqual(dirs);
     const empty = workspace
@@ -498,5 +666,43 @@ describe("the workspace", () => {
 
   it("has no import against the direction", () => {
     expect(importViolations(workspace)).toEqual([]);
+  });
+});
+
+describe("sourceFilesByPackage", () => {
+  it("gives a file to the deepest package that holds it, and none to a file of no package", () => {
+    const owned = sourceFilesByPackage(
+      [
+        "packages/db/src/index.ts",
+        "packages/db/tools/gen/src/main.ts",
+        "packages/db/tools/gen/package.json",
+        "packages/db/tools/readme.ts",
+        "packages/integrations/youtube/src/data-api.ts",
+        "vitest.preset.ts",
+        "packages/dbx/src/index.ts",
+      ],
+      ["packages/db", "packages/db/tools/gen", "packages/integrations/youtube"],
+    );
+
+    expect(Object.fromEntries(owned)).toEqual({
+      "packages/db": [
+        "packages/db/src/index.ts",
+        "packages/db/tools/readme.ts",
+      ],
+      "packages/db/tools/gen": ["packages/db/tools/gen/src/main.ts"],
+      "packages/integrations/youtube": [
+        "packages/integrations/youtube/src/data-api.ts",
+      ],
+    });
+  });
+
+  it("gives the same files whatever the order of the directories", () => {
+    const files = ["a/b/c/x.ts", "a/b/y.ts", "a/z.ts"];
+
+    expect(
+      Object.fromEntries(sourceFilesByPackage(files, ["a/b/c", "a/b", "a"])),
+    ).toEqual(
+      Object.fromEntries(sourceFilesByPackage(files, ["a", "a/b", "a/b/c"])),
+    );
   });
 });

@@ -56,6 +56,12 @@ function check(name, fn) {
   }
 }
 
+/**
+ * Место под выборку всего дерева у близнеца trackedFiles - LISTING_MAX_BUFFER из
+ * scripts/lib/files.mjs (сверяет проба «близнец trackedFiles»).
+ */
+const LISTING_MAX_BUFFER = 64 * 1024 * 1024;
+
 function run(cmd, args, opts) {
   return cp.spawnSync(cmd, args, Object.assign({ encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, opts || {}));
 }
@@ -96,7 +102,7 @@ function liveBytes() {
   try {
     return fs.readFileSync(LIVE_STATE);
   } catch (e) {
-    if (e && e.code === 'ENOENT') return null;
+    if (L.isGone(e)) return null;
     throw e;
   }
 }
@@ -127,7 +133,7 @@ function repoSnapshot(root = ROOT) {
       const abs = path.join(root, rel);
       return fs.statSync(abs).isFile() ? crypto.createHash('sha1').update(fs.readFileSync(abs)).digest('hex') : 'не файл';
     } catch (e) {
-      if (e && e.code === 'ENOENT') return 'нет на диске';
+      if (L.isGone(e)) return 'нет на диске';
       throw e;
     }
   };
@@ -188,6 +194,7 @@ const HOOK_ERROR = 'hook error:';
  * (*.js и *.json байт в байт, repos.json тот же: репозиторий sf - корень копии) и файлами
  * пробы по их путям от корня репозитория, так что glob правил и rules.sf.json те же, что
  * у боевого хука. Папка убирается в finally, в том числе после красной строки.
+ *   tree.dir              - корень дерева (пробе, которой нужен git в нём);
  *   tree.write(rel, body) - пишет файл пробы и отдаёт абсолютный путь;
  *   tree.standards(rel)   - запуск копии standards.js на этом файле ({ code, out, err }).
  * Хук идёт с CLAUDE_HOOK_DEBUG: исключение внутри L.guard без failClosed даёт код 0 и пустой
@@ -208,6 +215,7 @@ function withScratchTree(fn) {
     const hooks = copyHooksTo(dir);
     const abs = (rel) => path.join(dir, ...rel.split('/'));
     return fn({
+      dir,
       write: (rel, body) => {
         fs.mkdirSync(path.dirname(abs(rel)), { recursive: true });
         fs.writeFileSync(abs(rel), body);
@@ -1101,8 +1109,25 @@ function notePaths(gate) {
   return [...new Set(named)];
 }
 
-/** Гейты, чьи пути из note сверяются с диском (notePathsOnDisk). */
-const NOTE_CHECKED_GATES = ['compose', 'tracker'];
+/**
+ * Гейты, чьи пути из note сверяются с диском (notePathsOnDisk): каждый гейт rules, в note которого
+ * есть путь файла (notePaths). Выводом, а не списком: гейт, чей note начал называть файл, сверяется
+ * сразу (E0-12N, docs/TECH_DEBT.md § E0-12N: прежний перечень пяти гейтов заменён этим выводом).
+ */
+function noteCheckedGates(rules) {
+  return ((rules && rules.gates) || []).filter((gate) => notePaths(gate).length > 0);
+}
+
+/**
+ * Гейты, чьи пути из note (вне их when и cmd) обязаны выбирать сам harness-selftest (проба выбора
+ * гейта harness-selftest ниже): переименование такого файла краснеет локально, а не только в CI.
+ * Уже noteCheckedGates: пути из note test:int, build и самого harness-selftest сверяются с диском
+ * на каждом прогоне, но их правка гейт не выбирает (E0-12N). Список из двух гейтов - решение Q12
+ * техлида (docs/DECISIONS.md, 18.10.2026, E0-12F): пути, которые читает when/cmd гейта-владельца
+ * note, selftest не выбирают, иначе selftest идёт на каждой задаче; подтверждено решением ОВ1
+ * E0-12N (21.10.2026). Расширять список или when harness-selftest - только новым решением техлида.
+ */
+const NOTE_SELECTING_GATES = ['compose', 'tracker'];
 
 /**
  * Боевые формы роута: пробы S13/S14 читают эти файлы как пропуск, поэтому каждый из них
@@ -1111,16 +1136,66 @@ const NOTE_CHECKED_GATES = ['compose', 'tracker'];
 const ROUTE_FORMS = ['apps/api/src/routes/health/index.ts', 'apps/api/src/routes/system/index.ts'];
 
 /**
- * Пути файлов, названные в note гейта (`test/x.test.ts`, `scripts/x.mjs`, ...), есть на
- * диске: note - то, что читает человек о гейте, и опечатка в нём переживала бы
- * selftest (L-021). Шаблоны с * и каталоги (`scripts/lib/**`) не сверяются.
+ * Причина отказа notePathsOnDisk: файла нет в выборке git - он удалён, переименован или
+ * игнорируется (тогда он на этой машине на диске, а в CI его не будет).
  */
-function notePathsOnDisk(gate) {
+const NOT_LISTED = 'нет в выборке git (удалён, переименован или игнорируется)';
+
+/**
+ * Пути файлов, названные в note гейта (`test/x.test.ts`, `scripts/x.mjs`, ...), есть в дереве:
+ * note - то, что читает человек о гейте, и опечатка в нём переживала бы selftest (L-021).
+ * Дерево - выборка git (listedFiles: в индексе или новые и не игнорируемые), а не existsSync:
+ * игнорируемый файл, который лежит только на этой машине, и сбой stat (EPERM) не сходят
+ * за файл, которого в CI не будет. Шаблоны с * и каталоги (`scripts/lib/**`) не сверяются.
+ * listed - выборка для пробы; по умолчанию - выборка настоящего дерева.
+ */
+function notePathsOnDisk(gate, listed) {
   const files = notePaths(gate);
   if (!files.length) return 'в note гейта ' + gate.id + ' не найдено ни одного пути файла';
-  const missing = files.filter((f) => !fs.existsSync(path.join(ROOT, f)));
-  return missing.length ? 'в note гейта ' + gate.id + ' нет на диске: ' + missing.join(', ') : { note: files.length + ' путей' };
+  const inTree = listed || listedFiles();
+  const missing = files.filter((f) => !inTree.has(f));
+  return missing.length ? 'в note гейта ' + gate.id + ' ' + NOT_LISTED + ': ' + missing.join(', ') : { note: files.length + ' путей' };
 }
+
+/** Отказы notePathsOnDisk по каждому гейту noteCheckedGates(rules); пусто - все пути на диске. */
+function notePathViolations(rules, listed) {
+  return noteCheckedGates(rules).map((gate) => notePathsOnDisk(gate, listed)).filter((r) => typeof r === 'string');
+}
+
+/** Файлы настоящего дерева в выборке git (trackedFiles с новыми неигнорируемыми) - один раз за прогон. */
+let listedCache = null;
+function listedFiles() {
+  if (!listedCache) listedCache = new Set(trackedFiles({ others: true }));
+  return listedCache;
+}
+
+check('пути файлов в note каждого гейта rules.sf.json, где они есть, на диске', () => {
+  const checked = noteCheckedGates(repoRules).map((gate) => gate.id);
+  if (!checked.length) return 'ни в одном note гейта rules.sf.json нет пути файла - сверять нечего';
+  const missing = notePathViolations(repoRules);
+  return missing.length ? missing.join('; ') : { note: checked.join(', ') };
+});
+// Проба отказа (L-008): гейт, которого нет ни в одном списке, с путём в note, которого нет на
+// диске, - красный; без пути в note - не сверяется.
+check('пути note: гейт вне прежнего перечня с путём, которого нет на диске, - отказ', () => {
+  const probe = { id: 'sf-selftest-note', note: 'читает scripts/sf-selftest-missing.mjs' };
+  const quiet = { id: 'sf-selftest-quiet', note: 'без путей файлов' };
+  const rules = { gates: [...((repoRules && repoRules.gates) || []), probe, quiet] };
+  const ids = noteCheckedGates(rules).map((gate) => gate.id);
+  if (ids.includes(quiet.id)) return 'гейт без пути в note попал в сверку';
+  const got = notePathViolations(rules);
+  const want = 'в note гейта sf-selftest-note нет в выборке git (удалён, переименован или игнорируется): scripts/sf-selftest-missing.mjs';
+  return (got.length === 1 && got[0] === want) || 'ожидался один отказ «' + want + '», получено ' + JSON.stringify(got);
+});
+// Проба отказа (L-008): файл, который есть на диске, но не в выборке git (игнорируемый), - отказ.
+check('пути note: файл на диске, которого нет в выборке git, - отказ', () => {
+  const real = 'scripts/check-no-search-list.mjs';
+  if (!fs.existsSync(path.join(ROOT, real))) return 'нет ' + real + ' - пробе не на чем стоять';
+  const probe = { id: 'sf-selftest-ignored', note: 'читает ' + real };
+  const got = notePathViolations({ gates: [probe] }, new Set());
+  const want = 'в note гейта sf-selftest-ignored нет в выборке git (удалён, переименован или игнорируется): ' + real;
+  return (got.length === 1 && got[0] === want) || 'ожидался один отказ «' + want + '», получено ' + JSON.stringify(got);
+});
 
 /**
  * Общий каркас пробы гейта по glob (L-008): решение принимает настоящий selectGates,
@@ -1327,8 +1402,9 @@ checkGateSelection('compose', {
     'scripts/check-compose.mjs',
     'scripts/compose-rules.mjs',
     // Читатель графа и манифест, который закрепляет пин yaml, которым тот
-    // разбирает файлы (E0-12K).
+    // разбирает файлы (E0-12K), и сам разбор YAML читателя (readYaml, E0-12N).
     'scripts/lib/compose-graph.mjs',
+    'scripts/lib/yaml-doc.mjs',
     'package.json',
     // Гейт находит compose.yaml через корень из scripts/lib и читает через
     // scripts/lib/files.mjs (E0-12F) и scripts/lib/json.mjs.
@@ -1344,7 +1420,8 @@ checkGateSelection('compose', {
   // Манифесты приложений check-compose не читает: выбор на них обещал бы
   // проверку, которой нет (E0-11, круг 7-2).
   // when - ровно файлы, которые гейт читает (E0-12K): из scripts/lib только
-  // files.mjs, json.mjs, paths.mjs и compose-graph.mjs; только корневой .env.test.
+  // files.mjs, json.mjs, paths.mjs, compose-graph.mjs и yaml-doc.mjs; только
+  // корневой .env.test.
   mustSkip: [
     'apps/web/src/app/page.tsx',
     'apps/api/package.json',
@@ -1977,6 +2054,37 @@ function graphVerdict(state) {
     const got = JSON.stringify(trackedFiles({ spawn: lsFiles('package.json\0.claude\0') }));
     return got === JSON.stringify(['package.json']) || 'получено ' + got;
   });
+  // Близнец trackedFiles с others и trackedFiles из scripts/lib/files.mjs (загружен в дочерний node)
+  // на одном ответе git: одни аргументы git и один список - дубли путей (конфликт) по разу, пропавший
+  // файл и каталог выпадают (E0-12N, К2-6 круга 2; образец - сверка isGone по Р4).
+  check('граф turbo: близнец trackedFiles (others) зовёт git и отбирает файлы как trackedFiles из scripts/lib/files.mjs', () => {
+    const stdout = 'package.json\0package.json\0sf-selftest-gone.ts\0.claude\0package.json\0';
+    const module = require('url').pathToFileURL(path.join(ROOT, 'scripts', 'lib', 'files.mjs')).href;
+    const program = 'const { trackedFiles, LISTING_MAX_BUFFER } = await import(' + JSON.stringify(module) + ');' +
+      'let args = null; let maxBuffer = null;' +
+      'const spawn = (command, given, options) => { args = [command, ...given]; maxBuffer = options.maxBuffer; return { status: 0, stdout: ' + JSON.stringify(stdout) + ', stderr: "" }; };' +
+      'const got = trackedFiles(' + JSON.stringify(ROOT) + ', { spawn });' +
+      'console.log(JSON.stringify({ args, got, maxBuffer, exported: LISTING_MAX_BUFFER }));';
+    const r = run(process.execPath, ['--input-type=module', '--eval', program], { cwd: ROOT });
+    if (r.error || r.status !== 0) return 'files.mjs не загрузился: ' + String((r.error && r.error.message) || r.stderr).slice(0, 160);
+    const original = JSON.parse(String(r.stdout).trim());
+    let args = null;
+    let maxBuffer = null;
+    const got = trackedFiles({ others: true, spawn: (command, given, options) => { args = [command, ...given]; maxBuffer = options.maxBuffer; return lsFiles(stdout)(); } });
+    if (original.maxBuffer !== original.exported) {
+      return 'files.mjs даёт git maxBuffer ' + original.maxBuffer + ', а LISTING_MAX_BUFFER ' + original.exported;
+    }
+    if (maxBuffer !== original.exported) {
+      return 'maxBuffer близнеца ' + maxBuffer + ', LISTING_MAX_BUFFER files.mjs ' + original.exported;
+    }
+    if (JSON.stringify(args) !== JSON.stringify(original.args)) {
+      return 'git близнеца ' + JSON.stringify(args) + ', у files.mjs ' + JSON.stringify(original.args);
+    }
+    if (JSON.stringify(got) !== JSON.stringify(original.got)) {
+      return 'список близнеца ' + JSON.stringify(got) + ', у files.mjs ' + JSON.stringify(original.got);
+    }
+    return { note: original.got.length + ' файл из ' + stdout.split('\0').filter(Boolean).length + ' путей' };
+  });
 }
 
 /**
@@ -1985,24 +2093,30 @@ function graphVerdict(state) {
  * самопроверка, модуль графа получает список параметром. git не запустился или упал - исключение.
  * Наличие на диске - stat обычного файла: ENOENT и ENOTDIR (родитель стал файлом) - файла нет,
  * путь стал каталогом - файла нет, иная ошибка (EACCES) - исключение, а не молча выпавший файл.
- * opts - подмена для кейсов: git (имя команды), spawn (вместо run), stat (вместо fs.statSync).
+ * opts - подмена для кейсов: git (имя команды), spawn (вместо run), stat (вместо fs.statSync);
+ * others - ещё и новые неигнорируемые файлы (--others --exclude-standard, сверка путей note).
+ * С others - близнец trackedFiles из scripts/lib/files.mjs без keep: аргументы git, дедуп путей и
+ * отбор файлов сверяет проба «близнец trackedFiles» ниже (правка флагов там без правки здесь - красная),
+ * она же - maxBuffer git с LISTING_MAX_BUFFER из files.mjs (К3-6 E0-12N).
  */
 function trackedFiles(opts) {
   const o = opts || {};
   const spawn = o.spawn || run;
   const stat = o.stat || fs.statSync;
-  const r = spawn(o.git || 'git', ['-c', 'core.fsmonitor=false', 'ls-files', '-z'], { cwd: ROOT });
+  const others = o.others ? ['--others', '--exclude-standard'] : [];
+  const r = spawn(o.git || 'git', ['-c', 'core.fsmonitor=false', 'ls-files', '-z', '--cached', ...others], { cwd: ROOT, maxBuffer: LISTING_MAX_BUFFER });
   if (r.error) throw new Error('git ls-files не запустился: ' + r.error.message);
   if (r.status !== 0) throw new Error('git ls-files: ' + (r.status === null ? 'сигнал ' + r.signal : 'код ' + r.status) + ': ' + String(r.stderr || '').trim());
   const isFile = (f) => {
     try {
       return stat(path.join(ROOT, f)).isFile();
     } catch (e) {
-      if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return false;
+      if (L.isNotFile(e)) return false;
       throw e;
     }
   };
-  return r.stdout.split('\0').filter((f) => f && isFile(f));
+  // --cached --others даёт файл с конфликтом по строке на стадию - один раз, как в files.mjs.
+  return [...new Set(r.stdout.split('\0'))].filter((f) => f && isFile(f));
 }
 
 /**
@@ -2659,13 +2773,13 @@ checkGateSelection('harness-selftest', {
       // notePathsOnDisk сверяет эти пути с диском: переименование такого файла должно
       // выбирать самопроверку локально, а не краснеть только в CI (E0-12F). Путь из when
       // или cmd гейта-владельца note самопроверку не выбирает (решение техлида к кругу 3).
-      name: 'его выбирает каждый путь из note гейтов ' + NOTE_CHECKED_GATES.join(' и ') + ' вне их when и cmd',
+      name: 'его выбирает каждый путь из note гейтов ' + NOTE_SELECTING_GATES.join(' и ') + ' вне их when и cmd',
       fn: ({ runs }) => {
-        const named = NOTE_CHECKED_GATES.flatMap((id) => {
+        const named = NOTE_SELECTING_GATES.flatMap((id) => {
           const owner = gateProbe(id);
           return notePaths(owner.gate).filter((f) => !owner.runs(f) && !String(owner.gate.cmd || '').includes(f));
         });
-        if (!named.length) return 'в note гейтов ' + NOTE_CHECKED_GATES.join(' и ') + ' нет ни одного пути вне их when и cmd';
+        if (!named.length) return 'в note гейтов ' + NOTE_SELECTING_GATES.join(' и ') + ' нет ни одного пути вне их when и cmd';
         const stray = named.filter((f) => !runs(f));
         if (stray.length) return 'пути из note вне glob harness-selftest: ' + stray.join(', ');
         return { note: named.length + ' путей' };
@@ -2898,6 +3012,161 @@ function standardsCases(id, rel, refused, allowed) {
     return { note: refused.length + ' отказ, ' + allowed.length + ' пропуск' };
   });
 }
+
+/**
+ * S04 держит ту же границу, что гейт no-search-list (Б1/Б12 ревью E0-12N, К2-1 круга 2): правило
+ * одно - scripts/lib/search-list.mjs. Хук видит строку, а не файл, поэтому пропуск - только
+ * строчный комментарий // с меткой `no-search-list: allowed` и без того, что может закончить
+ * комментарий раньше конца строки (звезда со слешем, обратная кавычка, {, < - тег в тексте JSX
+ * (К3-3), кавычки, одиночный CR, U+2028, U+2029). Строка с вызовом краснеет со словом never/NEVER/запрещ, с меткой после кода,
+ * в строковом литерале, после закрытия блочного комментария в голове строки, после /*-слеша,
+ * на строке-продолжении со звездой (умножение), на строке блочного комментария, в комментарии
+ * без метки; CRLF - та же граница. Каждый отказ - своя строка refused: проба возвращает первый
+ * провал, и откат одной ветки ALLOWED краснеет на своём кейсе. Файлы - любой исходник дерева,
+ * не только apps/packages/scripts. Вызов собран из частей: этот файл сканирует сам гейт.
+ */
+check('standards: S04 - вызов search пойман и со словом never, и с меткой после кода; пропуск - только строчный комментарий // с меткой', () => {
+  const gone = missingDirs(['packages/integrations/youtube/src']);
+  if (gone) return gone;
+  const call = ['youtube', 'search', 'list'].join('.');
+  const endpoint = ['', 'youtube', 'v3', 'search'].join('/');
+  const mark = 'no-search-list: allowed';
+  const file = (line) => line + '\nexport const x = 1;\n';
+  const crlf = (line) => line + '\r\nexport const x = 1;\r\n';
+  const cr = String.fromCharCode(13);
+  const ls = String.fromCharCode(0x2028);
+  const ps = String.fromCharCode(0x2029);
+  const refused = [
+    'await ' + call + '({}); // never in production',
+    'await ' + call + '({}); // NEVER',
+    'const url = "https://www.googleapis.com' + endpoint + '"; // запрещён',
+    'await ' + call + '({}); // see check-no-search-list',
+    'await ' + call + '({}); // ' + mark,
+    'const why = "// ' + mark + '"; await ' + call + '({});',
+    '/* x */ await ' + call + '({}); // ' + mark,
+    ' * x */ await ' + call + '({}); // ' + mark,
+    '*/ await ' + call + '({}); // ' + mark,
+    '/*/ ' + call + '({}) // ' + mark,
+    '  * (await ' + call + '({})).data; // ' + mark,
+    ' * never ' + call + ' (100 units)',
+    ' * never ' + call + ' (100 units) (' + mark + ')',
+    '/** never ' + call + ' - ' + mark + ' */',
+    '// x */ ' + call + '(); ' + mark,
+    '// ` + ' + call + '() + ` ' + mark,
+    '// {' + call + '({})} ' + mark,
+    '// <' + call + ' /> ' + mark,
+    '// </p>; void ' + call + '(); // ' + mark,
+    '// " + ' + call + '() + " ' + mark,
+    "// ' + " + call + "() + ' " + mark,
+    '// ' + mark + cr + 'await ' + call + '();',
+    '// ' + mark + ls + 'await ' + call + '();',
+    '// ' + mark + ps + 'await ' + call + '();',
+  ].map(file).concat([crlf('await ' + call + '({}); // ' + mark)]);
+  const allowed = [
+    '// never ' + call + ' - ' + mark,
+    '    // never ' + call + ' - ' + mark,
+    'export const y = 1; // ' + mark,
+    'await playlistItems.list({});',
+  ].map(file).concat([crlf('// never ' + call + ' - ' + mark)]);
+  const own = standardsCases('S04', 'packages/integrations/youtube/src/zz_selftest_s04.ts', refused, allowed);
+  if (own !== true && typeof own !== 'object') return own;
+  for (const rel of ['tools/zz_selftest_s04.mjs', 'test/zz_selftest_s04.test.ts', '.claude/hooks/zz_selftest_s04.js', 'zz_selftest_s04.config.cts']) {
+    const other = standardsCases('S04', rel, [file('await ' + call + '({});')], [file('// never ' + call + ' - ' + mark)]);
+    if (other !== true && typeof other !== 'object') return rel + ': ' + other;
+  }
+  return own;
+});
+
+/**
+ * S04 на отслеживаемом файле с концами строк CRLF: хук берёт строки из git diff, и каждая
+ * добавленная строка несёт CR (новый файл он читает с диска и режет по CRLF - там CR нет).
+ * //-строка с меткой пропускается и с CR в конце, вызов с меткой после кода - отказ. Репозиторий
+ * пробы - без шаблонов, хуков git и autocrlf машины (как в пробе isBootstrap).
+ */
+check('standards: S04 на отслеживаемом файле с CRLF - //-строка с меткой пропущена, вызов пойман', () => {
+  const gone = missingDirs(['packages/integrations/youtube/src']);
+  if (gone) return gone;
+  const call = ['youtube', 'search', 'list'].join('.');
+  const mark = 'no-search-list: allowed';
+  const rel = 'packages/integrations/youtube/src/zz_selftest_s04_crlf.ts';
+  const noHooks = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-s04-nohooks-'));
+  const env = Object.assign({}, process.env, { GIT_AUTHOR_NAME: 'p', GIT_AUTHOR_EMAIL: 'p@x', GIT_COMMITTER_NAME: 'p', GIT_COMMITTER_EMAIL: 'p@x' });
+  try {
+    return withScratchTree((tree) => {
+      const git = (args) => {
+        const r = run('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=' + noHooks, '-c', 'core.autocrlf=false'].concat(args), { cwd: tree.dir, env });
+        if (r.error || r.status !== 0) throw new Error('git ' + args[0] + ': ' + String((r.error && r.error.message) || r.stderr).slice(0, 160));
+      };
+      tree.write(rel, 'export const x = 1;\n');
+      git(['init', '-q', '--template=', '-b', 'main']);
+      git(['config', 'core.autocrlf', 'false']);
+      git(['add', rel]);
+      git(['commit', '-q', '-m', 'chore: init']);
+      tree.write(rel, '// never ' + call + ' - ' + mark + '\r\nexport const x = 1;\r\n');
+      const passed = tree.standards(rel);
+      if (passed.err.includes(HOOK_ERROR)) return 'standards.js упал внутри guard - ' + passed.err.slice(0, 160);
+      if (passed.err.includes('[S04]')) return 'S04 на //-строке с меткой и CR в конце: ' + passed.err.slice(0, 160);
+      tree.write(rel, 'await ' + call + '({}); // ' + mark + '\r\nexport const x = 1;\r\n');
+      const refused = tree.standards(rel);
+      if (refused.code !== 2 || !refused.err.includes('[S04]')) return 'не пойман S04 на вызове с меткой после кода и CR в конце - код ' + refused.code + ' ' + refused.err.slice(0, 160);
+      return true;
+    });
+  } finally {
+    fs.rmSync(noHooks, { recursive: true, force: true });
+  }
+});
+
+/**
+ * S04 и гейт no-search-list - одно правило: шаблон, пропуск и файлы S04 сверяются с
+ * BANNED, ALLOWED и SOURCE_EXTENSIONS из scripts/lib/search-list.mjs, загруженного в
+ * дочерний node. Правка одной стороны без другой здесь красная.
+ */
+check('standards: S04 - шаблон, пропуск и файлы те же, что у гейта no-search-list (scripts/lib/search-list.mjs)', () => {
+  const s04 = ((repoRules && repoRules.standards) || []).find((st) => st.id === 'S04');
+  if (!s04) return 'в rules.sf.json нет S04';
+  const module = require('url').pathToFileURL(path.join(ROOT, 'scripts', 'lib', 'search-list.mjs')).href;
+  const program = 'const m = await import(' + JSON.stringify(module) + ');' +
+    'console.log(JSON.stringify({ banned: m.BANNED.source, bannedFlags: m.BANNED.flags, allowed: m.ALLOWED.source, allowedFlags: m.ALLOWED.flags, ext: m.SOURCE_EXTENSIONS }));';
+  const r = run(process.execPath, ['--input-type=module', '--eval', program], { cwd: ROOT });
+  if (r.error || r.status !== 0) return 'search-list.mjs не загрузился: ' + String((r.error && r.error.message) || r.stderr).slice(0, 160);
+  const rule = JSON.parse(String(r.stdout).trim());
+  const flags = typeof s04.flags === 'string' ? s04.flags : '';
+  const sourceOf = (pattern) => new RegExp(pattern, flags).source;
+  if (sourceOf(s04.pattern) !== rule.banned || flags !== rule.bannedFlags) return 'шаблон S04 ' + JSON.stringify(s04.pattern) + ' не BANNED гейта ' + JSON.stringify(rule.banned);
+  if (sourceOf(s04.skipIf) !== rule.allowed || flags !== rule.allowedFlags) return 'skipIf S04 ' + JSON.stringify(s04.skipIf) + ' не ALLOWED гейта ' + JSON.stringify(rule.allowed);
+  const files = ['**/*.{' + rule.ext.map((e) => e.slice(1)).join(',') + '}'];
+  if (JSON.stringify(s04.files) !== JSON.stringify(files)) return 'файлы S04 ' + JSON.stringify(s04.files) + ', у гейта ' + JSON.stringify(files);
+  return { note: rule.ext.length + ' расширений' };
+});
+
+/**
+ * isGone хуков (lib.js) - близнец isGone из scripts/lib/files.mjs (Р4 техлида E0-12N): ответ
+ * на ENOENT, ENOTDIR, EPERM и EACCES сверяется с оригиналом, загруженным в дочерний node, и
+ * isNotFile - с isNotFile оттуда же (ENOENT и ENOTDIR). Близнец, отвечающий «пропал» на всё,
+ * здесь красный.
+ */
+check('lib.js: isGone и isNotFile отвечают как одноимённые из scripts/lib/files.mjs на ENOENT, ENOTDIR, EPERM, EACCES', () => {
+  const codes = ['ENOENT', 'ENOTDIR', 'EPERM', 'EACCES'];
+  const module = require('url').pathToFileURL(path.join(ROOT, 'scripts', 'lib', 'files.mjs')).href;
+  const program = 'const { isGone, isNotFile } = await import(' + JSON.stringify(module) + ');' +
+    'const codes = ' + JSON.stringify(codes) + ';' +
+    'const error = (code) => Object.assign(new Error(code), { code });' +
+    'console.log(JSON.stringify([codes.map((code) => isGone(error(code))), codes.map((code) => isNotFile(error(code)))]));';
+  const r = run(process.execPath, ['--input-type=module', '--eval', program], { cwd: ROOT });
+  if (r.error || r.status !== 0) return 'files.mjs не загрузился: ' + String((r.error && r.error.message) || r.stderr).slice(0, 160);
+  const [original, originalNotFile] = JSON.parse(String(r.stdout).trim());
+  const error = (code) => Object.assign(new Error(code), { code });
+  const twin = codes.map((code) => L.isGone(error(code)));
+  if (JSON.stringify(twin) !== JSON.stringify(original)) {
+    return 'isGone lib.js ' + JSON.stringify(twin) + ', files.mjs ' + JSON.stringify(original) + ' на ' + codes.join(', ');
+  }
+  const notFile = codes.map((code) => L.isNotFile(error(code)));
+  if (JSON.stringify(notFile) !== JSON.stringify(originalNotFile)) {
+    return 'isNotFile lib.js ' + JSON.stringify(notFile) + ', files.mjs ' + JSON.stringify(originalNotFile) + ' на ' + codes.join(', ');
+  }
+  if (L.isGone({ code: 'ENOENT' }) || L.isGone(null)) return 'isGone принял не ошибку за пропавший путь';
+  return { note: codes.map((code, i) => code + '=' + original[i]).join(', ') };
+});
 
 check('standards: серверные пакеты в apps/web/src (корень, подпуть, побочный импорт) пойманы S11, вход web - нет', () => {
   const gone = missingDirs(['apps/web/src/lib']);

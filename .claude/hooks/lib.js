@@ -459,6 +459,31 @@ function defaultState() {
 }
 
 /**
+ * Код упавшего системного вызова (`ENOENT`, ...); undefined для любого другого значения.
+ */
+function codeOf(error) {
+  return error instanceof Error && typeof error.code === 'string' ? error.code : undefined;
+}
+
+/**
+ * Путь пропал: `ENOENT` и ничего больше. Близнец `isGone` из `scripts/lib/files.mjs` для хуков
+ * (CJS не импортирует ESM без флага на Node 22.0-22.11, решение Р4 техлида E0-12N): EPERM, EBUSY,
+ * EACCES - путь не прочитать, а не его нет. Что близнец отвечает так же, как оригинал, на ENOENT,
+ * ENOTDIR, EPERM и EACCES, сверяет проба harness-selftest.js.
+ */
+function isGone(error) {
+  return codeOf(error) === 'ENOENT';
+}
+
+/**
+ * По пути нет файла: его нет (`isGone`) или на месте каталога в пути лежит файл (`ENOTDIR`).
+ * Для вопросов «файл ли это», где сломанный путь - тоже «не файл»; прочие сбои - не ответ.
+ */
+function isNotFile(error) {
+  return isGone(error) || codeOf(error) === 'ENOTDIR';
+}
+
+/**
  * Дефолт - только когда файла нет (ENOENT), он не разбирается (SyntaxError) или разобран
  * не в объект (null, массив, строка). Любая другая ошибка чтения пробрасывается: дефолт
  * на ней ушёл бы обратно в файл первым же писателем и стёр lastQa/lastGates. Испорченный
@@ -469,7 +494,7 @@ function readState() {
   try {
     raw = JSON.parse(fs.readFileSync(statePath(), 'utf8'));
   } catch (e) {
-    if ((e && e.code === 'ENOENT') || e instanceof SyntaxError) return defaultState();
+    if (isGone(e) || e instanceof SyntaxError) return defaultState();
     throw e;
   }
   return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : defaultState();
@@ -672,6 +697,8 @@ module.exports = {
   allChanged,
   isTracked,
   addedLines,
+  isGone,
+  isNotFile,
   readState,
   writeState,
   bumpEdits,

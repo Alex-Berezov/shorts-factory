@@ -81,3 +81,5 @@ _Добавляется автоматически командами `node scri
 - 2026-10-21 ➕ **E0-12V** rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S13/S14, формы S15/S16, сверка носителей, замок zod (добавлена в трекер)
 - 2026-10-21 ✎ **E0-12M** gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker (изменена в трекере: заголовок)
 - 2026-10-21 ✅ **E0-12M** gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker — gates get mandatory time limits with process tree takedown and honest verdicts, --only runs named gates for any when and on a clean tree, tracker when narrowed, full gate runs go to background; standards part split into E0-12V
+- 2026-10-21 ➕ **E0-12W** Общий test-support приложений: @sf/runtime/test-support (dev-command, child-run, imports), int-хелперы, assertHashed, ADR-0011 (добавлена в трекер)
+- 2026-10-21 ➕ **E0-12X** Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT (добавлена в трекер)

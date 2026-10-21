@@ -22,7 +22,7 @@ const VITEST_LOADERS = new Set([
 ]);
 
 /** The text of a string literal or a template without substitutions. */
-function literal(node: ts.Node | undefined): string | null {
+export function literal(node: ts.Node | undefined): string | null {
   return node !== undefined &&
     (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
     ? node.text
@@ -43,7 +43,7 @@ function isImportCall(node: ts.Node | undefined): boolean {
  * `import(…)`, `require(…)`, `require.resolve(…)`, `import.meta.resolve(…)`,
  * `vi.mock(…)`, `vi.doMock(…)`, `vi.importActual(…)`, `vi.importMock(…)`.
  */
-function loadsModule(callee: ts.Expression): boolean {
+export function loadsModule(callee: ts.Expression): boolean {
   if (callee.kind === ts.SyntaxKind.ImportKeyword) return true;
   if (ts.isIdentifier(callee)) return callee.text === "require";
   if (!ts.isPropertyAccessExpression(callee)) return false;
@@ -104,4 +104,14 @@ export function importSpecifiers(fileName: string, text: string): string[] {
   };
   visit(source);
   return found;
+}
+
+/**
+ * The name a call is made by: `resolve` of `resolve(…)` and of
+ * `path.resolve(…)`; null for any other callee (`f()()`, `a[b]()`).
+ */
+export function calleeName(callee: ts.Expression): string | null {
+  if (ts.isIdentifier(callee)) return callee.text;
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.text;
+  return null;
 }

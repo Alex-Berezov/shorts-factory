@@ -1,9 +1,8 @@
-import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join, relative } from "node:path";
+import { join, posix, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { workspaceDirs } from "../scripts/lib/manifest.mjs";
+import { z } from "zod";
 import { repoRoot } from "../scripts/lib/paths.mjs";
 import {
   type EntryCheck,
@@ -12,7 +11,13 @@ import {
   intTestConfig,
   unitTestConfig,
 } from "../vitest.preset.js";
-import { readRepoFile, readRepoJson, repoFilesUnder } from "./repo-files.js";
+import {
+  readManifest,
+  readRepoFile,
+  repoFileExists,
+  repoFilesUnder,
+  repoWorkspaceDirs,
+} from "./repo-files.js";
 
 /**
  * The preset is the one place the test policy of the workspace is written
@@ -38,14 +43,13 @@ const PRESET_IMPORT = /from\s+"(?:\.\.\/)+vitest\.preset\.js"/;
 const CONFIG_FILE = /^vitest.*\.config\.[cm]?[jt]s$/;
 
 /**
- * The vitest configs at the top of the package at `dir` (absolute), as paths
- * from the root, among the files the hash covers (`repoFilesUnder`): an
- * ignored one is in no hash, and what it holds must not change a result.
+ * The vitest configs at the top of the package at `dir` (from the root), as
+ * paths from the root, among the files the hash covers (`repoFilesUnder`):
+ * an ignored one is in no hash, and what it holds must not change a result.
  */
 function configsOf(dir: string): string[] {
-  const from = relative(repoRoot, dir).replaceAll("\\", "/");
-  return repoFilesUnder(from).filter((path) => {
-    const name = path.slice(from.length + 1);
+  return repoFilesUnder(dir).filter((path) => {
+    const name = path.slice(dir.length + 1);
     return !name.includes("/") && CONFIG_FILE.test(name);
   });
 }
@@ -73,32 +77,38 @@ function setsKey(source: string, key: string): boolean {
   );
 }
 
-/** A property of a value of unknown shape; `undefined` when it has none. */
-function fieldOf(value: unknown, key: string): unknown {
-  return typeof value === "object" && value !== null
-    ? Reflect.get(value, key)
-    : undefined;
-}
+/**
+ * A config module as vitest loads it, by the keys of its `test` the
+ * integration runs must have; the values are the cases' to compare.
+ */
+const LoadedConfigSchema = z.object({
+  default: z.object({
+    test: z.object({
+      globalSetup: z.unknown(),
+      fileParallelism: z.unknown(),
+      setupFiles: z.unknown(),
+    }),
+  }),
+});
 
-function scriptsOf(manifest: unknown): Record<string, string> {
-  if (typeof manifest !== "object" || manifest === null) {
-    return {};
-  }
-  const scripts: unknown = Reflect.get(manifest, "scripts");
-  if (typeof scripts !== "object" || scripts === null) {
-    return {};
-  }
-  return Object.fromEntries(
-    Object.entries(scripts).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
-  );
+/** The scripts of the package at `dir`, none when its manifest has none. */
+function scriptsOf(dir: string): Record<string, string> {
+  return readManifest(dir).scripts ?? {};
 }
 
 /** The config file a `vitest run` script reads (`--config <file>` or the default). */
 function configOfScript(script: string): string {
   const match = /(?:^|\s)--config(?:=|\s+)(\S+)/.exec(script);
   return match?.[1] ?? "vitest.config.ts";
+}
+
+/**
+ * The config a script of the package at `dir` runs, as a path from the root
+ * in the form of the listing (`/`-separated, `./` and `..` resolved), so
+ * `--config ./vitest.int.config.ts` is the file the listing names.
+ */
+function configPathOf(dir: string, script: string): string {
+  return posix.join(dir, configOfScript(script));
 }
 
 describe("intTestConfig", () => {
@@ -196,30 +206,48 @@ describe("unitTestConfig", () => {
   });
 });
 
+describe("configPathOf", () => {
+  it.each([
+    ["vitest run", "apps/api/vitest.config.ts"],
+    [
+      "vitest run --config vitest.int.config.ts",
+      "apps/api/vitest.int.config.ts",
+    ],
+    [
+      "vitest run --config ./vitest.int.config.ts",
+      "apps/api/vitest.int.config.ts",
+    ],
+    [
+      "vitest run --config=../api/vitest.int.config.ts",
+      "apps/api/vitest.int.config.ts",
+    ],
+  ])("takes %s of apps/api for %s", (script, path) => {
+    expect(configPathOf("apps/api", script)).toBe(path);
+  });
+});
+
 describe("package vitest configs", () => {
-  const dirs = workspaceDirs().map((dir) => join(repoRoot, dir));
+  // Read in each case rather than when the file is collected: a git that
+  // cannot list the tree is then a red case with its reason.
+  const packageDirs = (): string[] => repoWorkspaceDirs();
 
   it("finds the packages of the workspace", () => {
-    expect(dirs.length).toBeGreaterThanOrEqual(9);
+    expect(packageDirs().length).toBeGreaterThanOrEqual(9);
   });
 
   it("every config a test script runs exists", () => {
     const missing: string[] = [];
-    for (const dir of dirs) {
-      const scripts = scriptsOf(
-        readRepoJson(relative(repoRoot, join(dir, "package.json"))),
-      );
+    for (const dir of packageDirs()) {
+      const scripts = scriptsOf(dir);
       for (const name of ["test", "test:int"]) {
         const script = scripts[name];
         if (script === undefined) {
           continue;
         }
-        expect(script, `${relative(repoRoot, dir)} ${name}`).toMatch(
-          /^vitest run\b/,
-        );
-        const config = join(dir, configOfScript(script));
-        if (!existsSync(config)) {
-          missing.push(relative(repoRoot, config));
+        expect(script, `${dir} ${name}`).toMatch(/^vitest run\b/);
+        const config = configPathOf(dir, script);
+        if (!repoFileExists(config)) {
+          missing.push(config);
         }
       }
     }
@@ -227,14 +255,11 @@ describe("package vitest configs", () => {
   });
 
   it("every vitest config is a thin call into the preset", () => {
-    const configs = dirs.flatMap((dir) =>
-      configsOf(dir).map((name) => join(repoRoot, name)),
-    );
+    const configs = packageDirs().flatMap((dir) => configsOf(dir));
     expect(configs.length).toBeGreaterThanOrEqual(12);
 
     const copies: string[] = [];
-    for (const config of configs) {
-      const name = relative(repoRoot, config).replaceAll("\\", "/");
+    for (const name of configs) {
       const source = readRepoFile(name);
       if (!PRESET_IMPORT.test(source)) {
         copies.push(`${name}: does not import vitest.preset`);
@@ -252,7 +277,7 @@ describe("package vitest configs", () => {
     // An integration run on unitTestConfig would run its files in parallel
     // and without the entry check.
     const wrong: string[] = [];
-    for (const dir of dirs) {
+    for (const dir of packageDirs()) {
       for (const name of configsOf(dir)) {
         const source = readRepoFile(name);
         const [want, not] = /\.int\.config\./.test(name)
@@ -274,16 +299,12 @@ describe("package vitest configs", () => {
    * files is a gate that checks nothing.
    */
   it("gives an integration run to exactly the packages with integration files", () => {
-    const names = dirs.map((dir) =>
-      relative(repoRoot, dir).replaceAll("\\", "/"),
-    );
+    const names = packageDirs();
     const withFiles = names.filter((name) =>
       repoFilesUnder(name).some((path) => path.endsWith(".int.test.ts")),
     );
     const withRun = names.filter(
-      (name) =>
-        scriptsOf(readRepoJson(`${name}/package.json`))["test:int"] !==
-        undefined,
+      (name) => scriptsOf(name)["test:int"] !== undefined,
     );
     const checked = Object.keys(ENTRY_CHECK_OF).sort();
 
@@ -294,28 +315,24 @@ describe("package vitest configs", () => {
   it("every integration run is behind its entry check", async () => {
     // Read from the configs as vitest loads them, not from their text.
     const runs: string[] = [];
-    for (const dir of dirs) {
-      const script = scriptsOf(
-        readRepoJson(relative(repoRoot, join(dir, "package.json"))),
-      )["test:int"];
+    for (const name of packageDirs()) {
+      const script = scriptsOf(name)["test:int"];
       if (script === undefined) {
         continue;
       }
-      const name = relative(repoRoot, dir).replaceAll("\\", "/");
       runs.push(name);
       const check = ENTRY_CHECK_OF[name];
       expect(check, `${name} has no entry check of its own`).toBeDefined();
-      const file = join(dir, configOfScript(script));
-      const loaded: unknown = await import(pathToFileURL(file).href);
-      const test = fieldOf(fieldOf(loaded, "default"), "test");
-      expect(fieldOf(test, "globalSetup"), name).toEqual([
+      const file = join(repoRoot, name, configOfScript(script));
+      const { test } = LoadedConfigSchema.parse(
+        await import(pathToFileURL(file).href),
+      ).default;
+      expect(test.globalSetup, name).toEqual([
         entryCheckModule(check ?? "postgres"),
       ]);
-      expect(fieldOf(test, "fileParallelism"), name).toBe(false);
+      expect(test.fileParallelism, name).toBe(false);
       // What the entry check loads itself, so it sees what the files see.
-      expect(fieldOf(test, "setupFiles"), name).toEqual([
-        "@sf/config/vitest/setup",
-      ]);
+      expect(test.setupFiles, name).toEqual(["@sf/config/vitest/setup"]);
     }
     expect(runs.sort()).toEqual(Object.keys(ENTRY_CHECK_OF).sort());
   });

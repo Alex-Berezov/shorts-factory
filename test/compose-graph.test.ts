@@ -9,11 +9,12 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { parse } from "yaml";
+
 import { composeGraph } from "../scripts/lib/compose-graph.mjs";
 import { readIfFile } from "../scripts/lib/files.mjs";
 import { realpathIn } from "./compose-fixture.js";
 import { dropLink } from "./drop-link.js";
+import { parseRepoYaml } from "./repo-files.js";
 
 /**
  * The reader of the graph of Compose files (scripts/lib/compose-graph.mjs),
@@ -55,7 +56,7 @@ function rootWith(text: string) {
 function entryAlone(text: string) {
   return {
     files: [ENTRY],
-    roots: [{ file: ENTRY, root: parse(text, { merge: true }) }],
+    roots: [{ file: ENTRY, root: parseRepoYaml(text, ENTRY, { merge: true }) }],
     references: [],
     problems: [],
   };

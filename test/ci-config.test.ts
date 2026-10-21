@@ -1,16 +1,29 @@
 import { parseEnv } from "node:util";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { imageTag } from "../scripts/probe-image.mjs";
 import { APP_DOCKERFILE, imagesOf } from "./dockerfile.js";
 import {
   type Manifest,
   type Turbo,
+  parseRepoYaml,
   readManifest,
   readRepoFile,
   readRepoJson,
   readTurbo,
 } from "./repo-files.js";
+import {
+  type Event,
+  type Step,
+  type Workflow,
+  ciWorkflowText,
+  evaluate,
+  jobIn,
+  parseWorkflow,
+  pullRequest,
+  push,
+  stepsIn,
+} from "./workflow.js";
 
 /**
  * What the CI configuration must keep, without a run of Actions to find out:
@@ -23,54 +36,19 @@ import {
  * file of the repository git does not ignore - tracked, or untracked and not
  * ignored, the set `repoFilesUnder` lists - so each file read here is in its
  * hash.
+ *
+ * The workflow is read by `test/workflow.ts`, the Compose file by
+ * `parseRepoYaml` (`test/repo-files.ts`): both fail-closed, by the one
+ * reading of `yaml` of the root project (`scripts/lib/yaml-doc.mjs`,
+ * decision R2 of E0-12N).
  */
 const read = readRepoFile;
-const workflow = read(".github/workflows/ci.yml").replace(/\r\n/g, "\n");
 
-/** Lines of the block under `header` (a line ending in `:`), by indentation. */
-function blockOf(text: string, header: string): string {
-  const lines = text.split("\n");
-  const start = lines.findIndex((line) => line === header);
-  if (start === -1) throw new Error(`no block "${header}"`);
-  const indent = header.length - header.trimStart().length;
-  const body: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    const comment = line.trimStart().startsWith("#");
-    if (
-      line.trim() !== "" &&
-      !comment &&
-      line.length - line.trimStart().length <= indent
-    ) {
-      break;
-    }
-    body.push(line);
-  }
-  return body.join("\n");
-}
-
-interface Step {
-  run: string | undefined;
-  if: string | undefined;
-  text: string;
-}
-
-/** The steps of a job of `text`, in order; comment lines are not part of a step. */
-function stepsIn(text: string, job: string): Step[] {
-  const steps = blockOf(blockOf(text, `  ${job}:`), "    steps:")
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("#"))
-    .join("\n");
-  return steps
-    .split(/\n(?= {6}- )/)
-    .filter((text) => text.trim().startsWith("- "))
-    .map((text) => {
-      const field = (key: string) =>
-        new RegExp(`^ {6}[- ] ${key}: (.*)$`, "m")
-          .exec(text)?.[1]
-          ?.replace(/^"(.*)"$/, "$1");
-      return { run: field("run"), if: field("if"), text };
-    });
-}
+/** The text of ci.yml, read before the first case (`ciWorkflowText`). */
+let workflow = "";
+beforeAll(() => {
+  workflow = ciWorkflowText();
+});
 
 /** The steps of a job of the workflow, in order. */
 const stepsOf = (job: string): Step[] => stepsIn(workflow, job);
@@ -81,164 +59,53 @@ const isMigrate = (step: Step) =>
 
 /** The steps that turn CI red on a schema change without its migration. */
 const GENERATE = "pnpm --filter @sf/db db:generate < /dev/null";
-const isGenerate = (step: Step) => step.text.includes(GENERATE);
+const isGenerate = (step: Step) => step.run?.includes(GENERATE) === true;
 const isDriftCheck = (step: Step) =>
-  step.text.includes("git status --porcelain -- packages/db/migrations");
+  step.run?.includes("git status --porcelain -- packages/db/migrations") ===
+  true;
 const isDbCheck = (step: Step) => step.run === "pnpm --filter @sf/db db:check";
 
-/**
- * The value that follows `key:` in the top-level `concurrency:` of the
- * workflow, `${{ }}` parts included.
- */
-function workflowValue(key: string, text: string = workflow): string {
-  const line = blockOf(text, "concurrency:")
-    .split("\n")
-    .map((text) => text.trim())
-    .find((text) => text.startsWith(`${key}:`));
-  if (line === undefined || !line.includes("${{")) {
+/** The value of `key` in the top-level `concurrency:` of a text of ci.yml. */
+function workflowValue(
+  key: "group" | "cancel-in-progress",
+  text: string = workflow,
+): string {
+  const value = parseWorkflow(text).concurrency?.[key];
+  if (typeof value !== "string" || !value.includes("${{")) {
     throw new Error(`no expression at "${key}"`);
   }
-  return line.slice(key.length + 1).trim();
+  return value;
 }
-
-interface Event {
-  name: "push" | "pull_request";
-  number: number | null;
-  sha: string;
-}
-
-/**
- * Evaluates an expression of the workflow for one event. The operators used
- * (`==`, `!=`, `&&`, `||`) mean the same in Actions and in JavaScript, and the
- * contexts are replaced by their values first; a context the event does not
- * have is null, as in Actions.
- */
-function evaluateOne(expression: string, event: Event): string | boolean {
-  const values: Record<string, string | number | null> = {
-    "github.event_name": event.name,
-    "github.event.pull_request.number": event.number,
-    "github.sha": event.sha,
-  };
-  const source = expression.replace(/github(?:\.\w+)+/g, (name) => {
-    if (!Object.hasOwn(values, name)) {
-      throw new Error(`unknown context ${name}`);
-    }
-    return JSON.stringify(values[name]);
-  });
-  return new Function(`return (${source});`)() as string | boolean;
-}
-
-/**
- * A value of the workflow for one event: a lone `${{ }}` keeps the type of
- * its result, a string with several is formatted like Actions does.
- */
-function evaluate(value: string, event: Event): string | boolean {
-  const lone = /^\$\{\{\s*(.*?)\s*\}\}$/.exec(value);
-  if (lone?.[1] !== undefined) return evaluateOne(lone[1], event);
-  return value.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expression: string) =>
-    String(evaluateOne(expression, event)),
-  );
-}
-
-const push = (sha: string): Event => ({ name: "push", number: null, sha });
-const pullRequest = (number: number, sha: string): Event => ({
-  name: "pull_request",
-  number,
-  sha,
-});
-
-describe("blockOf", () => {
-  it("does not end a block at a comment in column 0", () => {
-    const text = [
-      "jobs:",
-      "  ci:",
-      "    steps:",
-      "      - run: a",
-      "# note",
-      "      - if: github.event_name == 'never'",
-      "        run: b",
-      "  next:",
-      "    x: 1",
-    ].join("\n");
-
-    expect(blockOf(text, "    steps:")).toContain("run: b");
-    expect(blockOf(text, "    steps:")).not.toContain("x: 1");
-  });
-});
-
-describe("stepsIn", () => {
-  it("leaves the comment lines out of the text of a step", () => {
-    const text = [
-      "jobs:",
-      "  ci:",
-      "    steps:",
-      "      # uses: actions/setup-node@v4",
-      "      - run: a",
-      "      # if: github.event_name == 'never'",
-      "      - run: b",
-    ].join("\n");
-
-    const steps = stepsIn(text, "ci");
-
-    expect(steps.map((step) => step.run)).toEqual(["a", "b"]);
-    expect(steps.map((step) => step.text).join("\n")).not.toContain("#");
-  });
-});
-
-describe("workflowValue", () => {
-  it("reads the top-level concurrency, not a group: or concurrency: of a job", () => {
-    const text = [
-      "jobs:",
-      "  other:",
-      "    concurrency:",
-      "      group: job-${{ github.sha }}",
-      "concurrency:",
-      "  group: top-${{ github.sha }}",
-    ].join("\n");
-
-    expect(workflowValue("group", text)).toBe("top-${{ github.sha }}");
-  });
-});
 
 describe("ci.yml triggers", () => {
   it("runs on pushes to main and on pull requests, and on nothing else", () => {
-    expect(blockOf(workflow, "on:").trim().split("\n")).toEqual([
-      "push:",
-      "    branches: [main]",
-      "  pull_request:",
-    ]);
+    expect(parseWorkflow(workflow).on).toEqual({
+      push: { branches: ["main"] },
+      pull_request: null,
+    });
   });
 });
 
 describe("ci.yml permissions and time limits", () => {
-  const lines = (block: string) =>
-    block
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line !== "" && !line.startsWith("#"));
-
   it("grants the token read access to the contents and nothing more", () => {
-    expect(lines(blockOf(workflow, "permissions:"))).toEqual([
-      "contents: read",
-    ]);
+    const parsed = parseWorkflow(workflow);
+    expect(parsed.permissions).toEqual({ contents: "read" });
     for (const job of ["ci", "docker-build"]) {
-      expect(blockOf(workflow, `  ${job}:`)).not.toMatch(/^ {4}permissions:/m);
+      expect(parsed.jobs[job], job).toBeDefined();
+      expect(parsed.jobs[job], job).not.toHaveProperty("permissions");
     }
   });
 
   it.each(["ci", "docker-build"])("bounds the run of job %s", (job) => {
-    const limit = /^ {4}timeout-minutes: (\d+)$/m.exec(
-      blockOf(workflow, `  ${job}:`),
-    )?.[1];
+    const limit = jobIn(workflow, job)["timeout-minutes"];
 
-    expect(Number(limit)).toBeGreaterThan(0);
-    expect(Number(limit)).toBeLessThanOrEqual(60);
+    expect(limit).toBeGreaterThan(0);
+    expect(limit).toBeLessThanOrEqual(60);
   });
 });
 
 describe("ci.yml concurrency", () => {
-  const group = (event: Event) =>
-    evaluate(workflowValue("group"), event) as string;
+  const group = (event: Event) => evaluate(workflowValue("group"), event);
   const cancels = (event: Event) =>
     evaluate(workflowValue("cancel-in-progress"), event);
 
@@ -262,27 +129,45 @@ describe("ci.yml concurrency", () => {
   });
 });
 
+/**
+ * Every gate of `rules.sf.json` has a step of job ci running its command as
+ * it is written there, `pnpm` tasks included: a gate the hook runs locally
+ * and CI does not is a red that only one side sees.
+ */
+function gateViolations(
+  gates: readonly string[],
+  runs: readonly (string | undefined)[],
+): string[] {
+  return gates
+    .filter((cmd) => !runs.includes(cmd))
+    .map((cmd) => `ci.yml: job ci has no step running the gate "${cmd}"`);
+}
+
 describe("ci.yml job ci", () => {
-  const steps = stepsOf("ci");
-  const runs = steps.map((step) => step.run);
+  let steps: Step[] = [];
+  let runs: (string | undefined)[] = [];
+  beforeAll(() => {
+    steps = stepsOf("ci");
+    runs = steps.map((step) => step.run);
+  });
 
   it("has Postgres and Redis on the ports and database of .env.test", () => {
     const env = parseEnv(read(".env.test"));
     const database = new URL(env.DATABASE_URL ?? "");
     const redis = new URL(env.REDIS_URL ?? "");
-    const services = blockOf(blockOf(workflow, "  ci:"), "    services:");
-    const postgres = blockOf(services, "      postgres:");
+    const services = jobIn(workflow, "ci").services ?? {};
+    const postgres = services.postgres;
+    const redisService = services.redis;
 
-    expect(postgres).toContain(`- ${database.port}:5432`);
-    expect(postgres).toContain(`POSTGRES_USER: ${database.username}`);
-    expect(postgres).toContain(`POSTGRES_PASSWORD: ${database.password}`);
-    expect(postgres).toContain(
-      `POSTGRES_DB: ${database.pathname.replace(/^\//, "")}`,
-    );
-    expect(postgres).toContain("--health-cmd");
-    const redisService = blockOf(services, "      redis:");
-    expect(redisService).toContain(`- ${redis.port}:6379`);
-    expect(redisService).toContain("--health-cmd");
+    expect(postgres?.ports).toContain(`${database.port}:5432`);
+    expect(postgres?.env).toMatchObject({
+      POSTGRES_USER: database.username,
+      POSTGRES_PASSWORD: database.password,
+      POSTGRES_DB: database.pathname.replace(/^\//, ""),
+    });
+    expect(postgres?.options).toContain("--health-cmd");
+    expect(redisService?.ports).toContain(`${redis.port}:6379`);
+    expect(redisService?.options).toContain("--health-cmd");
   });
 
   it("installs, lints, typechecks, tests, checks the migrations, migrates, runs the integration tests and builds, in that order", () => {
@@ -302,24 +187,32 @@ describe("ci.yml job ci", () => {
     expect([...at].sort((a, b) => a - b)).toEqual(at);
   });
 
-  // The gates that are not `pnpm` tasks (those have steps of their own, above).
   const GateSchema = z.object({ cmd: z.string() });
   const gates = z
     .object({ gates: z.array(GateSchema) })
     .parse(readRepoJson(".claude/hooks/rules.sf.json"))
-    .gates.map((gate) => gate.cmd)
-    .filter((cmd) => !cmd.startsWith("pnpm "));
+    .gates.map((gate) => gate.cmd);
+  // The gates that are not `pnpm` tasks: those have their places above.
+  const scriptGates = gates.filter((cmd) => !cmd.startsWith("pnpm "));
 
-  it("runs every gate of .claude/hooks/rules.sf.json that is not a pnpm task", () => {
-    expect(gates.length).toBeGreaterThanOrEqual(4);
-    for (const cmd of gates) expect(runs).toContain(cmd);
+  it("runs every gate of .claude/hooks/rules.sf.json, pnpm tasks included", () => {
+    expect(gates.length).toBeGreaterThanOrEqual(9);
+    expect(gateViolations(gates, runs)).toEqual([]);
   });
 
-  it("runs those gates after the tests and before the migration", () => {
+  it("is red on a gate job ci does not run, pnpm task or not", () => {
+    expect(gateViolations([...gates, "pnpm foo", "node x.mjs"], runs)).toEqual([
+      'ci.yml: job ci has no step running the gate "pnpm foo"',
+      'ci.yml: job ci has no step running the gate "node x.mjs"',
+    ]);
+  });
+
+  it("runs the gates that are not pnpm tasks after the tests and before the migration", () => {
     const test = runs.indexOf("pnpm test");
     const migrate = steps.findIndex(isMigrate);
 
-    for (const cmd of gates) {
+    expect(scriptGates.length).toBeGreaterThanOrEqual(4);
+    for (const cmd of scriptGates) {
       const at = runs.indexOf(cmd);
       expect(at, cmd).toBeGreaterThan(test);
       expect(at, cmd).toBeLessThan(migrate);
@@ -328,27 +221,29 @@ describe("ci.yml job ci", () => {
 
   it("checks the Compose files with the pinned Compose, verified by its checksum", () => {
     const install = steps.findIndex(isComposeInstall);
-    const text = steps[install]?.text ?? "";
-    const version = /\/releases\/download\/v(\d+\.\d+\.\d+)\//.exec(text)?.[1];
+    const script = steps[install]?.run ?? "";
+    const version = /\/releases\/download\/v(\d+\.\d+\.\d+)\//.exec(
+      script,
+    )?.[1];
 
     expect(install).toBeGreaterThan(-1);
     expect(install).toBeLessThan(
       runs.indexOf("node scripts/check-compose.mjs"),
     );
     expect(version).toBe("5.5.1");
-    expect(composeInstallViolations(text)).toEqual([]);
-    expect(text).toContain(
+    expect(composeInstallViolations(script)).toEqual([]);
+    expect(script).toContain(
       `test "$(docker compose version --short)" = "${version}"`,
     );
   });
 
   it("caches the pnpm store through setup-node", () => {
     const setup = steps.find((step) =>
-      step.text.includes("actions/setup-node"),
+      step.uses?.startsWith("actions/setup-node@"),
     );
 
-    expect(setup?.text).toMatch(/node-version: 22\b/);
-    expect(setup?.text).toMatch(/cache: pnpm\b/);
+    expect(setup?.with?.["node-version"]).toBe(22);
+    expect(setup?.with?.cache).toBe("pnpm");
   });
 
   it("migrates with the entry of `pnpm db:migrate` and .env.test as a dotenv file", () => {
@@ -376,7 +271,7 @@ describe("ci.yml job ci", () => {
     expect(generate).toBeLessThan(drift);
     expect(drift).toBeLessThan(check);
     expect(check).toBeLessThan(integration);
-    expect(steps[drift]?.text).toContain('test -z "$drift" || {');
+    expect(steps[drift]?.run).toContain('test -z "$drift" || {');
     expect(scripts["db:generate"]).toBe(`${bypass}generate`);
     expect(scripts["db:check"]).toBe(`${bypass}check`);
   });
@@ -388,15 +283,16 @@ describe("ci.yml job ci", () => {
    * unless generate printed one of the lines it finishes with.
    */
   it("fails generate fast when it stopped at a question", () => {
-    const step = steps.find(isGenerate)?.text ?? "";
+    const step = steps.find(isGenerate);
+    const script = step?.run ?? "";
 
-    expect(step).toMatch(/^ {8}timeout-minutes: [1-9]\d*$/m);
-    expect(step).toContain("set -o pipefail");
-    expect(step).toContain(`${GENERATE} 2>&1 | tee "$log"`);
-    expect(step).toContain(
+    expect(step?.["timeout-minutes"]).toBeGreaterThan(0);
+    expect(script).toContain("set -o pipefail");
+    expect(script).toContain(`${GENERATE} 2>&1 | tee "$log"`);
+    expect(script).toContain(
       'grep -qE "No schema changes, nothing to migrate|Your SQL migration file" "$log" || {',
     );
-    expect(step).toMatch(/\|\| \{\n[^}]*\n\s+exit 1\n\s+\}/);
+    expect(script).toMatch(/\|\| \{\n[^}]*\n\s+exit 1\n\s*\}/);
   });
 
   it("lets no step fail quietly", () => {
@@ -429,12 +325,72 @@ const NO_REMOTE = [
 /** Keys of turbo.json that move the local cache or add a remote one. */
 const TURBO_CACHE_KEYS = ["remoteCache", "cacheDir"] as const;
 
-/** The value of `key:` in the text of a step, unquoted. */
-function stepField(text: string, key: string): string | undefined {
-  return new RegExp(`^\\s+${key}: (.*)$`, "m")
-    .exec(text)?.[1]
-    ?.trim()
-    .replace(/^"(.*)"$/, "$1");
+/** The action of `actions/cache` the cache step uses: a major tag or a commit. */
+const CACHE_ACTION = /^actions\/cache@(?:v\d+|[0-9a-f]{40})$/;
+
+/**
+ * The words of a command or a value: a flag with its value (`--cache=x`)
+ * gives the flag, `${{ secrets.TURBO_TOKEN }}` gives `TURBO_TOKEN`.
+ */
+function wordsOf(text: string): string[] {
+  return text.split(/[^\w-]+/).filter((word) => word !== "");
+}
+
+/**
+ * Whether a word of a command, a script or an environment is `name` of
+ * `NO_REMOTE`: the flag itself, the variable itself, or a variable of its
+ * family (`TURBO_CACHE_DIR` of `TURBO_CACHE`, `TURBO_REMOTE_ONLY` of
+ * `TURBO_REMOTE_`).
+ */
+function isWord(word: string, name: string): boolean {
+  if (name.startsWith("-")) return word === name;
+  return (
+    word === name || word.startsWith(name.endsWith("_") ? name : `${name}_`)
+  );
+}
+
+/**
+ * Where a map sits in the workflow: the maps whose `name:` is a label - the
+ * workflow, a job, a step - and the places on the way to them.
+ */
+type Place = "workflow" | "jobs" | "job" | "steps" | "step" | "value";
+
+/** The place of the value under `key` of a map at `place`. */
+function placeUnder(place: Place, key: string): Place {
+  if (place === "workflow" && key === "jobs") return "jobs";
+  if (place === "jobs") return "job";
+  if (place === "job" && key === "steps") return "steps";
+  return "value";
+}
+
+/** The maps whose `name:` is a label, not a value handed on. */
+const LABELLED: ReadonlySet<Place> = new Set(["workflow", "job", "step"]);
+
+/**
+ * Every word of the workflow as parsed: each key and each value, at any
+ * depth - the commands of the steps, the `env:` of the workflow, its jobs,
+ * their containers, services and steps, the `with:` and `secrets:` handed to
+ * an action or a workflow, the conditions, the options of a service. Only
+ * the `name:` of the workflow, of a job and of a step is a label and not
+ * read; a `name:` anywhere else (`env:`, `with:`, `secrets:`) is a value
+ * handed on, and is. Comments are not in the tree.
+ */
+function workflowWordsOf(value: unknown, place: Place = "workflow"): string[] {
+  if (typeof value === "string") return wordsOf(value);
+  if (typeof value === "number" || typeof value === "boolean") {
+    return wordsOf(String(value));
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) =>
+      workflowWordsOf(item, place === "steps" ? "step" : "value"),
+    );
+  }
+  if (value === null || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, item]) =>
+    key === "name" && typeof item === "string" && LABELLED.has(place)
+      ? []
+      : [...wordsOf(key), ...workflowWordsOf(item, placeUnder(place, key))],
+  );
 }
 
 /**
@@ -443,8 +399,11 @@ function stepField(text: string, key: string): string | undefined {
  * kept by the one job that runs the tasks: no commit in the key and no
  * restore keys, so a run never saves a grown copy of the archive it
  * restored. Nothing reaches a remote cache, and nothing makes a task skip
- * the cache it has. `workflow` is the text of ci.yml, `turbo` and `manifest`
- * the root turbo.json and package.json as parsed.
+ * the cache it has - read from every key and value of the workflow
+ * (`workflowWordsOf`) and the scripts of the root manifest, not from comments
+ * or the names of steps.
+ * `workflow` is the text of ci.yml, `turbo` and `manifest` the root
+ * turbo.json and package.json as parsed.
  */
 function turboCacheViolations(
   workflow: string,
@@ -452,25 +411,25 @@ function turboCacheViolations(
   manifest: Manifest,
 ): string[] {
   const problems: string[] = [];
+  const parsed = parseWorkflow(workflow);
+  const allSteps = Object.values(parsed.jobs).flatMap((job) => job.steps);
   // Every action of actions/cache counts, `cache/save` and `cache/restore`
   // too: a second step that saves would grow the archive again.
-  const uses =
-    workflow.match(/^\s*(?:- )?uses:\s*["']?actions\/cache(?:\/[\w-]+)?@/gim) ??
-    [];
+  const uses = allSteps.filter((step) =>
+    /^actions\/cache(?:\/[\w-]+)?@/i.test(step.uses ?? ""),
+  );
   if (uses.length !== 1) {
     problems.push(`ci.yml: ${uses.length} actions/cache steps, not one`);
   }
-  const steps = stepsIn(workflow, "ci");
-  const cache = steps.findIndex((step) =>
-    /uses: actions\/cache@v\d+/.test(step.text),
-  );
-  const week = steps.findIndex((step) => /^ {6}- id: week$/m.test(step.text));
+  const steps = parsed.jobs.ci?.steps ?? [];
+  const cache = steps.findIndex((step) => CACHE_ACTION.test(step.uses ?? ""));
+  const week = steps.findIndex((step) => step.id === "week");
   if (cache === -1) {
     problems.push("ci.yml: job ci has no actions/cache step");
   } else {
-    const text = steps[cache]?.text ?? "";
-    const path = stepField(text, "path");
-    const key = stepField(text, "key") ?? "";
+    const options = steps[cache]?.with ?? {};
+    const path = options.path;
+    const key = String(options.key ?? "");
     if (path !== TURBO_CACHE_DIR) {
       problems.push(`ci.yml: cache path ${path} is not ${TURBO_CACHE_DIR}`);
     }
@@ -480,7 +439,7 @@ function turboCacheViolations(
     if (key.includes("github.sha")) {
       problems.push(`ci.yml: cache key ${key} has github.sha`);
     }
-    if (/^\s+restore-keys:/m.test(text)) {
+    if ("restore-keys" in options) {
       problems.push("ci.yml: the cache step has restore-keys");
     }
     if (week === -1 || week > cache) {
@@ -493,17 +452,25 @@ function turboCacheViolations(
       `ci.yml: the week step runs ${weekRun}, not the ISO week of date -u`,
     );
   }
-  if (/pull_request_target/.test(blockOf(workflow, "on:"))) {
+  if (Object.hasOwn(parsed.on, "pull_request_target")) {
     problems.push(
       "ci.yml: pull_request_target runs a fork's code with the rights of the repository",
     );
   }
-  const scripts = JSON.stringify(manifest.scripts ?? {});
-  for (const word of NO_REMOTE) {
-    if (workflow.includes(word)) problems.push(`ci.yml: has ${word}`);
-    if (scripts.includes(word)) problems.push(`package.json: has ${word}`);
+  const workflowWords = workflowWordsOf(parsed);
+  const scriptWords = Object.values(manifest.scripts ?? {}).flatMap(wordsOf);
+  for (const name of NO_REMOTE) {
+    if (workflowWords.some((word) => isWord(word, name))) {
+      problems.push(`ci.yml: has ${name}`);
+    }
+    if (scriptWords.some((word) => isWord(word, name))) {
+      problems.push(`package.json: has ${name}`);
+    }
   }
-  if (/--cache[= ]/.test(workflow)) problems.push("ci.yml: has --cache");
+  if (workflowWords.includes("--cache")) problems.push("ci.yml: has --cache");
+  if (scriptWords.includes("--cache")) {
+    problems.push("package.json: has --cache");
+  }
   for (const key of TURBO_CACHE_KEYS) {
     if (key in turbo) problems.push(`turbo.json: has ${key}`);
   }
@@ -511,8 +478,14 @@ function turboCacheViolations(
 }
 
 describe("ci.yml turbo cache", () => {
-  const turbo = readTurbo(".");
-  const manifest = readManifest(".");
+  // Read before the first case rather than when the file is collected: a
+  // file that cannot be read is then a red case with its reason.
+  let turbo: Turbo;
+  let manifest: Manifest;
+  beforeAll(() => {
+    turbo = readTurbo(".");
+    manifest = readManifest(".");
+  });
   const violations = (text: string, turboJson: Turbo = turbo) =>
     turboCacheViolations(text, turboJson, manifest);
   const replaced = (from: string, to: string) => {
@@ -560,6 +533,15 @@ describe("ci.yml turbo cache", () => {
     ]);
   });
 
+  it("takes the cache action pinned to a commit", () => {
+    expect(
+      replaced(
+        "- uses: actions/cache@v4",
+        "- uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9",
+      ),
+    ).toEqual([]);
+  });
+
   it("refuses a second actions/cache step", () => {
     const second =
       "      - uses: actions/cache@v4\n        with: { path: x, key: y }\n";
@@ -603,6 +585,41 @@ describe("ci.yml turbo cache", () => {
     expect(turboCacheViolations(workflow, turbo, scripts)).toEqual([
       `package.json: has ${flag}`,
     ]);
+  });
+
+  it.each(["--cache=local:", "--cache local:r"])(
+    "refuses %s in a script of the root manifest",
+    (flag) => {
+      const scripts = {
+        ...manifest,
+        scripts: { test: `turbo run test ${flag}` },
+      };
+
+      expect(turboCacheViolations(workflow, turbo, scripts)).toEqual([
+        "package.json: has --cache",
+      ]);
+    },
+  );
+
+  it("refuses --cache in a command of the workflow", () => {
+    expect(
+      replaced("run: pnpm test\n", "run: pnpm test --cache=local:r\n"),
+    ).toEqual(["ci.yml: has --cache"]);
+  });
+
+  it("does not take a word of a comment or of the name of a step for a command", () => {
+    const text = workflow
+      .replace(
+        "      - run: pnpm lint\n",
+        "      # pnpm test --force, TURBO_TOKEN, --cache=remote:\n      - run: pnpm lint\n",
+      )
+      .replace(
+        "- name: Build image\n",
+        "- name: Build image without --force or TURBO_CACHE\n",
+      );
+    expect(text).not.toBe(workflow);
+
+    expect(violations(text)).toEqual([]);
   });
 
   it("refuses the cache step replaced by actions/cache/restore", () => {
@@ -662,6 +679,7 @@ describe("ci.yml turbo cache", () => {
     ["TURBO_FORCE: true", "TURBO_FORCE"],
     ["TURBO_CACHE: local:r", "TURBO_CACHE"],
     ["TURBO_CACHE_DIR: /tmp/t", "TURBO_CACHE"],
+    ["TOKEN: ${{ secrets.TURBO_TOKEN }}", "TURBO_TOKEN"],
   ])("refuses %s in the env of the workflow", (variable, word) => {
     const text = workflow.replace(
       "permissions:\n",
@@ -669,32 +687,123 @@ describe("ci.yml turbo cache", () => {
     );
     expect(violations(text)).toContainEqual(`ci.yml: has ${word}`);
   });
+
+  it.each([
+    [
+      "the with of an action",
+      "      - run: pnpm test\n",
+      "      - run: pnpm test\n      - uses: docker/build-push-action@v6\n        with:\n          build-args: TURBO_TOKEN=x\n",
+      "TURBO_TOKEN",
+    ],
+    [
+      "a condition of a step",
+      "      - run: pnpm test\n",
+      "      - run: pnpm test\n        if: ${{ env.TURBO_TEAM != '' }}\n",
+      "TURBO_TEAM",
+    ],
+    [
+      "the env of a container of the job",
+      "    runs-on: ubuntu-latest\n",
+      "    runs-on: ubuntu-latest\n    container:\n      image: node:22\n      env:\n        TURBO_API: https://cache.example\n",
+      "TURBO_API",
+    ],
+    [
+      "the options of a service",
+      "      postgres:\n",
+      "      cache:\n        image: x\n        options: --env TURBO_REMOTE_ONLY=true\n      postgres:\n",
+      "TURBO_REMOTE_",
+    ],
+    [
+      "the inputs of a trigger",
+      "  pull_request:\n",
+      "  pull_request:\n  workflow_dispatch:\n    inputs:\n      TURBO_TOKEN:\n        type: string\n",
+      "TURBO_TOKEN",
+    ],
+    [
+      "a name: of the env of a step",
+      "      - run: pnpm test\n",
+      "      - run: pnpm test\n        env:\n          name: ${{ secrets.TURBO_TOKEN }}\n",
+      "TURBO_TOKEN",
+    ],
+    [
+      "a name: of the with of an action",
+      "      - run: pnpm test\n",
+      "      - run: pnpm test\n      - uses: docker/build-push-action@v6\n        with:\n          name: ${{ secrets.TURBO_TOKEN }}\n",
+      "TURBO_TOKEN",
+    ],
+    [
+      "a name: of the env of the job",
+      "    runs-on: ubuntu-latest\n",
+      "    runs-on: ubuntu-latest\n    env:\n      name: ${{ secrets.TURBO_TEAM }}\n",
+      "TURBO_TEAM",
+    ],
+    [
+      "a name: of the env of a container of the job",
+      "    runs-on: ubuntu-latest\n",
+      "    runs-on: ubuntu-latest\n    container:\n      image: node:22\n      env:\n        name: ${{ secrets.TURBO_API }}\n",
+      "TURBO_API",
+    ],
+  ])("refuses a word of NO_REMOTE in %s", (_where, from, to, word) => {
+    expect(replaced(from, to)).toContainEqual(`ci.yml: has ${word}`);
+  });
+
+  it("reads a name: of the secrets handed to a reusable workflow", () => {
+    const words = workflowWordsOf({
+      jobs: {
+        reuse: {
+          uses: "./.github/workflows/other.yml",
+          secrets: { name: "${{ secrets.TURBO_TOKEN }}" },
+        },
+      },
+    });
+
+    expect(words).toContain("TURBO_TOKEN");
+  });
+
+  it("leaves out the name: of the workflow, of a job and of a step only", () => {
+    const words = workflowWordsOf({
+      name: "TURBO_TOKEN",
+      jobs: {
+        ci: {
+          name: "TURBO_TEAM",
+          steps: [{ name: "TURBO_API", run: "pnpm test" }],
+        },
+      },
+    });
+
+    expect(words).not.toContain("TURBO_TOKEN");
+    expect(words).not.toContain("TURBO_TEAM");
+    expect(words).not.toContain("TURBO_API");
+    expect(words).toContain("pnpm");
+  });
+
+  it("refuses TURBO_CACHE in the env of a step", () => {
+    expect(
+      replaced(
+        "      - run: pnpm test\n",
+        "      - run: pnpm test\n        env: { TURBO_CACHE: 'local:r' }\n",
+      ),
+    ).toEqual(["ci.yml: has TURBO_CACHE"]);
+  });
 });
 
 describe("ci.yml conditions", () => {
   it.each(["ci", "docker-build"])(
     "runs job %s and every step of it unconditionally",
     (job) => {
-      const header = blockOf(workflow, `  ${job}:`)
-        .split("\n")
-        .filter((line) => /^ {4}if:/.test(line));
-      const steps = stepsOf(job);
+      const parsed = jobIn(workflow, job);
 
-      expect(header).toEqual([]);
-      expect(steps.length).toBeGreaterThan(0);
-      expect(steps.filter((step) => step.if !== undefined)).toEqual([]);
+      expect(parsed.if).toBeUndefined();
+      expect(parsed.steps.length).toBeGreaterThan(0);
+      expect(parsed.steps.filter((step) => step.if !== undefined)).toEqual([]);
     },
   );
 });
 
-/** The image matrix of job docker-build, sorted. */
+/** The image matrix of job docker-build, sorted; a matrix that is not a list of names throws. */
 function matrixOf(text: string): string[] {
-  const listed = /matrix:\s*\n\s+image:\s*\[([^\]]*)\]/.exec(text)?.[1];
-  return (listed ?? "")
-    .split(",")
-    .map((name) => name.trim())
-    .filter((name) => name !== "")
-    .sort();
+  const matrix = jobIn(text, "docker-build").strategy?.matrix ?? {};
+  return z.array(z.string()).parse(matrix.image).sort();
 }
 
 /**
@@ -710,20 +819,20 @@ function matrixOf(text: string): string[] {
 function dockerBuildViolations(text: string): string[] {
   const steps = stepsIn(text, "docker-build");
   const target = "${{ matrix.image }}";
-  const build = steps.findIndex((step) =>
-    /uses: docker\/build-push-action@v6$/m.test(step.text),
+  const build = steps.findIndex(
+    (step) => step.uses === "docker/build-push-action@v6",
   );
   if (build === -1) {
     return ["docker-build: no docker/build-push-action@v6 step"];
   }
   const problems: string[] = [];
-  const buildx = steps.findIndex((step) =>
-    /uses: docker\/setup-buildx-action@v3$/m.test(step.text),
+  const buildx = steps.findIndex(
+    (step) => step.uses === "docker/setup-buildx-action@v3",
   );
   const setup = steps.findIndex(
     (step) =>
-      step.text.includes("actions/setup-node") &&
-      /node-version: 22\b/.test(step.text),
+      step.uses?.startsWith("actions/setup-node@") === true &&
+      step.with?.["node-version"] === 22,
   );
   if (buildx === -1 || buildx > build) {
     problems.push("docker-build: buildx is not set up before the build");
@@ -731,7 +840,7 @@ function dockerBuildViolations(text: string): string[] {
   if (setup === -1 || setup > build) {
     problems.push("docker-build: setup-node does not come before the build");
   }
-  const text_ = steps[build]?.text ?? "";
+  const options = steps[build]?.with ?? {};
   const expected: Record<string, string> = {
     context: ".",
     file: APP_DOCKERFILE,
@@ -742,12 +851,12 @@ function dockerBuildViolations(text: string): string[] {
     "cache-to": `type=gha,mode=max,scope=${target},ignore-error=true`,
   };
   for (const [key, value] of Object.entries(expected)) {
-    const found = stepField(text_, key);
+    const found = options[key] === undefined ? undefined : String(options[key]);
     if (found !== value) {
       problems.push(`docker-build: ${key} is ${found}, not ${value}`);
     }
   }
-  if (/^\s+build-args:/m.test(text_)) {
+  if ("build-args" in options) {
     problems.push("docker-build: the build passes build-args");
   }
   return problems;
@@ -808,7 +917,7 @@ describe("ci.yml image matrix", () => {
       "      - uses: actions/setup-node@v4\n        with: { node-version: 22 }\n";
     const buildx = "      - uses: docker/setup-buildx-action@v3\n";
     const probe = "      # An image whose install put nothing in place";
-    expect(blockOf(workflow, "  docker-build:")).toContain(`${setup}${buildx}`);
+    expect(workflow).toContain(`${setup}${buildx}`);
     const moved = workflow
       .replace(`${setup}${buildx}`, buildx)
       .replace(probe, `${setup}${probe}`);
@@ -820,27 +929,46 @@ describe("ci.yml image matrix", () => {
 });
 
 /** The text of the Compose file of Postgres and Redis. */
-const compose = read("infra/docker-compose.yml").replace(/\r\n/g, "\n");
+let compose = "";
+beforeAll(() => {
+  compose = read("infra/docker-compose.yml").replace(/\r\n/g, "\n");
+});
 
-/** The block of a service of a Compose text. */
-const composeService = (text: string, service: string): string =>
-  blockOf(blockOf(text, "services:"), `  ${service}:`);
+/** The services of a Compose text, by the keys read here. */
+const ComposeSchema = z.object({
+  services: z.record(
+    z
+      .object({
+        image: z.string().optional(),
+        healthcheck: z
+          .object({ test: z.array(z.string()) })
+          .passthrough()
+          .optional(),
+      })
+      .passthrough(),
+  ),
+});
+
+/** A service of a Compose text. */
+function composeService(text: string, service: string) {
+  const found = ComposeSchema.parse(parseRepoYaml(text, "docker-compose.yml"))
+    .services[service];
+  if (found === undefined) throw new Error(`no service ${service}`);
+  return found;
+}
 
 /** The image of a service of a Compose text. */
 function composeImage(text: string, service: string): string {
-  const image = /^ {4}image: (\S+)$/m.exec(composeService(text, service))?.[1];
+  const image = composeService(text, service).image;
   if (image === undefined) throw new Error(`no image of ${service}`);
   return image;
 }
 
 /** The command of the `CMD-SHELL` healthcheck of a service of a Compose text. */
 function composeHealthShell(text: string, service: string): string {
-  const healthcheck = blockOf(
-    composeService(text, service),
-    "    healthcheck:",
-  );
-  const command = /^ {6}test: \["CMD-SHELL", "(.*)"\]$/m.exec(healthcheck)?.[1];
-  if (command === undefined) {
+  const [kind, command, ...rest] =
+    composeService(text, service).healthcheck?.test ?? [];
+  if (kind !== "CMD-SHELL" || command === undefined || rest.length > 0) {
     throw new Error(`no CMD-SHELL healthcheck of ${service}`);
   }
   return command;
@@ -855,17 +983,17 @@ function composeHealthShell(text: string, service: string): string {
  */
 function serviceViolations(text: string, composeText: string): string[] {
   const problems: string[] = [];
-  const services = blockOf(blockOf(text, "  ci:"), "    services:");
+  const services = jobIn(text, "ci").services ?? {};
   for (const name of ["postgres", "redis"]) {
-    const block = blockOf(services, `      ${name}:`);
-    const image = /^ {8}image: (\S+)$/m.exec(block)?.[1];
+    const image = services[name]?.image;
     const expected = composeImage(composeText, name);
     if (image !== expected) {
       problems.push(`ci: ${name} runs ${image}, Compose runs ${expected}`);
     }
   }
-  const redis = blockOf(services, "      redis:");
-  const health = /--health-cmd "(.*)"$/m.exec(redis)?.[1];
+  const health = /--health-cmd "(.*?)"/.exec(
+    services.redis?.options ?? "",
+  )?.[1];
   const expected = composeHealthShell(composeText, "redis");
   if (health !== expected) {
     problems.push(`ci: redis health is ${health}, Compose checks ${expected}`);
@@ -907,20 +1035,20 @@ describe("ci.yml services against Compose", () => {
 
 /** The step of job ci that installs the pinned Compose. */
 function isComposeInstall(step: Step): boolean {
-  return step.text.includes("docker-compose-linux-x86_64");
+  return step.run?.includes("docker-compose-linux-x86_64") === true;
 }
 
 /**
- * How the step that installs Compose would let an unchecked binary in, one
- * line each; empty when clean: the script starts with `set -euo pipefail`,
- * downloads the binary to a file, checks the checksum of that very file and
- * installs that file - in that order.
+ * How the script of the step that installs Compose would let an unchecked
+ * binary in, one line each; empty when clean: it starts with
+ * `set -euo pipefail`, downloads the binary to a file, checks the checksum of
+ * that very file and installs that file - in that order.
  */
 function composeInstallViolations(text: string): string[] {
   const problems: string[] = [];
-  const lines = text.split("\n").map((line) => line.trim());
-  const script = lines
-    .slice(lines.indexOf("run: |") + 1)
+  const script = text
+    .split("\n")
+    .map((line) => line.trim())
     .filter((line) => line !== "");
   if (script[0] !== "set -euo pipefail") {
     problems.push("compose install: does not start with set -euo pipefail");
@@ -962,7 +1090,10 @@ function composeInstallViolations(text: string): string[] {
 }
 
 describe("ci.yml Compose install", () => {
-  const text = stepsOf("ci").find(isComposeInstall)?.text ?? "";
+  let text = "";
+  beforeAll(() => {
+    text = stepsOf("ci").find(isComposeInstall)?.run ?? "";
+  });
   const SUM =
     "db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576";
 
@@ -1016,10 +1147,10 @@ function migrateStepViolations(steps: Step[]): string[] {
   if (!/^tsx \S+$/.test(script ?? "")) {
     problems.push(`packages/db: db:migrate is ${script}, not tsx <entry>`);
   }
-  if (!/^ {6}- working-directory: packages\/db$/m.test(step.text)) {
+  if (step["working-directory"] !== "packages/db") {
     problems.push("ci: the migration does not run from packages/db");
   }
-  if (/^ {6}[- ] env:/m.test(step.text)) {
+  if (step.env !== undefined) {
     problems.push("ci: the migration step sets env of its own");
   }
   if (step.run !== `node --env-file=../../.env.test --import ${script}`) {
@@ -1029,10 +1160,9 @@ function migrateStepViolations(steps: Step[]): string[] {
 }
 
 describe("ci.yml migration step", () => {
-  const step = stepsOf("ci").find(isMigrate)?.text ?? "";
   const broken = (from: string, to: string) => {
-    expect(step).toContain(from);
-    return stepsIn(workflow.replace(step, step.replace(from, to)), "ci");
+    expect(workflow).toContain(from);
+    return stepsIn(workflow.replace(from, to), "ci");
   };
 
   it.each([

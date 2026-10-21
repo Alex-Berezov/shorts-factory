@@ -185,12 +185,27 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
   пакеты - из `@sf/config/paths`; перекрёстных импортов нет. Файлы репозитория корневые тесты
   читают через `test/repo-files.ts` - только те, что входят в хеш: отслеживаемые git и
   неотслеживаемые, но не игнорируемые (`git ls-files --cached --others --exclude-standard`,
-  `repoFilesUnder`); перечисляют - тоже через него, а не `readdirSync` (пока исключение -
-  `workspaceDirs` из `scripts/lib/manifest.mjs`: пакеты по `pnpm-workspace.yaml` через `readdirSync`, долг E0-12N
-  в `docs/TECH_DEBT.md`). Игнорируемый файл
+  `repoFilesUnder`); перечисляют - тоже через него, а не `readdirSync`. Выборка одна:
+  `trackedFiles` из `scripts/lib/files.mjs` (её же берут гейты `scripts/` и `workspaceDirs`
+  из `scripts/lib/manifest.mjs`); `test/repo-files.ts` - обёртка над ней с мемо и Zod. Замок -
+  `test/enumeration.ts`: в `test/` его держит `test/repo-files.test.ts` (исключение с причиной -
+  `DISK_CHECKS`), в `scripts/` - `test/scripts-files.test.ts` (`SCRIPT_DISK_READS`,
+  `SCRIPT_DISK_CHECKS`). Игнорируемый файл
   (`coverage/`, сборка) в хеш `//#test:repo` не попадает, и чтение его переиграло бы старый
   результат из кэша. Ответ «путь исчез» у корневых скриптов один - `isGone` из
-  `scripts/lib/files.mjs` (только `ENOENT`; там же `readIfFile`).
+  `scripts/lib/files.mjs` (только `ENOENT`; там же `isNotFile` - ещё и `ENOTDIR` - и
+  `readIfFile`). Корневые тесты, которые гоняют git на своём каталоге, берут дерево из
+  `test/git-fixture.ts` (`gitScratch`: без `GIT_DIR`/`GIT_INDEX_FILE` и с потолком
+  `GIT_CEILING_DIRECTORIES` - родителем своего каталога). YAML корневые скрипты и тесты
+  читают одним разбором - `readYaml` из `scripts/lib/yaml-doc.mjs` (fail-closed: один
+  документ, без ошибок и предупреждений парсера); тесты - через `parseRepoYaml`/`readRepoYaml`
+  из `test/repo-files.ts` (рядом с `readRepoJson`), голый `parse` из `yaml` в тестах не
+  зовётся; `ci.yml` - через `test/workflow.ts` на том же `parseRepoYaml`. Исключение -
+  `workspaceGlobs` из `scripts/lib/manifest.mjs`: `pnpm-workspace.yaml` он разбирает
+  построчно (строка в `docs/TECH_DEBT.md`). Что исходник пакета называет за пределами
+  пакета (`repoRoot`, путь вверх от файла) - синтаксическим деревом `test/root-reads.ts`
+  (`rootReads`; его берут правила входов turbo в `test/turbo-inputs.test.ts`), импорты -
+  `test/imports.ts`.
 - Типы `scripts/*.mjs` - JSDoc под `checkJs` корневого `tsconfig.json` (`pnpm typecheck:repo`),
   без `.d.mts`; скрипты остаются запускаемыми чистым `node`.
 - Входы turbo: корневой `test.inputs` - только `$TURBO_DEFAULT$` и `vitest.preset.ts`; пакет,

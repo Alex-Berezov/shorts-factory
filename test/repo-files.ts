@@ -1,8 +1,10 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { trackedFiles } from "../scripts/lib/files.mjs";
+import { workspaceDirs } from "../scripts/lib/manifest.mjs";
 import { repoRoot } from "../scripts/lib/paths.mjs";
+import { readYaml } from "../scripts/lib/yaml-doc.mjs";
 
 /**
  * Files of the repository for the tests of the root project, by their path
@@ -22,6 +24,48 @@ export function readRepoFile(path: string): string {
 /** A JSON file of the repository, parsed; its shape is the caller's to check. */
 export function readRepoJson(path: string): unknown {
   return JSON.parse(readRepoFile(path));
+}
+
+/**
+ * A YAML text as plain values, by the one fail-closed reading of the root
+ * project (`readYaml` of `scripts/lib/yaml-doc.mjs`); anything the parser did
+ * not take cleanly throws with its reason, named after `name`. `merge`
+ * expands the `<<` key, as Compose does.
+ */
+export function parseRepoYaml(
+  text: string,
+  name: string,
+  { merge = false }: { merge?: boolean } = {},
+): unknown {
+  const reading = readYaml(text, { merge });
+  switch (reading.kind) {
+    case "value":
+      return reading.value;
+    case "empty":
+      throw new Error(`${name} is not read cleanly: no YAML document`);
+    case "documents":
+      throw new Error(
+        `${name} is not read cleanly: ${reading.count} YAML documents`,
+      );
+    case "notes":
+      throw new Error(
+        `${name} is not read cleanly: ${reading.notes
+          .map((note) => `${note.code}: ${note.message}`)
+          .join("; ")}`,
+      );
+    case "aliases":
+      throw new Error(`${name} is not read cleanly: aliases past the limit`);
+    case "unbuilt":
+      throw new Error(`${name} is not read cleanly: ${reading.message}`);
+  }
+}
+
+/** A YAML file of the repository, read by `parseRepoYaml`; its shape is the caller's to check. */
+export function readRepoYaml(
+  path: string,
+  options: { merge?: boolean } = {},
+): unknown {
+  return parseRepoYaml(readRepoFile(path), path, options);
 }
 
 /**
@@ -72,6 +116,55 @@ export function readTurbo(dir: string): Turbo {
   return TurboSchema.parse(readRepoJson(`${dir}/turbo.json`));
 }
 
+/** What `trackedFiles` gives, checked: paths from the root, `/` between parts. */
+const ListingSchema = z.array(z.string().min(1));
+
+/** The files of the repository the hash covers, from one listing. */
+export interface RepoListing {
+  /**
+   * The files under `dir` (`apps/api`; `.` for the whole tree), as
+   * `/`-separated paths from the root: `apps/api` does not take in
+   * `apps/api2`.
+   */
+  under(dir: string): string[];
+  /** Whether `path` (from the root, `/`-separated) is a file of the listing. */
+  exists(path: string): boolean;
+}
+
+/**
+ * A listing that asks `list` for the files once, on the first question, and
+ * answers every later one from that answer. A `list` that throws (git cannot
+ * run, the tree is no repository) throws to the caller of that question - a
+ * red case with its reason, not a failure to collect the test file - and is
+ * asked again next time.
+ */
+export function repoListing(list: () => unknown): RepoListing {
+  let files: readonly string[] | undefined;
+  let known: ReadonlySet<string> | undefined;
+  const all = (): readonly string[] => {
+    files ??= ListingSchema.parse(list());
+    return files;
+  };
+  return {
+    under(dir) {
+      if (dir === ".") return [...all()];
+      const prefix = `${dir.replace(/\/+$/, "")}/`;
+      return all().filter((path) => path.startsWith(prefix));
+    },
+    exists(path) {
+      known ??= new Set(all());
+      return known.has(path);
+    },
+  };
+}
+
+/**
+ * The listing of this repository: one `git ls-files` (`trackedFiles` of
+ * `scripts/lib/files.mjs`, the one the gates list with) per test file that
+ * asks, none for one that does not.
+ */
+const repository = repoListing(() => trackedFiles(repoRoot));
+
 /**
  * The files under `dir` that turbo hashes - tracked by git, or untracked and
  * not ignored - as `/`-separated paths from the root. Ignored files
@@ -79,15 +172,23 @@ export function readTurbo(dir: string): Turbo {
  * test learns from them is not in any hash.
  */
 export function repoFilesUnder(dir: string): string[] {
-  const listed = spawnSync(
-    "git",
-    ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", dir],
-    { cwd: repoRoot, encoding: "utf8" },
-  );
-  if (listed.status !== 0) {
-    throw new Error(`git ls-files -- ${dir} failed: ${listed.stderr}`);
-  }
-  return listed.stdout
-    .split("\0")
-    .filter((path) => path !== "" && existsSync(join(repoRoot, path)));
+  return repository.under(dir);
+}
+
+/**
+ * Whether `path` (from the root, `/`-separated) is a file the hash covers -
+ * the question a test of the root project asks instead of `existsSync`,
+ * which also answers for an ignored file.
+ */
+export function repoFileExists(path: string): boolean {
+  return repository.exists(path);
+}
+
+/**
+ * The package directories of the workspace (`workspaceDirs` of
+ * `scripts/lib/manifest.mjs`), from the listing above rather than a second
+ * `git ls-files`.
+ */
+export function repoWorkspaceDirs(): string[] {
+  return workspaceDirs(repoRoot, repository.under("."));
 }
