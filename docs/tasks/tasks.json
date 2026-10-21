@@ -1850,8 +1850,9 @@
       "E0-12D"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-19"
+    "status": "in_progress",
+    "added_at": "2026-10-19",
+    "started_at": "2026-10-21"
   },
   {
     "id": "E0-12M",
@@ -1952,5 +1953,33 @@
     "doc": "TECH_DEBT.md",
     "status": "todo",
     "added_at": "2026-10-20"
+  },
+  {
+    "id": "E0-12T",
+    "epic": "E0",
+    "title": "harness-selftest: int-конфиги через vitest/node и test/imports.ts, полнота дерева пробы, снимок игнорируемых, хвосты Р9 E0-12D",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13",
+      "E0-12L"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-21"
+  },
+  {
+    "id": "E0-12U",
+    "epic": "E0",
+    "title": "harness-selftest: пробы гейтов в selftest-gates.js, разрез раздела гейтов",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-13",
+      "E0-12T"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-21"
   }
 ]

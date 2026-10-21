@@ -33,15 +33,21 @@ const ALLOWED_MODELS = new Set(['opus', 'sonnet', 'haiku', 'fable', 'inherit']);
 const HOOK_FILES = [
   'lib.js', 'diff-hash.js', 'standards.js', 'commit-gate.js',
   'answer-length.js', 'report-honesty.js', 'remind-format.js',
-  'gates.js',
+  'gates.js', 'selftest-graph.js',
 ];
 
 const results = [];
 function ok(name, note) { results.push({ ok: true, name, note }); }
 function fail(name, note) { results.push({ ok: false, name, note }); }
+/**
+ * Результат пробы, которая не гонялась: её отказ уже назван своей красной строкой. Его отдаёт
+ * только graphGate.guard, и только когда строка «граф turbo: dry-JSON настоящего дерева» красная.
+ */
+const SKIPPED = Symbol('skipped');
 function check(name, fn) {
   try {
     const r = fn();
+    if (r === SKIPPED) return;
     if (r === false) fail(name, '');
     else if (typeof r === 'string') fail(name, r);
     else ok(name, typeof r === 'object' && r && r.note ? r.note : '');
@@ -52,6 +58,29 @@ function check(name, fn) {
 
 function run(cmd, args, opts) {
   return cp.spawnSync(cmd, args, Object.assign({ encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, opts || {}));
+}
+
+/**
+ * Модуль графа selftest-graph.js грузится только после пробы синтаксиса (`node --check`), как
+ * gates.js - после пробы require (gatesModuleSafe): синтаксическая ошибка или исключение при
+ * загрузке модуля - одна красная строка и итог сразу (код 1), а не стек вместо отчёта. Без
+ * модуля пробы гейтов build, test:int и harness-selftest не построить, поэтому прогон кончается.
+ */
+const G = loadGraphModule();
+function loadGraphModule() {
+  const file = path.join(HOOKS, 'selftest-graph.js');
+  const name = 'selftest-graph.js загружается (node --check до require)';
+  const r = run(process.execPath, ['--check', file]);
+  if (r.status !== 0) {
+    fail(name, String(r.stderr || (r.error && r.error.message) || 'код ' + r.status).split(/\r?\n/).map((s) => s.trim()).filter(Boolean).slice(0, 3).join(' | '));
+    report();
+  }
+  try {
+    return require(file);
+  } catch (e) {
+    fail(name, 'require: ' + ((e && e.message) || String(e)));
+    return report();
+  }
 }
 
 /*
@@ -80,7 +109,7 @@ const LIVE_BYTES = liveBytes();
  *     перезапись файла, который уже был `M` или `??`, меняет отпечаток, а не строку status;
  *   - игнорируемые записи (`!!`, по одной на каталог - node_modules/, .turbo/): новый файл
  *     под .gitignore status без --ignored не показывает;
- *   - ничего больше: новый файл внутри уже игнорируемого каталога снимок не видит (TECH_DEBT, E0-12L).
+ *   - ничего больше: новый файл внутри уже игнорируемого каталога снимок не видит (TECH_DEBT, E0-12T).
  * Правка руками или другой процесс в то же время даёт ту же красную строку - тогда перезапуск.
  * root - корень рабочего дерева (по умолчанию репозиторий; проба сверки берёт временный).
  * Возвращает Map<запись, отпечаток>; сбой git - исключение (его ловит проба, не верхний уровень).
@@ -405,8 +434,9 @@ function notePathsOnDisk(gate) {
  * строки: отказ одной не скрывает состояние другой.
  *   spec.runWhat / spec.skipWhat - хвосты названий строк выбора и пропуска;
  *   spec.mustRun / spec.mustSkip - файлы, на которых гейт обязан выбираться / пропускаться;
- *   spec.extra - [{ name, fn({ gate, runs }, spec) }]: fn получает пробу гейта (gateProbe)
- *     и тот же spec вторым аргументом; результат fn - как у check.
+ *   spec.extra - [{ name, fn({ gate, runs }, spec), graph }]: fn получает пробу гейта (gateProbe)
+ *     и тот же spec вторым аргументом; результат fn - как у check; graph - fn читает граф
+ *     turbo настоящего дерева (LIVE_GRAPH) и без него не гоняется.
  * id - идентификатор гейта в правилах; spec - описание пробы выше.
  */
 function checkGateSelection(id, spec) {
@@ -426,7 +456,12 @@ function checkGateSelection(id, spec) {
   // файл из .gitignore туда не попадает никогда, и выбор на нём - обещание без покрытия (E0-12K, B1).
   check('гейт ' + id + ': каждый файл выбора git показывает (не в .gitignore)', () =>
     checkIgnoreVerdict(run('git', ['check-ignore', '--', ...spec.mustRun], { cwd: ROOT }), spec.mustRun.length));
-  for (const x of spec.extra || []) check('гейт ' + id + ': ' + x.name, () => x.fn(gateProbe(id), spec));
+  // x.graph - проба графа turbo настоящего дерева: без графа она не гоняется (graphGate)
+  for (const x of spec.extra || []) {
+    const name = 'гейт ' + id + ': ' + x.name;
+    const fn = () => x.fn(gateProbe(id), spec);
+    check(name, x.graph ? LIVE_GRAPH.guard(name, fn) : fn);
+  }
 }
 
 /**
@@ -616,56 +651,527 @@ checkGateSelection('tracker', {
 });
 
 /**
- * Пакеты workspace по pnpm-workspace.yaml: { имя: { dir, pkg, transpile } }. Разбор
- * простой - строки `- 'шаблон'` под ключом packages:, шаблон - каталог или каталог/*;
- * комментарии и пустые строки пропускаются; иная строка внутри packages: и иной шаблон
- * (!, **, другие маски) - исключение, а не молчаливый пропуск.
- * transpile - transpilePackages из next.config.* пакета ([] без next.config).
- * Снимок один на прогон: пробы build, test:int и harness-selftest видят одни и те же данные;
- * стабы снимок не правят, а строят копию.
+ * Граф задач turbo (selftest-graph.js, E0-12L, решение техлида Р1 21.10.2026): один dry-JSON
+ * на прогон для проб build, test:int и harness-selftest. Своего разбора pnpm-workspace.yaml
+ * и next.config.* нет: корни, их зависимости и файлы, которые хеширует каждая задача, даёт turbo.
  */
-const NEXT_CONFIGS = ['next.config.ts', 'next.config.mts', 'next.config.js', 'next.config.mjs', 'next.config.cjs'];
-let wsSnapshot = null;
-function workspacePackages() {
-  if (!wsSnapshot) wsSnapshot = readWorkspacePackages();
-  return wsSnapshot;
+const GRAPH_SCRIPTS = ['build', 'test:int'];
+
+/**
+ * Снимок графа настоящего дерева для проб снимается один раз: snap - { dry, ws, patterns, tracked }
+ * (dry-JSON, манифесты пакетов dry, шаблоны pnpm-workspace.yaml, tracked - файлы из git ls-files,
+ * которые есть на диске, trackedFiles) - один снимок на прогон по построению. Его отказ (нет
+ * turbo, код, не JSON, манифест не читается, сбой git ls-files или stat файла...) - одна красная строка
+ * «граф turbo: dry-JSON настоящего дерева» с перечнем проб, которые без графа не гонялись, а не
+ * каскад одинаковых красных строк. guard(name, fn) - обёртка пробы графа: при отказе fn не
+ * зовётся, строка пробы не пишется (SKIPPED), name уходит в перечень. getSnap - источник снимка
+ * (liveSnap или подмена в кейсе).
+ */
+function graphGate(getSnap) {
+  const state = { snap: null, error: null, blocked: [] };
+  try {
+    state.snap = getSnap();
+  } catch (e) {
+    state.error = (e && e.message) || String(e);
+  }
+  state.guard = (name, fn) => (...args) => {
+    if (state.error === null) return fn(...args);
+    state.blocked.push(name);
+    return SKIPPED;
+  };
+  return state;
 }
-function readWorkspacePackages() {
-  const text = fs.readFileSync(path.join(ROOT, 'pnpm-workspace.yaml'), 'utf8');
-  const patterns = [];
-  let inPackages = false;
-  for (const line of text.split(/\r?\n/)) {
-    // комментарий в любой колонке и пустая строка блок packages: не закрывают
-    if (/^\s*(?:#.*)?$/.test(line)) continue;
-    if (/^\S/.test(line)) { inPackages = /^packages\s*:/.test(line); continue; }
-    if (!inPackages) continue;
-    const m = /^\s*-\s*(["']?)([^"'#]*?)\1\s*(?:#.*)?$/.exec(line);
-    if (!m) throw new Error('строка packages: в pnpm-workspace.yaml не разбирается пробой: ' + line.trim());
-    patterns.push(m[2].trim());
-  }
-  if (!patterns.length) throw new Error('в pnpm-workspace.yaml нет шаблонов packages');
-  const dirs = [];
-  for (const pat of patterns) {
-    if (/^[\w.@-]+(?:\/[\w.@-]+)*\/\*$/.test(pat)) {
-      const base = pat.slice(0, -2);
-      const abs = path.join(ROOT, base);
-      if (!fs.existsSync(abs)) continue;
-      for (const d of fs.readdirSync(abs, { withFileTypes: true })) if (d.isDirectory()) dirs.push(base + '/' + d.name);
-    } else if (/^[\w.@-]+(?:\/[\w.@-]+)*$/.test(pat)) {
-      dirs.push(pat);
-    } else {
-      throw new Error('шаблон pnpm-workspace.yaml не разбирается пробой: ' + pat);
+
+/** Строка пробы графа state (graphGate): отказ снимка с перечнем проб, которые не гонялись. */
+function graphVerdict(state) {
+  if (state.error !== null) return state.error + '; пробы графа не гонялись (' + state.blocked.length + '): ' + state.blocked.join('; ');
+  return { note: state.snap.dry.tasks.length + ' задач' };
+}
+
+// Ветки отказа selftest-graph.js - на синтетическом dry и подменённом результате spawn, без
+// turbo: каждый кейс ждёт точный текст отказа, и ветка, заменённая на пропуск (`return []`,
+// `continue`), краснит свой кейс (E0-12L, L-020). Кейсы spawn идут на стаб-корне FIXTURE со
+// своими turbo и @turbo/<os>-<arch>, а не на node_modules репозитория: свежий клон без
+// pnpm install краснит одну строку «dry-JSON настоящего дерева», а не каждый кейс.
+{
+  const refusedWith = (name, fn, want) => check('граф turbo: ' + name, () => {
+    try {
+      fn();
+    } catch (e) {
+      const got = (e && e.message) || String(e);
+      return got === want || 'ожидалось «' + want + '», получено «' + got + '»';
     }
+    return 'отказа нет, ожидалось «' + want + '»';
+  });
+  const what = 'turbo run build --dry=json';
+  const withTempRoot = (files, fn) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-turbo-'));
+    try {
+      for (const [rel, body] of Object.entries(files)) {
+        fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+        fs.writeFileSync(path.join(dir, rel), body);
+      }
+      return fn(dir);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  // стаб-корень: обёртка turbo и бинари двух платформ (linux-64 без расширения, windows-64 - .exe)
+  const FIXTURE = {
+    'node_modules/turbo/package.json': '{"name":"turbo"}',
+    'node_modules/@turbo/linux-64/package.json': '{"name":"@turbo/linux-64"}',
+    'node_modules/@turbo/linux-64/bin/turbo': '',
+    'node_modules/@turbo/windows-64/package.json': '{"name":"@turbo/windows-64"}',
+    'node_modules/@turbo/windows-64/bin/turbo.exe': '',
+  };
+  const onFixture = (opts) => withTempRoot(FIXTURE, (root) => G.turboDry(['build'], Object.assign({ root, platform: 'linux', arch: 'x64' }, opts)));
+  const spawned = (result) => () => onFixture({ spawn: () => result });
+  // dry-JSON, который разбирается: ветка кода/сигнала, снятая целиком, даёт «отказа нет», а не
+  // отказ соседней ветки (L-020)
+  const EMPTY_DRY = '{"tasks":[],"globalCacheInputs":{"files":{}}}';
+  refusedWith('нет пакета turbo - отказ «сначала pnpm install»', () => withTempRoot({}, (root) => G.turboDry(['build'], { root, platform: 'linux', arch: 'x64' })),
+    what + ': нет turbo - сначала pnpm install');
+  refusedWith('нет пакета платформы - отказ с его именем', () => withTempRoot({ 'node_modules/turbo/package.json': '{"name":"turbo"}' }, (root) => G.turboDry(['build'], { root, platform: 'win32', arch: 'x64' })),
+    what + ': нет @turbo/windows-64 - сначала pnpm install');
+  // require.resolve поднимается по предкам корня: turbo из node_modules каталога выше корня
+  // (глобальный, соседний клон) - чужой, отказ «нет turbo», как и без пакета
+  const onRepoBelow = (files) => withTempRoot(Object.assign({ 'repo/package.json': '{}' }, files), (dir) => G.turboDry(['build'], {
+    root: path.join(dir, 'repo'), platform: 'linux', arch: 'x64', spawn: () => ({ pid: 4242, status: 0, signal: null, stdout: EMPTY_DRY, stderr: '' }),
+  }));
+  refusedWith('turbo только в node_modules выше корня - отказ «нет turbo»', () => onRepoBelow(FIXTURE), what + ': нет turbo - сначала pnpm install');
+  refusedWith('пакет платформы только в node_modules выше корня - отказ с его именем', () => onRepoBelow({
+    'repo/node_modules/turbo/package.json': '{"name":"turbo"}',
+    'node_modules/@turbo/linux-64/package.json': '{"name":"@turbo/linux-64"}',
+    'node_modules/@turbo/linux-64/bin/turbo': '',
+  }), what + ': нет @turbo/linux-64 - сначала pnpm install');
+  // underNodeModules: иная ошибка realpath, чем ENOENT, - не «сначала pnpm install», а причина с кодом
+  check('граф turbo: underNodeModules - ошибка realpath node_modules не ENOENT (EACCES) пробрасывается с кодом', () => {
+    const denied = (p) => {
+      throw Object.assign(new Error('EACCES: permission denied, realpath ' + JSON.stringify(path.basename(p))), { code: 'EACCES' });
+    };
+    try {
+      G.underNodeModules(path.join(ROOT, 'node_modules', 'turbo', 'package.json'), ROOT, { realpath: denied });
+    } catch (e) {
+      const got = (e && e.code) + ': ' + ((e && e.message) || String(e));
+      const want = 'EACCES: EACCES: permission denied, realpath "node_modules"';
+      return got === want || 'ожидалось «' + want + '», получено «' + got + '»';
+    }
+    return 'исключения нет, ожидалось EACCES';
+  });
+  // node_modules корня - ссылка на каталог (junction на Windows): путь модуля и через ссылку, и
+  // реальный - под node_modules корня; без realpath одного из концов путь «вне» и отказ ложный
+  check('граф turbo: underNodeModules - node_modules корня ссылкой на каталог, путь модуля через ссылку и реальный - под ним', () => withTempRoot({
+    'store/turbo/package.json': '{"name":"turbo"}',
+    'repo/package.json': '{}',
+  }, (dir) => {
+    const repo = path.join(dir, 'repo');
+    fs.symlinkSync(path.join(dir, 'store'), path.join(repo, 'node_modules'), 'junction');
+    const got = JSON.stringify([
+      G.underNodeModules(path.join(repo, 'node_modules', 'turbo', 'package.json'), repo),
+      G.underNodeModules(path.join(dir, 'store', 'turbo', 'package.json'), repo),
+    ]);
+    return got === JSON.stringify([true, true]) || 'ожидалось [true,true] (через ссылку, реальный), получено ' + got;
+  }));
+  refusedWith('платформа без пакета turbo - отказ', () => onFixture({ platform: 'freebsd', arch: 'ia32' }),
+    what + ': нет пакета turbo для платформы freebsd-ia32 (пакеты @turbo/<os>-<arch>: windows, darwin, linux x 64, arm64)');
+  refusedWith('turbo не запустился - отказ с ошибкой запуска', spawned({ error: new Error('spawn EACCES'), pid: 0 }), what + ' не запустился: spawn EACCES');
+  refusedWith('turbo прерван после запуска (ENOBUFS) - отказ «прерван», не «не запустился»',
+    spawned({ error: Object.assign(new Error('spawnSync turbo ENOBUFS'), { code: 'ENOBUFS' }), pid: 4242, status: null, signal: 'SIGKILL', stdout: '', stderr: '' }),
+    what + ': прерван после запуска: spawnSync turbo ENOBUFS');
+  refusedWith('turbo не ответил за предел - отказ с пределом', spawned({ error: Object.assign(new Error('spawnSync turbo ETIMEDOUT'), { code: 'ETIMEDOUT' }), pid: 4242, status: null, signal: 'SIGKILL', stdout: '', stderr: '' }),
+    what + ': не ответил за ' + G.TURBO_TIMEOUT_MS / 1000 + ' с - процесс убит');
+  refusedWith('turbo вышел с кодом 1 - отказ с кодом и stderr', spawned({ pid: 4242, status: 1, signal: null, stdout: EMPTY_DRY, stderr: 'x  Missing tasks in project\n' }), what + ': код 1: x  Missing tasks in project');
+  refusedWith('turbo убит сигналом - отказ с именем сигнала', spawned({ pid: 4242, status: null, signal: 'SIGTERM', stdout: EMPTY_DRY, stderr: '' }), what + ': сигнал SIGTERM: stderr пуст');
+  const notJson = '• turbo 2.10.12';
+  let parseError = '';
+  try {
+    JSON.parse(notJson);
+  } catch (e) {
+    parseError = e.message;
   }
+  refusedWith('stdout turbo не JSON - отказ с причиной разбора', spawned({ pid: 4242, status: 0, signal: null, stdout: notJson, stderr: '' }), what + ': stdout не JSON (' + parseError + '): "• turbo 2.10.12"');
+  refusedWith('в dry-JSON нет tasks - отказ', spawned({ pid: 4242, status: 0, signal: null, stdout: '{"packages":[]}', stderr: '' }), what + ': в выводе нет массива tasks - форма dry-JSON turbo неизвестна');
+  // что получает spawn: бинарь платформы (не обёртка bin/turbo через node), аргументы, предел,
+  // сигнал предела и окружение без TURBO_* оболочки
+  const spawnSeen = (platform) => withTempRoot(FIXTURE, (root) => {
+    let seen = null;
+    const had = Object.prototype.hasOwnProperty.call(process.env, 'TURBO_FORCE');
+    const prev = process.env.TURBO_FORCE;
+    process.env.TURBO_FORCE = '1';
+    try {
+      G.turboDry(['build'], { root, platform, arch: 'x64', spawn: (cmd, args, opts) => { seen = { cmd, args, opts }; return { pid: 4242, status: 0, signal: null, stdout: EMPTY_DRY, stderr: '' }; } });
+    } finally {
+      if (had) process.env.TURBO_FORCE = prev;
+      else delete process.env.TURBO_FORCE;
+    }
+    const bins = { linux: 'node_modules/@turbo/linux-64/bin/turbo', win32: 'node_modules/@turbo/windows-64/bin/turbo.exe' };
+    return { seen, bin: fs.realpathSync(path.join(root, bins[platform])) };
+  });
+  for (const platform of ['linux', 'win32']) {
+    check('граф turbo: ' + platform + ' - spawn зовёт бинарь пакета платформы напрямую', () => {
+      const { seen, bin } = spawnSeen(platform);
+      if (!seen) return 'spawn не вызван';
+      if (seen.cmd !== bin) return 'spawn зовёт ' + seen.cmd + ', ожидался бинарь ' + bin;
+      return JSON.stringify(seen.args) === JSON.stringify(['run', 'build', '--dry=json']) || 'аргументы spawn: ' + JSON.stringify(seen.args);
+    });
+  }
+  check('граф turbo: turbo зовётся с пределом TURBO_TIMEOUT_MS', () => {
+    const { seen } = spawnSeen('linux');
+    return seen.opts.timeout === G.TURBO_TIMEOUT_MS || 'предел spawn: ' + seen.opts.timeout + ', ожидался ' + G.TURBO_TIMEOUT_MS;
+  });
+  check('граф turbo: по пределу turbo убивается SIGKILL', () => {
+    const { seen } = spawnSeen('linux');
+    return seen.opts.killSignal === 'SIGKILL' || 'сигнал предела spawn: ' + seen.opts.killSignal + ', ожидался SIGKILL';
+  });
+  check('граф turbo: turbo зовётся без TURBO_* оболочки, с выключенной телеметрией', () => {
+    const { seen } = spawnSeen('linux');
+    const leaked = Object.keys(seen.opts.env || {}).filter((k) => /^TURBO_/i.test(k) && k !== 'TURBO_TELEMETRY_DISABLED');
+    if (leaked.length) return 'в окружение turbo ушли ' + leaked.join(', ');
+    return seen.opts.env.TURBO_TELEMETRY_DISABLED === '1' || 'телеметрия turbo не выключена';
+  });
+  check('граф turbo: turboEnv снимает TURBO_* в любом регистре и выключает телеметрию, исходное окружение не правит', () => {
+    const env = { PATH: 'p', TURBO_FORCE: '1', turbo_env_mode: 'loose', TURBO_TELEMETRY_DISABLED: '0' };
+    const got = JSON.stringify(G.turboEnv(env));
+    const want = JSON.stringify({ PATH: 'p', TURBO_TELEMETRY_DISABLED: '1' });
+    if (env.TURBO_FORCE !== '1') return 'turboEnv правит исходное окружение';
+    return got === want || 'ожидалось ' + want + ', получено ' + got;
+  });
+
+  // dry из двух пакетов и постороннего: a#build (next build) зависит от b#build, c#build вне графа
+  const task = (id, extra) => Object.assign({
+    taskId: id,
+    directory: 'packages\\' + id.slice(4, id.indexOf('#')),
+    command: G.NONEXISTENT,
+    dependencies: [],
+    inputs: { 'src/index.ts': 'h' },
+    resolvedTaskDefinition: { inputs: [] },
+  }, extra);
+  const sample = () => ({
+    globalCacheInputs: { files: { 'tsconfig.base.json': 'h', '.gitattributes': 'h' } },
+    tasks: [
+      task('@sf/a#build', { command: 'next build', dependencies: ['@sf/b#build'], inputs: { 'src/page.tsx': 'h', '../../vitest.preset.ts': 'h' } }),
+      task('@sf/b#build'),
+      task('@sf/c#build'),
+    ],
+  });
+  const withTask = (id, patch) => {
+    const dry = sample();
+    dry.tasks = dry.tasks.map((t) => (t.taskId === id ? patch(Object.assign({}, t)) : t));
+    return dry;
+  };
+  const withInput = (input) => G.taskGraph(withTask('@sf/b#build', (t) => Object.assign(t, { inputs: { [input]: 'h' } })), 'build');
+  check('граф turbo: граф - замыкание dependencies от корней, посторонний пакет вне графа, входы от корня', () => {
+    const g = G.taskGraph(sample(), 'build');
+    const got = JSON.stringify(g.nodes.map((n) => [n.name, n.pkg, n.root, n.reads.map((r) => r.file + ' (' + r.why + ')')]));
+    const want = JSON.stringify([
+      ['@sf/a#build', '@sf/a', true, ['packages/a/src/page.tsx (корень @sf/a#build)', 'vitest.preset.ts (корень @sf/a#build)']],
+      ['@sf/b#build', '@sf/b', false, ['packages/b/src/index.ts (узел @sf/b#build графа @sf/a#build)']],
+    ]);
+    return got === want || 'ожидалось ' + want + ', получено ' + got;
+  });
+  refusedWith('зависимость вне dry-JSON - отказ', () => G.taskGraph(withTask('@sf/b#build', (t) => Object.assign(t, { dependencies: ['@sf/x#build'] })), 'build'),
+    'зависимость @sf/x#build задачи @sf/b#build вне dry-JSON - граф неполон');
+  refusedWith('вход вне корня репозитория - отказ', () => withInput('../../../x.ts'), 'вход ../../../x.ts задачи @sf/b#build вне корня репозитория');
+  refusedWith('вход ровно в родителя корня (..) - отказ', () => withInput('../../..'), 'вход ../../.. задачи @sf/b#build вне корня репозитория');
+  refusedWith('абсолютный вход задачи пакета - отказ', () => withInput('/etc/x'), 'вход /etc/x задачи @sf/b#build - абсолютный путь, вне корня репозитория');
+  refusedWith('вход с буквой диска - отказ', () => withInput('C:\\x.ts'), 'вход C:\\x.ts задачи @sf/b#build - абсолютный путь, вне корня репозитория');
+  refusedWith('globalCacheInputs вне корня - отказ', () => G.globalReads({ tasks: [], globalCacheInputs: { files: { '../x.json': 'h' } } }),
+    'вход ../x.json задачи globalCacheInputs вне корня репозитория');
+  for (const field of ['directory', 'command', 'dependencies', 'inputs']) {
+    refusedWith('у задачи нет ' + field + ' - отказ', () => G.taskGraph(withTask('@sf/c#build', (t) => { delete t[field]; return t; }), 'build'),
+      'у задачи @sf/c#build нет ' + field + ' - форма dry-JSON turbo неизвестна');
+  }
+  refusedWith('у задачи нет resolvedTaskDefinition - отказ', () => G.taskGraph(withTask('@sf/c#build', (t) => { delete t.resolvedTaskDefinition; return t; }), 'build'),
+    'у задачи @sf/c#build нет resolvedTaskDefinition.inputs - форма dry-JSON turbo неизвестна');
+  refusedWith('resolvedTaskDefinition без inputs - отказ', () => G.taskGraph(withTask('@sf/c#build', (t) => Object.assign(t, { resolvedTaskDefinition: { cache: true } })), 'build'),
+    'у задачи @sf/c#build нет resolvedTaskDefinition.inputs - форма dry-JSON turbo неизвестна');
+  refusedWith('dependencies не массив строк - отказ', () => G.taskGraph(withTask('@sf/c#build', (t) => Object.assign(t, { dependencies: [1] })), 'build'),
+    'у задачи @sf/c#build нет dependencies - форма dry-JSON turbo неизвестна');
+  refusedWith('inputs - массив, а не объект - отказ', () => G.taskGraph(withTask('@sf/c#build', (t) => Object.assign(t, { inputs: ['src/index.ts'] })), 'build'),
+    'у задачи @sf/c#build нет inputs - форма dry-JSON turbo неизвестна');
+  refusedWith('задача без taskId - отказ', () => G.taskGraph(withTask('@sf/c#build', (t) => { delete t.taskId; return t; }), 'build'),
+    'задача dry-JSON без taskId - форма dry-JSON turbo неизвестна');
+  refusedWith('нет корней - отказ', () => G.taskGraph(withTask('@sf/a#build', (t) => Object.assign(t, { command: G.NONEXISTENT })), 'build'),
+    'в dry-JSON нет задачи build с командой - ни у одного пакета нет scripts.build');
+  // В2: inputs узла графа в turbo.json - ровно DECLARED_INPUTS его скрипта
+  refusedWith('inputs узла графа сужены в turbo.json (src/**) - отказ с taskId и перечнем',
+    () => G.taskGraph(G.stubNode(sample(), 'build', { resolvedTaskDefinition: { inputs: ['src/**'] } }), 'build'),
+    'inputs задачи ' + G.stubTaskId('build') + ' в turbo.json: ["src/**"], ожидалось [] (DECLARED_INPUTS: build без inputs: turbo хеширует все файлы пакета, видимые git, - их и читает next build)');
+  refusedWith('inputs test:int - $TURBO_ROOT$ разрешён от каталога задачи, иное - отказ',
+    () => G.taskGraph(withTask('@sf/a#build', (t) => Object.assign(t, { taskId: '@sf/a#test:int', command: 'vitest run', dependencies: [], resolvedTaskDefinition: { inputs: ['../vitest.preset.ts'] } })), 'test:int'),
+    'inputs задачи @sf/a#test:int в turbo.json: ["../vitest.preset.ts"], ожидалось ["../../vitest.preset.ts"] (DECLARED_INPUTS: файлы пакета и корневой vitest.preset.ts, который вызывает каждый vitest.int.config.ts (ADR-0011))');
+  refusedWith('скрипт узла без ожидания inputs - отказ', () => G.taskGraph(withTask('@sf/a#build', (t) => Object.assign(t, { taskId: '@sf/a#lint', dependencies: [] })), 'lint'),
+    'у задачи @sf/a#lint нет ожидания inputs в DECLARED_INPUTS selftest-graph.js');
+  // В1: граф turbo не уже манифестов (workspace:-зависимости от корней)
+  const manifests = (deps) => Object.fromEntries(Object.entries(deps).map(([name, d]) => [name, { dir: 'packages/' + name.slice(4), pkg: { name, dependencies: d.dependencies, devDependencies: d.devDependencies } }]));
+  check('граф turbo: manifestGap - workspace:-зависимости корней (и dev), которых нет в графе, по алфавиту', () => {
+    const ws = manifests({
+      '@sf/a': { dependencies: { '@sf/b': 'workspace:*', zod: '3.0.0' }, devDependencies: { '@sf/d': 'workspace:^' } },
+      '@sf/b': { dependencies: { '@sf/c': 'workspace:*' } },
+      '@sf/c': {},
+      '@sf/d': {},
+    });
+    const got = JSON.stringify([G.manifestGap(G.taskGraph(sample(), 'build'), ws), G.manifestGap(G.taskGraph(G.stubCut(sample(), '@sf/b#build'), 'build'), ws)]);
+    const want = JSON.stringify([['@sf/c', '@sf/d'], ['@sf/b', '@sf/c', '@sf/d']]);
+    return got === want || 'ожидалось ' + want + ', получено ' + got;
+  });
+  // turbo 2.10.12 строит ребро по optionalDependencies и не строит по peerDependencies (замер dry-JSON)
+  check('граф turbo: manifestGap - workspace:-пакет только в optionalDependencies без ребра краснеет с именем, только в peerDependencies - нет', () => {
+    const cut = G.taskGraph(G.stubCut(sample(), '@sf/b#build'), 'build');
+    const only = (field) => ({
+      '@sf/a': { dir: 'packages/a', pkg: { name: '@sf/a', [field]: { '@sf/b': 'workspace:*' } } },
+      '@sf/b': { dir: 'packages/b', pkg: { name: '@sf/b' } },
+    });
+    const got = JSON.stringify([G.manifestGap(cut, only('optionalDependencies')), G.manifestGap(cut, only('peerDependencies'))]);
+    const want = JSON.stringify([['@sf/b'], []]);
+    return got === want || 'ожидалось ' + want + ' (optional, peer), получено ' + got;
+  });
+  check('граф turbo: детектор разницы с манифестами - на графе из одних корней отказ, на графе с узлом молчит', () => {
+    const ws = manifests({ '@sf/a': { dependencies: { '@sf/b': 'workspace:*' } }, '@sf/b': {} });
+    const lone = withTask('@sf/a#build', (t) => Object.assign(t, { dependencies: [] }));
+    const got = manifestGapBlind(lone, 'build', G.taskGraph(lone, 'build'), ws);
+    const want = 'у графа turbo run build нет узлов кроме корней - детектор разницы с манифестами не построить';
+    if (got !== want) return 'ожидалось «' + want + '», получено ' + JSON.stringify(got);
+    const ok2 = manifestGapBlind(sample(), 'build', G.taskGraph(sample(), 'build'), ws);
+    return ok2 === null || 'на графе с узлом: ' + JSON.stringify(ok2);
+  });
+  // В2, $TURBO_DEFAULT$: файлы пакета, видимые git, - во входах узла
+  check('граф turbo: inputsGap - файл пакета, видимый git, вне входов узла; вложенный пакет и чужой каталог не считаются', () => {
+    const dry = sample();
+    dry.tasks.push(task('@sf/n#build', { directory: 'packages\\b\\nested' }));
+    const tracked = ['packages/a/src/page.tsx', 'packages/b/src/index.ts', 'packages/b/README.md', 'packages/b/nested/x.ts', 'packages/c/src/index.ts', 'vitest.preset.ts'];
+    const got = JSON.stringify([G.inputsGap(G.taskGraph(dry, 'build'), tracked, dry),
+      ((cut) => G.inputsGap(G.taskGraph(cut, 'build'), tracked, cut))(G.stubWithoutInput(dry, '@sf/a#build', 'packages/a/src/page.tsx'))]);
+    const want = JSON.stringify([['@sf/b#build: packages/b/README.md'], ['@sf/a#build: packages/a/src/page.tsx', '@sf/b#build: packages/b/README.md']]);
+    return got === want || 'ожидалось ' + want + ', получено ' + got;
+  });
+  check('граф turbo: inputsGap - больше пяти файлов: пять и «и ещё N»', () => {
+    const tracked = Array.from({ length: 7 }, (_, i) => 'packages/b/f' + i + '.ts');
+    const got = G.inputsGap(G.taskGraph(sample(), 'build'), tracked, sample());
+    const want = ['@sf/b#build: ' + tracked.slice(0, 5).join(', ') + ' и ещё 2'];
+    return JSON.stringify(got) === JSON.stringify(want) || 'получено ' + JSON.stringify(got);
+  });
+  // корневая задача: turbo пишет directory '' - каталог узла и каталоги пакетов dry - оба '.'
+  // (packageDir), файл корня вне входов виден, файлы пакетов под корнем - не его
+  check('граф turbo: inputsGap - корневая задача (directory \'\'): каталог \'.\', файлы пакетов под корнем не её', () => {
+    const dry = {
+      globalCacheInputs: { files: {} },
+      tasks: [
+        task('//#build', { directory: '', command: 'tsc -b', dependencies: ['@sf/b#build'], inputs: { 'a.ts': 'h' } }),
+        task('@sf/b#build'),
+      ],
+    };
+    const graph = G.taskGraph(dry, 'build');
+    const dirs = JSON.stringify([graph.nodes.map((n) => n.dir), Array.from(G.dryPackages(dry).values())]);
+    if (dirs !== JSON.stringify([['.', 'packages/b'], ['.', 'packages/b']])) return 'каталоги узлов и пакетов dry: ' + dirs;
+    const got = JSON.stringify(G.inputsGap(graph, ['a.ts', 'README.md', 'packages/b/src/index.ts', 'packages/b/x.ts'], dry));
+    const want = JSON.stringify(['//#build: README.md', '@sf/b#build: packages/b/x.ts']);
+    return got === want || 'ожидалось ' + want + ', получено ' + got;
+  });
+  refusedWith('стаб без входа: входа нет - отказ', () => G.stubWithoutInput(sample(), '@sf/b#build', 'packages/b/none.ts'),
+    'стаб: у задачи @sf/b#build нет входа packages/b/none.ts');
+  check('граф turbo: детектор входов - на графе без файла пакета во входах отказ, на графе с ним молчит', () => {
+    const bare = withTask('@sf/a#build', (t) => Object.assign(t, { dependencies: [], inputs: { '../../vitest.preset.ts': 'h' } }));
+    const got = inputsGapBlind(bare, 'build', G.taskGraph(bare, 'build'), []);
+    const want = 'у графа turbo run build ни у одного узла нет отслеживаемого входа своего пакета - детектор входов не построить';
+    if (got !== want) return 'ожидалось «' + want + '», получено ' + JSON.stringify(got);
+    const ok2 = inputsGapBlind(sample(), 'build', G.taskGraph(sample(), 'build'), ['packages/a/src/page.tsx', 'packages/b/src/index.ts']);
+    return ok2 === null || 'на графе с файлом пакета: ' + JSON.stringify(ok2);
+  });
+  // вход для среза берётся только из tracked: неотслеживаемый файл (`??`) turbo хеширует, а
+  // inputsGap его не сверяет - срез такого входа дал бы ложное «проба не замечает»
+  check('граф turbo: детектор входов режет только отслеживаемый вход; входы узлов не в tracked - отказ «нет отслеживаемого входа»', () => {
+    const skip = inputsGapBlind(sample(), 'build', G.taskGraph(sample(), 'build'), ['packages/b/src/index.ts']);
+    if (skip !== null) return 'вход packages/a/src/page.tsx вне tracked взят для среза: ' + JSON.stringify(skip);
+    const none = inputsGapBlind(sample(), 'build', G.taskGraph(sample(), 'build'), []);
+    const want = 'у графа turbo run build ни у одного узла нет отслеживаемого входа своего пакета - детектор входов не построить';
+    return none === want || 'входы узлов вне tracked: ожидалось «' + want + '», получено ' + JSON.stringify(none);
+  });
+  refusedWith('manifestGap: workspace:-зависимость вне пакетов dry - отказ',
+    () => G.manifestGap(G.taskGraph(sample(), 'build'), manifests({ '@sf/a': { devDependencies: { '@sf/x': 'workspace:*' } }, '@sf/b': {} })),
+    'workspace:-зависимость @sf/x пакета @sf/a (devDependencies) вне пакетов dry-JSON');
+  refusedWith('нет globalCacheInputs.files - отказ', () => G.globalReads({ tasks: [] }),
+    'в dry-JSON нет globalCacheInputs.files - форма dry-JSON turbo неизвестна');
+  check('граф turbo: globalCacheInputs - в чтениях, кроме названных в HASHED_NOT_READ с причиной', () => {
+    const g = G.globalReads(sample());
+    const got = JSON.stringify([g.reads.map((r) => r.file), g.skipped.map((r) => r.file)]);
+    const want = JSON.stringify([['tsconfig.base.json'], ['.gitattributes']]);
+    if (got !== want) return 'ожидалось ' + want + ', получено ' + got;
+    return g.skipped.every((r) => r.why) || 'у исключения нет причины';
+  });
+  check('граф turbo: graphSources - корень без ./, у пакета package.json и turbo.json, новый пакет по шаблону (и без пакетов), без повторов', () => {
+    const dry = {
+      globalCacheInputs: { files: {} },
+      tasks: [
+        task('//#lint', { directory: '.', command: 'biome check', inputs: {} }),
+        task('@sf/a#build', { directory: 'apps\\a', inputs: {} }),
+        task('@sf/a#test', { directory: 'apps\\a', inputs: {} }),
+      ],
+    };
+    const got = JSON.stringify(G.graphSources(dry, ['apps/*', './tools/**/', '!apps/x']).map((x) => x.file));
+    const want = JSON.stringify(['package.json', 'pnpm-workspace.yaml', 'turbo.json', 'apps/a/package.json', 'apps/a/turbo.json',
+      'apps/' + G.NEW_SIBLING + '/package.json', 'apps/' + G.NEW_SIBLING + '/turbo.json', 'tools/' + G.NEW_SIBLING + '/package.json', 'tools/' + G.NEW_SIBLING + '/turbo.json']);
+    return got === want || 'ожидалось ' + want + ', получено ' + got;
+  });
+  refusedWith('graphSources: шаблон с ? [ ] { } - отказ', () => G.graphSources(sample(), ['apps/{a,b}']),
+    'шаблон apps/{a,b} pnpm-workspace.yaml не разбирается пробой (знаки ? [ ] { }) - разбери руками');
+  check('граф turbo: workspacePatterns - список packages pnpm-workspace.yaml', () => {
+    const got = JSON.stringify(G.workspacePatterns('packages:\n  - "apps/*"\n  - \'tools/*\'\n'));
+    return got === JSON.stringify(['apps/*', 'tools/*']) || 'получено ' + got;
+  });
+  refusedWith('workspacePatterns: нет списка строк packages - отказ', () => G.workspacePatterns('packages:\n  - 1\n'),
+    'в pnpm-workspace.yaml нет списка строк packages - шаблоны пакетов workspace неизвестны');
+  check('граф turbo: rootTasks - задачи script с командой, без отказа на пустом списке', () => {
+    const got = JSON.stringify([G.rootTasks(sample(), 'build'), G.rootTasks(sample(), 'test:int')]);
+    const want = JSON.stringify([[{ name: '@sf/a#build', command: 'next build' }], []]);
+    return got === want || 'ожидалось ' + want + ', получено ' + got;
+  });
+  refusedWith('стаб команды задачи вне dry-JSON - отказ', () => G.stubCommand(sample(), '@sf/x#build', 'x'),
+    'стаб: задачи @sf/x#build нет в dry-JSON');
+  refusedWith('стаб без рёбер к задаче вне dry-JSON - отказ', () => G.stubCut(sample(), '@sf/x#build'),
+    'стаб: задачи @sf/x#build нет в dry-JSON');
+  refusedWith('стаб глобального входа без globalCacheInputs.files - отказ', () => G.stubGlobal({ tasks: [] }),
+    'в dry-JSON нет globalCacheInputs.files - форма dry-JSON turbo неизвестна');
+  check('граф turbo: стабы (узел, команда, рёбра, глобальный вход) меняют свою часть, снимок не правят', () => {
+    const dry = sample();
+    const before = JSON.stringify(dry);
+    const node = G.stubNode(dry, 'build');
+    const cmd = G.stubCommand(dry, '@sf/a#build', 'next build || true');
+    const cut = G.stubCut(dry, '@sf/b#build');
+    const glob = G.stubGlobal(dry);
+    if (JSON.stringify(dry) !== before) return 'стаб правит исходный dry';
+    const stubNodeOf = G.taskGraph(node, 'build').nodes.find((n) => n.name === G.stubTaskId('build'));
+    if (!stubNodeOf) return 'узла стаба нет в графе';
+    if (stubNodeOf.dir !== G.STUB_DIR || stubNodeOf.pkg !== G.STUB_PACKAGE) return 'стаб-узел не в STUB_DIR или не STUB_PACKAGE';
+    if (G.rootTasks(cmd, 'build')[0].command !== 'next build || true') return 'стаб команды не сменил команду';
+    if (G.taskGraph(cut, 'build').nodes.some((n) => n.name === '@sf/b#build')) return 'стаб без рёбер оставил узел в графе';
+    return G.globalReads(glob).reads.some((r) => r.file === G.STUB_GLOBAL) || 'стаб глобального входа не добавил STUB_GLOBAL';
+  });
+  check('граф turbo: файлы стабов - в STUB_DIR', () => {
+    const stray = G.STUB_FILES.concat(G.STUB_PATTERN).filter((f) => !f.startsWith(G.STUB_DIR + '/'));
+    return !stray.length || 'файлы стабов вне STUB_DIR: ' + stray.join(', ');
+  });
+  check('граф turbo: отказ снимка - одна строка, пробы графа не гоняются и названы в ней', () => {
+    let called = 0;
+    const g = graphGate(() => { throw new Error('boom'); });
+    const r = g.guard('проба x', () => { called++; return true; })();
+    if (r !== SKIPPED || called) return 'проба графа гонялась без графа (результат ' + String(r) + ', вызовов ' + called + ')';
+    const v = graphVerdict(g);
+    return v === 'boom; пробы графа не гонялись (1): проба x' || 'строка отказа: ' + JSON.stringify(v);
+  });
+  check('граф turbo: с графом пробы графа гоняются как есть', () => {
+    const g = graphGate(() => ({ dry: { tasks: [] } }));
+    const r = g.guard('проба x', (a) => a + 1)(1);
+    if (r !== 2 || g.blocked.length) return 'проба с графом: результат ' + r + ', не гонялись ' + g.blocked.length;
+    const v = graphVerdict(g);
+    return (typeof v === 'object' && v.note === '0 задач') || 'строка графа: ' + JSON.stringify(v);
+  });
+  check('граф turbo: check не пишет строку пробы, которая вернула SKIPPED', () => {
+    const before = results.length;
+    check('граф turbo: проба SKIPPED', () => SKIPPED);
+    const stray = results.splice(before);
+    return !stray.length || 'check записал строку пробы, которая не гонялась: ' + stray.map((x) => (x.ok ? 'ok ' : 'FAIL ') + x.name).join(', ');
+  });
+  check('граф turbo: rootsRefusal - отказ корней называет перечень и как его расширить', () => {
+    const dry = G.stubCommand(G.stubNode(sample(), 'build', { command: 'next build' }), '@sf/a#build', 'next build || true');
+    const got = rootsRefusal(dry, 'build', { roots: ['@sf/a#build'], command: 'next build' }, 'build');
+    const want = 'корни turbo run build не ровно @sf/a#build с командой next build: лишний корень ' + G.stubTaskId('build') + ', @sf/a#build: "next build || true"' +
+      ' - перечень корней - roots пробы корней гейта build (harness-selftest.js, checkGateSelection(\'build\')); новый пакет дописывается туда вместе с glob гейта build';
+    return got === want || 'ожидалось «' + want + '», получено ' + JSON.stringify(got);
+  });
+  // trackedFiles (снимок liveSnap): сбой git - отказ, а не пустой список, с которым inputsGap
+  // молча слепнет; файл, которого нет на диске, выпадает, файл, который не читается, - отказ
+  const lsFiles = (stdout) => () => ({ pid: 4242, status: 0, signal: null, stdout, stderr: '' });
+  const NO_GIT = 'sf-selftest-no-git';
+  refusedWith('git ls-files не запустился - отказ с ошибкой запуска', () => trackedFiles({ git: NO_GIT }),
+    'git ls-files не запустился: spawnSync ' + NO_GIT + ' ENOENT');
+  refusedWith('git ls-files убит сигналом - отказ с именем сигнала', () => trackedFiles({ spawn: () => ({ pid: 4242, status: null, signal: 'SIGKILL', stdout: '', stderr: '' }) }),
+    'git ls-files: сигнал SIGKILL: ');
+  check('граф turbo: trackedFiles - файла нет на диске - не в списке, есть - в списке', () => {
+    const got = JSON.stringify(trackedFiles({ spawn: lsFiles('package.json\0sf-selftest-gone.ts\0') }));
+    return got === JSON.stringify(['package.json']) || 'получено ' + got;
+  });
+  refusedWith('trackedFiles: файл не читается (EACCES) - отказ, а не молча выпавший файл', () => trackedFiles({
+    spawn: lsFiles('package.json\0sf-selftest-locked.ts\0'),
+    stat: (p) => {
+      if (path.basename(p) === 'sf-selftest-locked.ts') throw Object.assign(new Error('EACCES: permission denied, stat sf-selftest-locked.ts'), { code: 'EACCES' });
+      return fs.statSync(p);
+    },
+  }), 'EACCES: permission denied, stat sf-selftest-locked.ts');
+  check('граф turbo: trackedFiles - родитель пути стал файлом (ENOTDIR) - файла нет, а не отказ', () => {
+    let got;
+    try {
+      got = JSON.stringify(trackedFiles({
+        spawn: lsFiles('package.json\0package.json/sf-selftest-child.ts\0'),
+        stat: (p) => {
+          if (path.basename(p) === 'sf-selftest-child.ts') throw Object.assign(new Error('ENOTDIR: not a directory, stat sf-selftest-child.ts'), { code: 'ENOTDIR' });
+          return fs.statSync(p);
+        },
+      }));
+    } catch (e) {
+      return 'отказ: ' + ((e && e.message) || String(e));
+    }
+    return got === JSON.stringify(['package.json']) || 'получено ' + got;
+  });
+  check('граф turbo: trackedFiles - отслеживаемый путь стал каталогом - не в списке', () => {
+    const got = JSON.stringify(trackedFiles({ spawn: lsFiles('package.json\0.claude\0') }));
+    return got === JSON.stringify(['package.json']) || 'получено ' + got;
+  });
+}
+
+/**
+ * Файлы, которые git видит в дереве (`git ls-files -z`, пути от корня) и которые есть на диске:
+ * удалённый в рабочем дереве файл turbo не хеширует. Для G.inputsGap; git зовёт только
+ * самопроверка, модуль графа получает список параметром. git не запустился или упал - исключение.
+ * Наличие на диске - stat обычного файла: ENOENT и ENOTDIR (родитель стал файлом) - файла нет,
+ * путь стал каталогом - файла нет, иная ошибка (EACCES) - исключение, а не молча выпавший файл.
+ * opts - подмена для кейсов: git (имя команды), spawn (вместо run), stat (вместо fs.statSync).
+ */
+function trackedFiles(opts) {
+  const o = opts || {};
+  const spawn = o.spawn || run;
+  const stat = o.stat || fs.statSync;
+  const r = spawn(o.git || 'git', ['-c', 'core.fsmonitor=false', 'ls-files', '-z'], { cwd: ROOT });
+  if (r.error) throw new Error('git ls-files не запустился: ' + r.error.message);
+  if (r.status !== 0) throw new Error('git ls-files: ' + (r.status === null ? 'сигнал ' + r.signal : 'код ' + r.status) + ': ' + String(r.stderr || '').trim());
+  const isFile = (f) => {
+    try {
+      return stat(path.join(ROOT, f)).isFile();
+    } catch (e) {
+      if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return false;
+      throw e;
+    }
+  };
+  return r.stdout.split('\0').filter((f) => f && isFile(f));
+}
+
+/**
+ * Снимок настоящего дерева для LIVE_GRAPH: dry-JSON, манифесты пакетов dry, шаблоны workspace и
+ * файлы, видимые git.
+ */
+function liveSnap() {
+  const dry = G.turboDry(GRAPH_SCRIPTS);
+  return {
+    dry,
+    ws: dryManifests(dry),
+    patterns: G.workspacePatterns(fs.readFileSync(path.join(ROOT, 'pnpm-workspace.yaml'), 'utf8')),
+    tracked: trackedFiles(),
+  };
+}
+
+/** Граф настоящего дерева (graphGate): один снимок на прогон. */
+const LIVE_GRAPH = graphGate(liveSnap);
+
+/**
+ * Манифесты пакетов dry: { имя: { dir, pkg } } - workspace:-зависимости для G.manifestGap (граф
+ * turbo не уже манифестов) и exports для moduleReads (`@sf/<пакет>/<подпуть>`) в чтениях
+ * конфигов int-тестов. Читаются один раз за прогон, в снимке liveSnap. Разбор конфигов ниже (stripJsComments, stringArrayAt,
+ * vitestConfigOf, moduleReads, intProbeReads) - остаток ручного разбора до E0-12T (vitest/node
+ * и test/imports.ts, решение Р0 техлида 21.10.2026).
+ */
+function dryManifests(dry) {
   const ws = {};
-  for (const dir of dirs) {
-    const manifest = path.join(ROOT, dir, 'package.json');
-    if (!fs.existsSync(manifest)) continue;
-    const pkg = readJson(manifest);
-    if (!pkg.name) continue;
-    const cfg = NEXT_CONFIGS.map((f) => path.join(ROOT, dir, f)).find((p) => fs.existsSync(p));
-    ws[pkg.name] = { dir, pkg, transpile: cfg ? stringArrayAt(fs.readFileSync(cfg, 'utf8'), 'transpilePackages', dir + '/' + path.basename(cfg), { required: false }) : [] };
-  }
+  for (const [name, dir] of G.dryPackages(dry)) ws[name] = { dir, pkg: readJson(path.join(ROOT, dir, 'package.json')) };
   return ws;
 }
 
@@ -695,18 +1201,14 @@ function stripJsComments(src) {
 
 /**
  * Строки массива по ключу key (`key: ["a", 'b']`) в исходнике конфига без комментариев -
- * общий разбор transpilePackages (next.config) и setupFiles (конфиг vitest). Ключа нет -
- * [] при required: false, исключение при required: true. Ключ встречается больше одного раза
- * или значение не массив строковых литералов (переменная, spread, вызов, одна строка) -
- * исключение: молчаливый [] или первое из двух вхождений спрятали бы то, что читает гейт.
+ * setupFiles конфига vitest. Ключа нет, ключ встречается больше одного раза или значение не
+ * массив строковых литералов (переменная, spread, вызов, одна строка) - исключение:
+ * молчаливый [] или первое из двух вхождений спрятали бы то, что читает гейт.
  */
-function stringArrayAt(src, key, file, opts) {
+function stringArrayAt(src, key, file) {
   const code = stripJsComments(src);
   const hits = code.match(new RegExp('\\b' + key + '\\b', 'g')) || [];
-  if (!hits.length) {
-    if (opts.required) throw new Error(key + ' в ' + file + ' нет - разбери руками');
-    return [];
-  }
+  if (!hits.length) throw new Error(key + ' в ' + file + ' нет - разбери руками');
   if (hits.length > 1) throw new Error(key + ' в ' + file + ' встречается ' + hits.length + ' раза - разбери руками');
   const m = new RegExp('\\b' + key + '\\s*:\\s*\\[([^\\]]*)\\]').exec(code);
   const STR = /"[^"]*"|'[^']*'|`[^`$]*`/g;
@@ -717,13 +1219,13 @@ function stringArrayAt(src, key, file, opts) {
 }
 
 /**
- * Файл конфига vitest из скрипта пакета: значение `--config <файл>` / `--config=<файл>`.
+ * Файл конфига vitest из команды задачи: значение `--config <файл>` / `--config=<файл>`.
  * Флага нет - исключение: без него vitest берёт vitest.config.*, и проба сверяла бы не тот
  * конфиг, которым гоняется скрипт.
  */
-function vitestConfigOf(script, owner) {
-  const m = /(?:^|\s)--config(?:=|\s+)(\S+)/.exec(String(script || ''));
-  if (!m) throw new Error('скрипт ' + owner + ' не называет конфиг через --config: ' + JSON.stringify(script) + ' - разбери руками');
+function vitestConfigOf(command, owner) {
+  const m = /(?:^|\s)--config(?:=|\s+)(\S+)/.exec(String(command || ''));
+  if (!m) throw new Error('команда ' + owner + ' не называет конфиг через --config: ' + JSON.stringify(command) + ' - разбери руками');
   return m[1];
 }
 
@@ -743,7 +1245,7 @@ function overlaySource(files) {
  * Файлы, которые читает модуль spec, импортированный из каталога fromDir (пути от корня):
  * для `./…` и `../…` - файл от fromDir (спецификатор `.js` - его `.ts` на диске, как в исходниках
  * workspace), для `@sf/<пакет>/<подпуть>` - package.json пакета и файл из exports['./<подпуть>'].
- * Последний элемент - сам модуль. Пакета нет в workspace, нет строки exports, иная форма
+ * Последний элемент - сам модуль. Пакета нет среди пакетов dry, нет строки exports, иная форма
  * спецификатора или файла нет - исключение. who - кто импортирует (в тексте отказа).
  */
 function moduleReads(spec, fromDir, ws, src, who) {
@@ -757,7 +1259,7 @@ function moduleReads(spec, fromDir, ws, src, who) {
   const m = /^(@sf\/[\w-]+)\/(.+)$/.exec(spec);
   if (!m) throw new Error(who + ': спецификатор ' + spec + ' не разбирается пробой - разбери руками');
   const dep = ws[m[1]];
-  if (!dep) throw new Error(who + ': ' + m[1] + ' нет в workspace');
+  if (!dep) throw new Error(who + ': ' + m[1] + ' нет среди пакетов dry-JSON turbo');
   const target = dep.pkg.exports && dep.pkg.exports['./' + m[2]];
   if (typeof target !== 'string') throw new Error(who + ': у ' + m[1] + ' нет строки exports["./' + m[2] + '"]');
   const rel = path.posix.normalize(dep.dir + '/' + target);
@@ -766,31 +1268,25 @@ function moduleReads(spec, fromDir, ws, src, who) {
 }
 
 /**
- * Пакеты workspace со scripts[script] - их запускает turbo run <script>.
- */
-function scriptRoots(ws, script) {
-  return Object.keys(ws).filter((n) => ws[n].pkg.scripts && ws[n].pkg.scripts[script]);
-}
-
-/**
- * Всё, что читает проба test:int сверх графа пакетов, - и что читают сами int-тесты:
- * конфиг из --config скрипта пакета, модули его setupFiles (`./` - от каталога конфига),
+ * Всё, что читает проба test:int сверх входов графа turbo, - и что читают сами int-тесты:
+ * конфиг из --config команды корня графа, модули его setupFiles (`./` - от каталога конфига),
  * модуль, из которого setup импортирует testEnvFilePath, и сама фикстура - файл в корне
  * из `join(repoRoot, "<файл>")`. Setup без импорта testEnvFilePath, иная форма
- * testEnvFilePath, нет файла - исключение. Возвращает [{ file, why }] без повторов.
+ * testEnvFilePath, нет файла - исключение. ws - dryManifests; roots - корни taskGraph
+ * ({ name, dir, command }). Возвращает [{ file, why }] без повторов.
  */
 function intProbeReads(ws, roots, src) {
   const out = new Map();
   const add = (file, why) => { if (!out.has(file)) out.set(file, why); };
   const IMPORT = /\bimport\s*\{([^}]*)\}\s*from\s*(["'])([^"']+)\2/g;
-  for (const name of roots) {
-    const cfg = path.posix.normalize(ws[name].dir + '/' + vitestConfigOf(ws[name].pkg.scripts['test:int'], name));
-    if (!src.exists(cfg)) throw new Error('конфига ' + cfg + ' (--config скрипта test:int ' + name + ') нет на диске');
-    add(cfg, '--config test:int ' + name);
-    for (const spec of stringArrayAt(src.read(cfg), 'setupFiles', cfg, { required: true })) {
-      const files = moduleReads(spec, path.posix.dirname(cfg), ws, src, 'setupFiles ' + name);
+  for (const root of roots) {
+    const cfg = path.posix.normalize(root.dir + '/' + vitestConfigOf(root.command, root.name));
+    if (!src.exists(cfg)) throw new Error('конфига ' + cfg + ' (--config ' + root.name + ') нет на диске');
+    add(cfg, '--config ' + root.name);
+    for (const spec of stringArrayAt(src.read(cfg), 'setupFiles', cfg)) {
+      const files = moduleReads(spec, path.posix.dirname(cfg), ws, src, 'setupFiles ' + root.name);
       const setup = files[files.length - 1];
-      for (const f of files) add(f, 'setupFiles ' + name);
+      for (const f of files) add(f, 'setupFiles ' + root.name);
       const imports = Array.from(stripJsComments(src.read(setup)).matchAll(IMPORT))
         .filter((m) => m[1].split(',').some((n) => n.trim().split(/\s+/)[0] === 'testEnvFilePath'));
       if (imports.length !== 1) throw new Error('setup ' + setup + ' не берёт testEnvFilePath одним импортом - разбери руками');
@@ -806,115 +1302,229 @@ function intProbeReads(ws, roots, src) {
   return Array.from(out, ([file, why]) => ({ file, why }));
 }
 
+// Чтения пробы test:int на настоящем дереве - один раз за прогон: их сверяют и проба
+// test:int, и проба harness-selftest.
+let liveIntReadsMemo = null;
+function liveIntReads() {
+  if (!liveIntReadsMemo) liveIntReadsMemo = intProbeReads(LIVE_GRAPH.snap.ws, G.taskGraph(LIVE_GRAPH.snap.dry, 'test:int').roots, DISK);
+  return liveIntReadsMemo;
+}
+
 /**
- * Стаб для детектора intProbeReads: пакет со scripts['test:int'] в каталоге hostDir, его конфиг
- * берёт setup из пакета peer (вне glob test:int), setup импортирует testEnvFilePath из соседнего
- * модуля. Возвращает { ws, roots, src, expect } - expect: setup-файл, который детектор обязан
- * назвать. Снимок workspace не правится.
+ * Стаб для детектора intProbeReads на G.stubNode: задача test:int с командой в STUB_DIR (вне glob
+ * гейта) с ребром от первого корня графа; её конфиг берёт setup из стаб-пакета G.STUB_PACKAGE
+ * (exports), setup импортирует testEnvFilePath из соседнего модуля. Возвращает
+ * { dry, ws, src, expect, files } - expect: setup-файл, который детектор обязан назвать; files -
+ * стаб-файлы (их glob гейта покрывать не должен). Снимок dry и манифесты ws не правятся.
  */
-function intProbeStub(ws, hostDir, peer) {
-  const p = ws[peer];
-  const stubWs = Object.assign({}, ws, {
-    [peer]: Object.assign({}, p, { pkg: Object.assign({}, p.pkg, { exports: { './vitest/selftest-setup': './vitest/selftest-setup.ts' } }) }),
-    '@sf/selftest-stub': { dir: hostDir, pkg: { scripts: { 'test:int': 'vitest run --config vitest.selftest.config.ts' } }, transpile: [] },
-  });
-  const setup = p.dir + '/vitest/selftest-setup.ts';
-  const src = overlaySource({
-    [hostDir + '/vitest.selftest.config.ts']: 'export default { test: { setupFiles: ["' + peer + '/vitest/selftest-setup"] } };',
+function intProbeStub(dry, ws) {
+  const stub = G.stubNode(dry, 'test:int', { command: 'vitest run --config vitest.selftest.config.ts' });
+  const name = G.STUB_PACKAGE;
+  const stubWs = Object.assign({}, ws, { [name]: { dir: G.STUB_DIR, pkg: { name, exports: { './vitest/selftest-setup': './vitest/selftest-setup.ts' } } } });
+  const setup = G.STUB_DIR + '/vitest/selftest-setup.ts';
+  const files = {
+    [G.STUB_DIR + '/vitest.selftest.config.ts']: 'export default { test: { setupFiles: ["' + name + '/vitest/selftest-setup"] } };',
     [setup]: 'import { testEnvFilePath } from "./selftest-paths.js";\n',
-    [p.dir + '/vitest/selftest-paths.ts']: 'export const testEnvFilePath = join(repoRoot, ".env.test");\n',
-  });
-  return { ws: stubWs, roots: ['@sf/selftest-stub'], src, expect: setup };
-}
-
-/**
- * Пакеты workspace, у которых есть scripts[script] (их запускает turbo run <script>), и всё,
- * что они читают: транзитивные workspace-зависимости (dependencies, devDependencies,
- * peerDependencies, optionalDependencies) и transpilePackages. Имена вне workspace
- * (сторонние npm) не учитываются. Возвращает { roots, read, bad } - bad: пакеты,
- * правка которых не выбирает гейт (runs - его проба).
- */
-function uncoveredScriptPackages(runs, ws, script) {
-  const DEP_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
-  const reads = (entry) => {
-    const names = [];
-    for (const f of DEP_FIELDS) names.push.apply(names, Object.keys(entry.pkg[f] || {}));
-    return names.concat(entry.transpile || []).filter((n) => ws[n]);
+    [G.STUB_DIR + '/vitest/selftest-paths.ts']: 'export const testEnvFilePath = join(repoRoot, ".env.test");\n',
   };
-  const roots = scriptRoots(ws, script);
-  const seen = new Set();
-  const queue = roots.slice();
-  while (queue.length) {
-    const name = queue.shift();
-    if (seen.has(name)) continue;
-    seen.add(name);
-    queue.push.apply(queue, reads(ws[name]));
-  }
-  const bad = [];
-  for (const name of seen) {
-    const dir = ws[name].dir;
-    if (!runs(dir + '/package.json') || !runs(dir + '/src/index.ts')) bad.push(name + ' (' + dir + ')');
-  }
-  return { roots, read: Array.from(seen), bad };
+  return { dry: stub, ws: stubWs, src: overlaySource(files), expect: setup, files: Object.keys(files) };
 }
 
 /**
- * Проба графа гейта, который гоняет turbo run <script> (extra-строка checkGateSelection):
- * пакеты workspace со scripts[script], их транзитивные workspace-зависимости и файлы
- * opts.extraReads(ws, roots, src) ([{ file, why }]) обязаны выбирать гейт.
- * Детекторы не слепые: стаб-пакет со scripts[script] и peer-зависимостью на opts.stubPeer
- * (пакет вне glob гейта) обязан дать отказ; при extraReads - и стаб opts.extraStub(ws, hostDir,
- * stubPeer) (его expect обязан попасть в отказ). opts.label - кто читает, с глаголом (в тексте отказа).
+ * Чтения графа гейта, который гоняет turbo run <script>: входы каждого узла taskGraph,
+ * globalCacheInputs (без HASHED_NOT_READ) и extra ([{ file, why }] сверх графа) - outsideGlob
+ * по пробе гейта runs. Возвращает { graph, outside }.
  */
-function checkScriptGraph(script, opts) {
-  const key = /^\w+$/.test(script) ? 'scripts.' + script : "scripts['" + script + "']";
-  const outside = (runs, reads) => reads.filter((r) => !runs(r.file));
+function graphOutside(runs, dry, script, extra) {
+  const graph = G.taskGraph(dry, script);
+  const reads = graph.nodes.flatMap((n) => n.reads).concat(G.globalReads(dry).reads, extra);
+  return { graph, outside: G.outsideGlob(runs, reads) };
+}
+
+/**
+ * Стаб-файлы под glob гейта: детектор на них не построить, и «проба не замечает» свалило бы вину
+ * на пробу. Сверяются все файлы стабов модуля (G.STUB_FILES: стаб-пакет, его turbo.json, пакет
+ * стаб-шаблона, глобальный вход) и extra (файлы стаба пробы сверх модуля). Строка отказа с именем
+ * STUB_DIR и файлами под glob или null. runs - проба гейта.
+ */
+function stubUnderGlob(runs, gateId, extra) {
+  const under = G.STUB_FILES.concat(extra || []).filter((f) => runs(f));
+  return under.length ? 'стаб-каталог ' + G.STUB_DIR + ' под glob ' + gateId + ' (' + under.join(', ') + ') - детектор не построить, смени STUB_DIR в selftest-graph.js' : null;
+}
+
+/**
+ * Детектор разницы графа с манифестами (G.manifestGap) не слепой: граф script без рёбер к первому
+ * некорневому узлу graph (G.stubCut) обязан назвать его пакет. У графа нет некорневых узлов -
+ * детектор не построить, это отказ, а не пропуск. Строка отказа или null.
+ */
+function manifestGapBlind(dry, script, graph, ws) {
+  const cut = graph.nodes.find((n) => !n.root);
+  if (!cut) return 'у графа turbo run ' + script + ' нет узлов кроме корней - детектор разницы с манифестами не построить';
+  if (G.manifestGap(G.taskGraph(G.stubCut(dry, cut.name), script), ws).includes(cut.pkg)) return null;
+  return 'проба не замечает граф без ' + cut.name + ' (стаб без рёбер к узлу): ' + cut.pkg + ' не назван разницей с манифестами';
+}
+
+/**
+ * Детектор G.inputsGap не слепой: граф без одного файла пакета во входах первого узла, у которого
+ * такой вход есть и он среди tracked (G.stubWithoutInput), обязан назвать этот файл. Вход только
+ * из tracked: turbo хеширует и неотслеживаемые файлы, а inputsGap сверяет лишь tracked - срез
+ * нового `??`-файла дал бы ложное «проба не замечает». Строка отказа или null.
+ */
+function inputsGapBlind(dry, script, graph, tracked) {
+  const seen = new Set(tracked);
+  const own = (n) => n.reads.map((r) => r.file).filter((f) => f.startsWith(n.dir + '/') && seen.has(f));
+  const node = graph.nodes.find((n) => own(n).length);
+  if (!node) return 'у графа turbo run ' + script + ' ни у одного узла нет отслеживаемого входа своего пакета - детектор входов не построить';
+  const file = own(node)[0];
+  const stub = G.stubWithoutInput(dry, node.name, file);
+  if (G.inputsGap(G.taskGraph(stub, script), tracked, stub).includes(node.name + ': ' + file)) return null;
+  return 'проба не замечает вход ' + file + ', снятый у ' + node.name + ' (стаб без входа)';
+}
+
+/**
+ * Проба графа гейта, который гоняет turbo run <script> (extra-строка checkGateSelection с
+ * graph): каждый файл, который хеширует задача графа (узлы - замыкание от корней),
+ * globalCacheInputs и чтения opts.liveExtra() (сверх графа, на настоящем дереве) обязаны
+ * выбирать гейт; граф не уже манифестов (G.manifestGap). Детекторы не слепые: стаб-узел в
+ * STUB_DIR (G.stubNode) обязан дать отказ со своим package.json, стаб глобального входа - со
+ * своим файлом, граф без рёбер к первому некорневому узлу (G.stubCut) - разницу с манифестами
+ * с его пакетом; при opts.extraStub - и стаб opts.extraStub(dry, ws), чтения которого считает
+ * opts.extraReads (его expect обязан попасть в отказ). opts.label - кто читает, с глаголом
+ * (в тексте отказа).
+ */
+function checkTurboGraph(script, opts) {
   return ({ gate, runs }) => {
-    const ws = workspacePackages();
-    const real = uncoveredScriptPackages(runs, ws, script);
-    if (!real.roots.length) return 'ни у одного пакета workspace нет ' + key + ' - гейту ' + gate.id + ' нечего запускать';
-    const extra = opts.extraReads ? opts.extraReads(ws, real.roots, DISK) : [];
-    const bad = real.bad.concat(outside(runs, extra).map((r) => r.file + ' (' + r.why + ')'));
-    if (bad.length) return opts.label + ' вне glob ' + gate.id + ': ' + bad.join(', ') + ' - расширь glob ' + gate.id;
-    if (!ws[opts.stubPeer]) return 'в workspace нет ' + opts.stubPeer + ' - стаб-проба детектора не строится';
-    const hostDir = ws[real.roots[0]].dir;
-    const stub = Object.assign({}, ws, {
-      '@sf/selftest-stub': { dir: hostDir, pkg: { scripts: { [script]: 'x' }, peerDependencies: { [opts.stubPeer]: 'workspace:*' } }, transpile: [] },
-    });
-    if (!uncoveredScriptPackages(runs, stub, script).bad.some((b) => b.startsWith(opts.stubPeer + ' '))) {
-      return 'проба не замечает ' + opts.stubPeer + ' вне glob ' + gate.id + ' в стаб-данных';
+    const { dry, ws, tracked } = LIVE_GRAPH.snap;
+    const extra = opts.liveExtra ? opts.liveExtra() : [];
+    const real = graphOutside(runs, dry, script, extra);
+    if (real.outside.length) return G.refusal(opts.label, gate.id, real.outside);
+    const gap = G.manifestGap(real.graph, ws);
+    if (gap.length) {
+      return 'граф turbo run ' + script + ' уже манифестов: ' + gap.join(', ') + ' (workspace:-зависимости корней вне графа) - проверь dependsOn задачи ' + script + ' в turbo.json';
     }
-    if (opts.extraReads) {
-      const s = opts.extraStub(ws, hostDir, opts.stubPeer);
-      if (!outside(runs, opts.extraReads(s.ws, s.roots, s.src)).some((r) => r.file === s.expect)) {
-        return 'проба не замечает ' + s.expect + ' вне glob ' + gate.id + ' в стаб-данных extraReads';
+    const unhashed = G.inputsGap(real.graph, tracked, dry);
+    if (unhashed.length) {
+      return 'входы графа turbo run ' + script + ' не покрывают файлы пакетов, видимые git: ' + unhashed.join('; ') + ' - inputs в turbo.json без $TURBO_DEFAULT$?';
+    }
+    const inputsBlind = inputsGapBlind(dry, script, real.graph, tracked);
+    if (inputsBlind) return inputsBlind;
+    const s = opts.extraStub ? opts.extraStub(dry, ws) : null;
+    const under = stubUnderGlob(runs, gate.id, s ? s.files : []);
+    if (under) return under;
+    const want = G.STUB_DIR + '/package.json ';
+    const stub = graphOutside(runs, G.stubNode(dry, script, { inputs: { 'package.json': 'stub' } }), script, extra);
+    if (!stub.outside.some((b) => b.startsWith(want))) return 'проба не замечает узел ' + G.STUB_DIR + ' вне glob ' + gate.id + ' на стабе';
+    // globalCacheInputs сверяются наравне со входами задач: посторонний глобальный вход - отказ
+    if (!graphOutside(runs, G.stubGlobal(dry), script, extra).outside.some((b) => b.startsWith(G.STUB_GLOBAL + ' '))) {
+      return 'проба не замечает глобальный вход ' + G.STUB_GLOBAL + ' вне glob ' + gate.id + ' на стабе';
+    }
+    const gapBlind = manifestGapBlind(dry, script, real.graph, ws);
+    if (gapBlind) return gapBlind;
+    if (s) {
+      const stubExtra = opts.extraReads(s.ws, G.taskGraph(s.dry, script).roots, s.src);
+      if (!graphOutside(runs, s.dry, script, stubExtra).outside.some((b) => b.startsWith(s.expect + ' '))) {
+        return 'проба не замечает ' + s.expect + ' вне glob ' + gate.id + ' на стабе extraReads';
       }
     }
-    return { note: script + ': ' + real.roots.join(', ') + '; читает: ' + real.read.join(', ') + (extra.length ? ' и ' + extra.length + ' файлов конфигов' : '') + '; workspace ' + Object.keys(ws).length };
+    const files = real.graph.nodes.reduce((n, x) => n + x.reads.length, 0);
+    const skipped = G.globalReads(dry).skipped.map((r) => r.file);
+    return {
+      note: script + ': корни ' + real.graph.roots.map((r) => r.name).join(', ') + '; узлов ' + real.graph.nodes.length + ', файлов ' + files +
+        (extra.length ? ' и ' + extra.length + ' файлов конфигов' : '') + (skipped.length ? '; не сверяются (HASHED_NOT_READ): ' + skipped.join(', ') : ''),
+    };
   };
 }
 
 /**
- * extra-строка гейта, который гоняет корневой скрипт: cmd гейта gateId - ровно `pnpm <script>`,
- * scripts[script] корневого package.json - ровно expected. Точное равенство: лишний флаг
- * (--dry, --filter, --passWithNoTests) выключил бы проверку при зелёном гейте.
+ * Расхождения корней графа script с want ({ roots, command }): корни - ровно want.roots
+ * (пропавший скрипт пакета сужает граф молча, лишний корень - новый пакет мимо перечня), команда
+ * каждого - ровно want.command (`next build || true` и `; exit 0` - ослабленная сборка, не
+ * она). Строки отказа; пусто - совпадает.
  */
-function rootScriptCheck(gateId, script, expected) {
-  const key = /^\w+$/.test(script) ? 'scripts.' + script : "scripts['" + script + "']";
+function rootsVerdict(dry, script, want) {
+  const roots = G.rootTasks(dry, script);
+  const names = roots.map((r) => r.name);
+  return [
+    ...want.roots.filter((n) => !names.includes(n)).map((n) => 'нет корня ' + n),
+    ...names.filter((n) => !want.roots.includes(n)).map((n) => 'лишний корень ' + n),
+    ...roots.filter((r) => r.command !== want.command).map((r) => r.name + ': ' + JSON.stringify(r.command)),
+  ];
+}
+
+/**
+ * Текст отказа пробы корней гейта gateId (rootsVerdict) или null: называет, где перечень корней
+ * и что новый пакет дописывается в него вместе с glob гейта - иначе законное расширение
+ * оператор чинил бы ослаблением пробы.
+ */
+function rootsRefusal(dry, script, want, gateId) {
+  const bad = rootsVerdict(dry, script, want);
+  if (!bad.length) return null;
+  return 'корни turbo run ' + script + ' не ровно ' + want.roots.join(', ') + ' с командой ' + want.command + ': ' + bad.join(', ') +
+    ' - перечень корней - roots пробы корней гейта ' + gateId + ' (harness-selftest.js, checkGateSelection(\'' + gateId + '\')); новый пакет дописывается туда вместе с glob гейта ' + gateId;
+}
+
+/**
+ * Проба корней графа script (extra-строка checkGateSelection с graph): корни - ровно
+ * want.roots, команда каждого - ровно want.command. Детекторы не слепые: на стабах первого
+ * корня с командой want.command + ` || true` и без команды и на лишнем стаб-корне с верной
+ * командой - каждый обязан дать свою строку отказа.
+ */
+function checkRootCommands(script, want) {
+  return ({ gate }) => {
+    const dry = LIVE_GRAPH.snap.dry;
+    const refused = rootsRefusal(dry, script, want, gate.id);
+    if (refused) return refused;
+    const first = want.roots[0];
+    const detectors = [
+      [G.stubCommand(dry, first, want.command + ' || true'), first + ': ' + JSON.stringify(want.command + ' || true')],
+      [G.stubCommand(dry, first, G.NONEXISTENT), 'нет корня ' + first],
+      [G.stubNode(dry, script, { command: want.command }), 'лишний корень ' + G.stubTaskId(script)],
+    ];
+    const blind = detectors.filter(([stub, line]) => !rootsVerdict(stub, script, want).includes(line)).map(([, line]) => line);
+    if (blind.length) return 'проба не замечает на стабе: ' + blind.join('; ');
+    return { note: want.roots.join(', ') + ': ' + want.command };
+  };
+}
+
+/**
+ * Скрипт корневого package.json (pkg) script - ровно expected: результат как у check. Точное
+ * равенство: лишний флаг (--dry, --filter, --passWithNoTests) выключил бы проверку при зелёном гейте.
+ */
+function rootScriptVerdict(pkg, script, expected) {
+  const actual = pkg.scripts && pkg.scripts[script];
+  return actual === expected || G.scriptKey(script) + ' в корневом package.json не ' + expected + ': ' + JSON.stringify(actual);
+}
+
+/**
+ * Две строки «скрипт корня = ровно expected»: на настоящем package.json и проба отказа -
+ * тот же скрипт с лишним флагом обязан краснеть. label - начало названия строки.
+ */
+function checkRootScriptLines(label, script, expected) {
+  check(label + ': ' + G.scriptKey(script) + ' = ' + expected + ' в корневом package.json', () =>
+    rootScriptVerdict(readJson(path.join(ROOT, 'package.json')), script, expected));
+  check(label + ': ' + G.scriptKey(script) + ' с лишним флагом краснеет (проба отказа)', () => {
+    const r = rootScriptVerdict({ scripts: { [script]: expected + ' --passWithNoTests' } }, script, expected);
+    return typeof r === 'string' || 'скрипт с лишним флагом принят за ' + expected;
+  });
+}
+
+/**
+ * extra-строка гейта, который гоняет корневой скрипт: cmd гейта - ровно `pnpm <script>`,
+ * scripts[script] корневого package.json - ровно expected (rootScriptVerdict).
+ */
+function rootScriptExtra(script, expected) {
   return {
-    name: 'cmd pnpm ' + script + ' и ' + key + ' = ' + expected + ' в корневом package.json',
+    name: 'cmd pnpm ' + script + ' и ' + G.scriptKey(script) + ' = ' + expected + ' в корневом package.json',
     fn: ({ gate }) => {
-      if (gate.cmd !== 'pnpm ' + script) return 'cmd гейта ' + gateId + ' не pnpm ' + script + ': ' + gate.cmd;
-      const pkg = readJson(path.join(ROOT, 'package.json'));
-      const actual = pkg.scripts && pkg.scripts[script];
-      if (actual !== expected) return key + ' в корневом package.json не ' + expected + ': ' + JSON.stringify(actual);
-      return true;
+      if (gate.cmd !== 'pnpm ' + script) return 'cmd гейта ' + gate.id + ' не pnpm ' + script + ': ' + gate.cmd;
+      return rootScriptVerdict(readJson(path.join(ROOT, 'package.json')), script, expected);
     },
   };
 }
 
 // Сборка web (next build, ADR-0005) читает только apps/web и его пакеты; glob гейта
 // build сужен до них и корневых конфигов (E0-01A, docs/DECISIONS.md 11.10.2026).
+// Граф сборки берётся у turbo (E0-12L): каждый файл каждого узла графа выбирает гейт.
 checkGateSelection('build', {
   runWhat: 'apps/web, пакетах web и корневых конфигах',
   skipWhat: 'api, worker, db, integrations, вложенных конфигах и docs',
@@ -954,58 +1564,93 @@ checkGateSelection('build', {
     'xapps/a.ts',
   ],
   extra: [
-    rootScriptCheck('build', 'build', 'turbo run build'),
+    rootScriptExtra('build', 'turbo run build'),
     {
-      name: 'пакеты со scripts.build и всё, что они читают, под glob',
-      fn: checkScriptGraph('build', { label: 'сборка читает', stubPeer: '@sf/db' }),
+      name: 'каждый файл графа turbo run build (узлы от корней, globalCacheInputs) под glob',
+      graph: true,
+      fn: checkTurboGraph('build', { label: 'сборка читает' }),
+    },
+    {
+      name: 'корни turbo run build - ровно @sf/web#build, команда - ровно next build (ADR-0005)',
+      graph: true,
+      fn: checkRootCommands('build', { roots: ['@sf/web#build'], command: 'next build' }),
     },
   ],
 });
 
-// Юнит-тесты читают и не-исходники (rules.sf.json, ci.yml, infra/docker/**), поэтому гейт test
-// always: выбор на одном файле не отличает always от glob, правило сверяется прямо (E0-02A, L-014).
+/** Проба графа test:int: сверх графа - конфиги int-тестов (intProbeReads) и их стаб. */
+const INT_GRAPH_OPTS = {
+  label: 'int-тесты читают',
+  liveExtra: liveIntReads,
+  extraReads: intProbeReads,
+  extraStub: intProbeStub,
+};
+
+// Стаб-каталог под glob гейта - отказ с именем STUB_DIR, а не «проба не замечает» (вина не
+// на пробе): проба графа на glob, который выбирает всё, на glob, который выбирает только
+// глобальный стаб-вход, и на glob test:int, который выбирает setup int-стаба.
 {
-  // файл вне glob всех остальных гейтов: выбор на нём даёт только when always
-  const TEST_RUN = 'docs/30_E0_TASKS.md';
-  check('гейт test: when always', () => {
-    const { gate } = gateProbe('test');
-    return gate.when === 'always' || 'when гейта test не always: ' + gate.when;
-  });
-  check('гейт test: gates.js выбирает его на файле вне всех glob (' + TEST_RUN + ')', () => {
-    const { runs } = gateProbe('test');
-    return runs(TEST_RUN) || 'gates.js не выбирает его на ' + TEST_RUN;
-  });
-  const cmd = rootScriptCheck('test', 'test', 'turbo run test test:repo');
-  check('гейт test: ' + cmd.name, () => cmd.fn(gateProbe('test')));
-  // cmd гейта - pnpm test, поэтому test:repo сверяется как скрипт, точным равенством: echo или
-  // --passWithNoTests выключили бы корневые тесты (замок «копий нет» пресета) при зелёном гейте
-  check("гейт test: scripts['test:repo'] = vitest run --config vitest.repo.config.mts в корневом package.json", () => {
-    const pkg = readJson(path.join(ROOT, 'package.json'));
-    const actual = pkg.scripts && pkg.scripts['test:repo'];
-    const expected = 'vitest run --config vitest.repo.config.mts';
-    return actual === expected || "scripts['test:repo'] в корневом package.json не " + expected + ': ' + JSON.stringify(actual);
-  });
+  const name = 'граф turbo: стаб-каталог под glob гейта - отказ с именем STUB_DIR';
+  check(name, LIVE_GRAPH.guard(name, () => {
+    const gate = { id: 'build-all' };
+    const fileUnder = (files) => 'стаб-каталог ' + G.STUB_DIR + ' под glob build-all (' + files.join(', ') + ') - детектор не построить, смени STUB_DIR в selftest-graph.js';
+    const all = checkTurboGraph('build', { label: 'сборка читает' })({ gate, runs: () => true });
+    if (all !== fileUnder(G.STUB_FILES)) return 'glob на всё: ожидалось «' + fileUnder(G.STUB_FILES) + '», получено ' + JSON.stringify(all);
+    const runs = (f) => f === G.STUB_GLOBAL || gateProbe('build').runs(f);
+    const global = checkTurboGraph('build', { label: 'сборка читает' })({ gate, runs });
+    if (global !== fileUnder([G.STUB_GLOBAL])) return 'glob со STUB_GLOBAL: ожидалось «' + fileUnder([G.STUB_GLOBAL]) + '», получено ' + JSON.stringify(global);
+    const setup = intProbeStub(LIVE_GRAPH.snap.dry, LIVE_GRAPH.snap.ws).expect;
+    const intRuns = (f) => f === setup || gateProbe('test:int').runs(f);
+    const int = checkTurboGraph('test:int', INT_GRAPH_OPTS)({ gate, runs: intRuns });
+    return int === fileUnder([setup]) || 'glob test:int с setup int-стаба: ожидалось «' + fileUnder([setup]) + '», получено ' + JSON.stringify(int);
+  }));
 }
+
+/**
+ * Пробы гейта с when always: правило сверяется прямо, а выбор - на файле вне glob всех
+ * остальных гейтов (на одном файле always от glob иначе не отличить). Каждая сверка - с пробой
+ * отказа: тот же гейт с when glob обязан её краснить (E0-12L; TECH_DEBT, строка 17.10.2026 E0-12A
+ * «красная проба when в typecheck, inline-чеки»).
+ */
+function checkAlwaysGate(id) {
+  // файл вне glob всех остальных гейтов: выбор на нём даёт только when always
+  const OUTSIDE_ALL = 'docs/30_E0_TASKS.md';
+  const narrowed = (gate) => Object.assign({}, gate, { when: 'glob:{apps/**}' });
+  const whenAlways = (gate) => gate.when === 'always' || 'when гейта ' + gate.id + ' не always: ' + gate.when;
+  check('гейт ' + id + ': when always', () => whenAlways(gateProbe(id).gate));
+  check('гейт ' + id + ': сверка when always краснеет на when glob (проба отказа)', () =>
+    typeof whenAlways(narrowed(gateProbe(id).gate)) === 'string' || 'when glob:{apps/**} принят за always');
+  check('гейт ' + id + ': gates.js выбирает его на файле вне всех glob (' + OUTSIDE_ALL + ')', () =>
+    gateProbe(id).runs(OUTSIDE_ALL) || 'gates.js не выбирает его на ' + OUTSIDE_ALL);
+  check('гейт ' + id + ': с when glob gates.js на ' + OUTSIDE_ALL + ' его не выбирает (проба отказа)', () =>
+    !selects(narrowed(gateProbe(id).gate), OUTSIDE_ALL) || 'gates.js выбирает гейт с when glob:{apps/**} на ' + OUTSIDE_ALL + ' - проба выбора не краснеет');
+}
+
+/**
+ * Пробы гейта id с when always (checkAlwaysGate), который гоняет корневой скрипт id: cmd гейта -
+ * ровно `pnpm <id>`, scripts[id] корневого package.json - ровно expected, scripts[repoScript] -
+ * ровно repoExpected (checkRootScriptLines, с пробой отказа).
+ */
+function checkAlwaysScriptGate(id, expected, repoScript, repoExpected) {
+  checkAlwaysGate(id);
+  const cmd = rootScriptExtra(id, expected);
+  check('гейт ' + id + ': ' + cmd.name, () => cmd.fn(gateProbe(id)));
+  checkRootScriptLines('гейт ' + id, repoScript, repoExpected);
+}
+
+// Юнит-тесты читают и не-исходники (rules.sf.json, ci.yml, infra/docker/**), поэтому гейт test
+// always (E0-02A, L-014). cmd гейта - pnpm test, поэтому test:repo сверяется как скрипт,
+// точным равенством: echo или --passWithNoTests выключили бы корневые тесты (замок «копий нет»
+// пресета) при зелёном гейте.
+checkAlwaysScriptGate('test', 'turbo run test test:repo', 'test:repo', 'vitest run --config vitest.repo.config.mts');
 
 // Гейт typecheck гоняет и пакеты, и корневой проект (tsconfig.json корня: test/, vitest.preset.ts,
 // vitest.repo.config.mts - ADR-0011): выпавший typecheck:repo оставил бы корневые тесты без tsc.
-{
-  check('гейт typecheck: when always', () => {
-    const { gate } = gateProbe('typecheck');
-    return gate.when === 'always' || 'when гейта typecheck не always: ' + gate.when;
-  });
-  const cmd = rootScriptCheck('typecheck', 'typecheck', 'turbo run typecheck typecheck:repo');
-  check('гейт typecheck: ' + cmd.name, () => cmd.fn(gateProbe('typecheck')));
-  // cmd гейта - pnpm typecheck, поэтому typecheck:repo сверяется как скрипт, точным равенством
-  check("гейт typecheck: scripts['typecheck:repo'] = tsc -p tsconfig.json в корневом package.json", () => {
-    const pkg = readJson(path.join(ROOT, 'package.json'));
-    const actual = pkg.scripts && pkg.scripts['typecheck:repo'];
-    return actual === 'tsc -p tsconfig.json' || "scripts['typecheck:repo'] в корневом package.json не tsc -p tsconfig.json: " + JSON.stringify(actual);
-  });
-}
+checkAlwaysScriptGate('typecheck', 'turbo run typecheck typecheck:repo', 'typecheck:repo', 'tsc -p tsconfig.json');
 
 // Int-тесты api, worker, db читают свои пакеты, их зависимости, @sf/config/vitest/setup,
 // корневой vitest.preset.ts (ADR-0011) и корневой .env.test; glob гейта test:int - по факту чтения (docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «Селектор гейта test:int: буква эпика, glob по графу зависимостей или always»).
+// Граф пакетов и корни - у turbo (E0-12L), конфиги int-тестов - intProbeReads.
 checkGateSelection('test:int', {
   runWhat: 'int-пакетах, их зависимостях, .env.test и корневых конфигах',
   skipWhat: 'web, api-client, вложенных конфигах и docs',
@@ -1051,43 +1696,56 @@ checkGateSelection('test:int', {
     'docs/apps/api/x.ts',
   ],
   extra: [
-    rootScriptCheck('test:int', 'test:int', 'turbo run test:int --concurrency=1'),
+    rootScriptExtra('test:int', 'turbo run test:int --concurrency=1'),
     {
-      name: "пакеты со scripts['test:int'], всё, что они читают, конфиги --config, setupFiles и фикстура testEnvFilePath под glob",
-      fn: checkScriptGraph('test:int', {
-        label: 'int-тесты читают',
-        stubPeer: '@sf/api-client',
-        extraReads: intProbeReads,
-        extraStub: intProbeStub,
+      name: 'каждый файл графа turbo run test:int (узлы от корней, globalCacheInputs), конфиги --config, setupFiles и фикстура testEnvFilePath под glob',
+      graph: true,
+      fn: checkTurboGraph('test:int', INT_GRAPH_OPTS),
+    },
+    {
+      // состав корней зафиксирован перечнем: пропавший scripts['test:int'] у api, worker или db
+      // сузил бы граф и glob молча; новый int-пакет дописывается сюда вместе с glob гейта
+      name: 'корни turbo run test:int - ровно api, db, worker, команда каждого - ровно vitest run --config vitest.int.config.ts',
+      graph: true,
+      fn: checkRootCommands('test:int', {
+        roots: ['@sf/api#test:int', '@sf/db#test:int', '@sf/worker#test:int'],
+        command: 'vitest run --config vitest.int.config.ts',
       }),
     },
   ],
 });
 
-// Проба графа test:int выше читает не только .claude/**, но и файлы проекта: манифесты, конфиги
-// int-тестов, setup, фикстуру. Гейт самопроверки обязан выбираться на каждом из них, иначе
-// устаревший glob test:int уйдёт молча. Основание - docs/DECISIONS.md, 11.10.2026, E0-02A,
-// вопрос «гейт harness-selftest не выбирается на файлах, которые читает проба графа test:int».
-// Файлы пробы build (манифесты, конфиги сборки) перечислены ниже как есть: сверки «каждый
-// прочитанный файл» для build нет. Долг - E0-12L (переадресован решением Р3 E0-12D, 19.10.2026).
-// turbo.json ни одна проба не читает - выбор на нём обещал бы сверку, которой нет.
+// Пробы графа build и test:int читают не только .claude/**, но и файлы проекта: то, из чего
+// turbo строит граф (корневые package.json, pnpm-workspace.yaml, turbo.json; package.json и
+// turbo.json каждого пакета и нового пакета по каждому шаблону pnpm-workspace.yaml -
+// graphSources), и то, что проба test:int читает сверх графа (конфиги int-тестов, setup,
+// фикстура). Гейт
+// самопроверки обязан выбираться на каждом из них, иначе устаревший glob build или test:int
+// уйдёт молча (docs/DECISIONS.md, 11.10.2026, E0-02A; E0-12L, 21.10.2026). Входы задач turbo
+// (исходники пакетов) пробы не читают - их сверяет сам turbo, а пробы build/test:int сверяют
+// их с glob этих гейтов. next.config.* ни одна проба не читает (граф сборки - у turbo), на нём
+// самопроверка не выбирается.
 // Боевые формы роута (ROUTE_FORMS) читают пробы S13/S14 - их сверка здесь же (E0-12D).
 checkGateSelection('harness-selftest', {
-  runWhat: '.claude/**, файлах проекта, которые читают пробы build и test:int, и путях из note вне when',
-  skipWhat: 'исходниках, lockfile, turbo.json, docs и путях из when и cmd гейтов-владельцев note',
+  runWhat: '.claude/**, файлах, из которых turbo строит граф, файлах, которые читает проба test:int, и путях из note вне when',
+  skipWhat: 'исходниках, lockfile, next.config.*, docs и путях из when и cmd гейтов-владельцев note',
   mustRun: [
     '.claude/hooks/gates.js',
     '.claude/hooks/rules.sf.json',
+    '.claude/hooks/selftest-graph.js',
     '.claude/agents/worker.md',
     'package.json',
     'apps/web/package.json',
     'apps/api/package.json',
     'packages/core/package.json',
     'packages/integrations/youtube/package.json',
-    'apps/web/next.config.ts',
-    'apps/web/next.config.mjs',
-    'packages/core/next.config.js',
     'pnpm-workspace.yaml',
+    'turbo.json',
+    'packages/db/turbo.json',
+    'apps/api/turbo.json',
+    'apps/web/turbo.json',
+    'apps/' + G.NEW_SIBLING + '/package.json',
+    'packages/integrations/' + G.NEW_SIBLING + '/turbo.json',
     'apps/api/vitest.int.config.ts',
     'apps/worker/vitest.int.config.ts',
     'packages/db/vitest.int.config.ts',
@@ -1097,7 +1755,9 @@ checkGateSelection('harness-selftest', {
     'test/container.test.ts',
   ],
   mustSkip: [
-    'turbo.json',
+    'apps/web/next.config.ts',
+    'apps/web/next.config.mjs',
+    'packages/core/next.config.js',
     'docs/00_STATUS.md',
     'scripts/tasks.mjs',
     'scripts/compose-rules.mjs',
@@ -1120,6 +1780,9 @@ checkGateSelection('harness-selftest', {
     'test/turbo-inputs.test.ts',
     'xapps/web/package.json',
     'docs/apps/web/package.json',
+    'docs/turbo.json',
+    'xapps/api/turbo.json',
+    'docs/apps/api/turbo.json',
   ],
   extra: [
     {
@@ -1147,19 +1810,46 @@ checkGateSelection('harness-selftest', {
       },
     },
     {
-      // файлы берутся тем же intProbeReads, что и в пробе test:int: конфиг из --config с любым
+      // Файл графа вне glob (пакет по шаблону tools/* в pnpm-workspace.yaml, turbo.json пакета)
+      // меняет граф turbo, и без этой сверки его правка самопроверку не запускала бы (E0-12L;
+      // TECH_DEBT, строки 11.10.2026 E0-01A «when harness-selftest знает только apps/**, packages/**»
+      // и 11.10.2026 E0-02A «workspacePackages: шаблоны вне apps/, packages/»). Новый пакет по каждому шаблону workspace (graphSources) - и по шаблону без
+      // единого пакета - требует glob на шаблон каталога, а не на перечень сегодняшних пакетов.
+      // Детектор: стаб-пакет и стаб-шаблон G.STUB_PATTERN дают свои G.STUB_SOURCES.
+      name: 'его выбирает каждый файл, из которого turbo строит граф (корневые package.json, pnpm-workspace.yaml, turbo.json; package.json и turbo.json каждого пакета dry и нового пакета по каждому шаблону workspace)',
+      graph: true,
+      fn: ({ gate, runs }) => {
+        const { dry, patterns } = LIVE_GRAPH.snap;
+        const sources = G.graphSources(dry, patterns);
+        const bad = G.outsideGlob(runs, sources);
+        if (bad.length) return G.refusal('граф turbo читает', gate.id, bad);
+        const under = stubUnderGlob(runs, gate.id);
+        if (under) return under;
+        const stub = G.outsideGlob(runs, G.graphSources(G.stubNode(dry, 'build'), patterns.concat(G.STUB_PATTERN)));
+        const blind = G.STUB_SOURCES.filter((f) => !stub.some((b) => b.startsWith(f + ' ')));
+        if (blind.length) return 'проба не замечает ' + blind.join(', ') + ' вне glob ' + gate.id + ' на стабе';
+        return { note: sources.length + ' файлов' };
+      },
+    },
+    {
+      // файлы берутся тем же liveIntReads, что и в пробе test:int: конфиг из --config с любым
       // именем, setup-модули, модуль testEnvFilePath, фикстура
-      name: 'его выбирает каждый файл, который читает проба test:int',
-      fn: ({ runs }) => {
-        const ws = workspacePackages();
-        const reads = intProbeReads(ws, scriptRoots(ws, 'test:int'), DISK);
-        const stray = reads.filter((r) => !runs(r.file));
-        if (stray.length) return 'проба test:int читает вне glob harness-selftest: ' + stray.map((r) => r.file + ' (' + r.why + ')').join(', ');
+      name: 'его выбирает каждый файл, который читает проба test:int сверх графа turbo',
+      graph: true,
+      fn: ({ gate, runs }) => {
+        const reads = liveIntReads();
+        const bad = G.outsideGlob(runs, reads);
+        if (bad.length) return G.refusal('проба test:int читает', gate.id, bad);
         return { note: reads.length + ' файлов' };
       },
     },
   ],
 });
+
+// Последняя строка графа: отказ снимка (dry-JSON, манифесты, шаблоны workspace, tracked - git ls-files
+// с файлами на диске; сбой git ls-files или stat файла - тоже здесь) называется здесь один раз,
+// с перечнем проб графа, которые без него не гонялись (graphGate).
+check('граф turbo: dry-JSON настоящего дерева (turbo run ' + GRAPH_SCRIPTS.join(' ') + ' --dry=json)', () => graphVerdict(LIVE_GRAPH));
 
 // ------------------------------------------------------------------ 3. шапки агентов и команд
 for (const kind of ['agents', 'commands']) {
@@ -1914,10 +2604,15 @@ check('пробы не оставили файлов в репозитории: 
 });
 
 // ------------------------------------------------------------------ итог
-let red = 0;
-for (const r of results) {
-  if (!r.ok) red++;
-  console.log((r.ok ? '  ok   ' : '  FAIL ') + r.name + (r.note ? '  - ' + r.note : ''));
+report();
+
+/** Строки results и счёт; код выхода 1, если красна хоть одна (зовёт и loadGraphModule). */
+function report() {
+  let red = 0;
+  for (const r of results) {
+    if (!r.ok) red++;
+    console.log((r.ok ? '  ok   ' : '  FAIL ') + r.name + (r.note ? '  - ' + r.note : ''));
+  }
+  console.log(red ? 'Самопроверка обвязки: КРАСНАЯ, ' + red + ' из ' + results.length : 'Самопроверка обвязки: зелёная, ' + results.length + ' проверок');
+  process.exit(red ? 1 : 0);
 }
-console.log(red ? 'Самопроверка обвязки: КРАСНАЯ, ' + red + ' из ' + results.length : 'Самопроверка обвязки: зелёная, ' + results.length + ' проверок');
-process.exit(red ? 1 : 0);
