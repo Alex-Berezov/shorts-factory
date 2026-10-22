@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AppInstance } from "../src/app.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
 import {
   ESCAPE,
   LINE_BREAK,

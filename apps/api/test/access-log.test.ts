@@ -14,7 +14,7 @@ import {
   it,
 } from "vitest";
 import { z } from "zod";
-import type { AppInstance } from "../src/app.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
 import { LINE_BREAK } from "./error-routes.js";
 import {
   AUTH_HEADER,
@@ -22,6 +22,7 @@ import {
   basicAuthHeader,
   buildTestApp,
   recordingServiceLogger,
+  unmappableError,
 } from "./helpers.js";
 
 /** Put into a url by the caller; must not reach any line of the log. */
@@ -29,20 +30,6 @@ const MARKER = "caller-typed-marker";
 
 /** A provider url with a key, the way a thrower puts it into `details`. */
 const LEAKED_URL = "https://www.googleapis.com/youtube/v3?key=super-secret-key";
-
-/**
- * An error our own handler cannot map: reading it throws, so the handler
- * throws, and Fastify's default handler takes the request.
- */
-function unmappableError(): Error {
-  const unmappable = new Error("unmappable failure");
-  Object.defineProperty(unmappable, "validation", {
-    get(): never {
-      throw new Error("the error handler itself failed");
-    },
-  });
-  return unmappable;
-}
 
 /** What one request left behind: its parsed log lines and its id header. */
 interface Written {

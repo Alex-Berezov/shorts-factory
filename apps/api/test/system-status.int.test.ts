@@ -15,7 +15,8 @@ import {
   silentLogger,
 } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type AppInstance, buildApp } from "../src/app.js";
+import { buildApp } from "../src/app.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
 import { createBudgetProbe } from "../src/lib/budget.js";
 import { PROBE_QUERY_LIMIT_MS } from "../src/lib/dependency-timeout.js";
 import { createHealthProbes } from "../src/lib/health.js";

@@ -289,7 +289,19 @@ function commonRules() {
   );
 }
 
-/** Правила конкретного репозитория. Нет своих - общие. */
+/**
+ * Список standards репозитория: общие правила первыми, затем свои; общее правило
+ * с id, который есть в своём списке, уступает своему. Не массив - пустой список.
+ */
+function mergeStandards(common, own) {
+  const mine = Array.isArray(own) ? own : [];
+  // В множество - только строковые id: правило без id не вытесняет общие правила без id.
+  const ids = new Set(mine.map((rule) => rule && rule.id).filter((id) => typeof id === 'string'));
+  const shared = (Array.isArray(common) ? common : []).filter((rule) => !(rule && typeof rule.id === 'string' && ids.has(rule.id)));
+  return shared.concat(mine);
+}
+
+/** Правила конкретного репозитория. Нет своих - общие; standards - склейка (mergeStandards). */
 function rulesFor(repo) {
   const name = repo && repo.name;
   if (!name) return commonRules();
@@ -299,6 +311,9 @@ function rulesFor(repo) {
     readJson(path.join(repo.path, '.claude', 'hooks', 'rules.json'));
   const base = commonRules();
   const merged = own ? Object.assign({}, base, own) : base;
+  // standards склеиваются, а не заменяются: общие правила (W..) действуют и
+  // в репозитории со своим списком; одинаковый id - побеждает правило репозитория.
+  if (own) merged.standards = mergeStandards(base.standards, own.standards);
   if (!merged.repo) merged.repo = name;
   _rulesCache.set(name, merged);
   return merged;
@@ -689,6 +704,7 @@ module.exports = {
   label,
   commonRules,
   rulesFor,
+  mergeStandards,
   targetFiles,
   matchGlob,
   matchAny,

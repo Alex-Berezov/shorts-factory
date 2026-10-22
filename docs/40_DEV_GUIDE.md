@@ -17,25 +17,40 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
    Из `@sf/core` сюда можно брать только реестры значений `as const` и коды ошибок
    (ADR-0007).
 2. **Модуль роутов** - `apps/api/src/routes/<модуль>/index.ts`, экспорт
-   `registerRoutes(app: AppInstance, deps: AppDeps)`. Внутри:
+   `registerRoutes(registrar: RouteRegistrar, deps: AppDeps)`. Внутри:
    `const responses = { ...errorResponses(), [OK_STATUS]: Schema }` и
-   `defineRoute(app, { method, url, responses, schema: { summary, tags, params, body }, ...options }, handler)`
-   (`errorResponses`, `OK_STATUS`, `defineRoute` - из `apps/api/src/lib/route-schemas.ts`;
-   образец - `apps/api/src/routes/system/index.ts`). Прямых `app.get`/`app.route` в модуле роутов нет:
-   помощник сам кладёт `responses` в `schema.response` и выводит тип ответа хендлера
-   (`SuccessReply<typeof responses>`), а `schema` с собственным `response` не компилируется.
+   `defineRoute(registrar, { method, url, responses, schema: { summary, tags, params, body }, ...options }, handler)`
+   (`RouteRegistrar`, `errorResponses`, `OK_STATUS`, `defineRoute` - из `apps/api/src/lib/define-route.ts`;
+   образец - `apps/api/src/routes/system/index.ts`). `registrar` модуля - не экземпляр Fastify, а
+   `RouteRegistrar` без единого его метода (ADR-0015): `registrar.get`/`registrar.route`/`register`/`addHook`
+   не компилируются, а через приведение их нет и в рантайме. Помощник сам кладёт `responses` в
+   `schema.response` и выводит тип ответа хендлера (`SuccessReply<typeof responses>`), а `schema`
+   с собственным `response` не компилируется. Хуки роута - опциями в определении, кроме
+   `onSend`/`preSerialization` (могут переписать тело - запрещены); заголовки на ответах
+   роута - `replyHeaders: { "cache-control": ... }`, только имена и значения из `REPLY_HEADERS`
+   (сегодня `cache-control: no-store`; расширение - новым ADR); заголовок вне таблицы в этой
+   опции не компилируется и бросает. Это только про опцию: `reply.header`/`removeHeader`/`type`/
+   `serializer` из хендлера и разрешённых хуков роута открыты - держит ревью
+   (`docs/TECH_DEBT.md`, открыто -> E0-12V). `this` и слово `server` в любой позиции
+   (`request.server`, `const server = …`, `request["server"]`) в модуле роута не пишутся: что
+   нужно хендлеру - в `deps`.
    _Почему:_ конверт ошибки попадает в OpenAPI и в сериализатор, а тип ответа читается с той же
    схемы - обработчик не может вернуть конверт ошибки вместо ответа
    (`apps/api/src/routes/README.md`). Штатный не-2xx статус со своим телом - через
    `withErrorEnvelope()` из того же модуля.
-   _Замки:_ стандарты S13/S14 (`.claude/hooks/rules.sf.json`) при записи файла в
-   `apps/api/src/routes/` ловят регистрацию роута мимо `defineRoute` (`.get`/`.post`/… с `(` или `<`,
-   `.route(`, `withTypeProvider` на любом получателе) и `defineRoute(` в файле без
-   `...errorResponses()` в коде (упоминание в комментарии не в счёт); `apps/api/test/define-route.test.ts`
-   держит типы помощника под `tsc`; `apps/api/test/route-shape.test.ts` в
-   `pnpm test` проверяет каждый зарегистрированный роут: `4xx`/`5xx` и каждый точный статус
-   400-599 несут конверт ошибки, ключ `200` есть. Новый роут попадает в его список «ровно эти
-   роуты» отдельной строкой.
+   _Замки:_ регистрацию мимо `defineRoute` держит тип `RouteRegistrar`: каждая форма обхода
+   (методы экземпляра, `.route(`, `withTypeProvider`, скобки, деструктуризация, `register`,
+   `addHook`, `decorate`, `set*`) стоит под `@ts-expect-error` в `apps/api/test/define-route.test.ts`,
+   там же типы помощника под `tsc` и рантайм-кейсы регистратора; стандарт S14
+   (`.claude/hooks/rules.sf.json`) при записи файла в `apps/api/src/routes/` ловит `defineRoute(`
+   в файле без `...errorResponses()` в коде (упоминание в комментарии не в счёт);
+   `apps/api/test/route-shape.test.ts` в `pnpm test` проверяет каждый зарегистрированный роут,
+   включая роуты корня приложения: `config` от `defineRoute` (`isDefinedRoute`; роут из `src/lib`,
+   плагина или `app.ts` мимо помощника - красный, кроме роутов документации);
+   `4xx`/`5xx` и каждый точный статус 400-599 несут конверт ошибки, ключ `200` есть. Новый роут попадает в его список «ровно эти
+   роуты» отдельной строкой. `apps/api/test/route-modules.test.ts` разбирает по AST каждый
+   исходник `apps/api/src/routes/**`: `this` и слово `server` в любой позиции - красный; новый
+   модуль читается без строки в тесте.
 3. **Ошибки** - бросать `AppError` из `@sf/core` (`ValidationError`, `NotFoundError` и т.п.),
    а не собирать ответ руками: конверт `{ error: { code, message, requestId, details? } }`
    строит обработчик ошибок api.

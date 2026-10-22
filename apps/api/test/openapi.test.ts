@@ -4,7 +4,7 @@ import {
 } from "@sf/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
-import type { AppInstance } from "../src/app.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
 import { DOCS_ROUTE, OPENAPI_ROUTE } from "../src/plugins/openapi.js";
 import { AUTH_HEADER, buildTestApp } from "./helpers.js";
 

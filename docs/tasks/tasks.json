@@ -1918,8 +1918,9 @@
       "E0-12D"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-19"
+    "status": "in_progress",
+    "added_at": "2026-10-19",
+    "started_at": "2026-10-22"
   },
   {
     "id": "E0-12Q",
@@ -1996,7 +1997,7 @@
   {
     "id": "E0-12V",
     "epic": "E0",
-    "title": "rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S13/S14, формы S15/S16, сверка носителей, замок zod",
+    "title": "rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S14, формы S15/S16, сверка носителей, замок zod",
     "estimate": "1 д",
     "estimate_days": 1,
     "deps": [

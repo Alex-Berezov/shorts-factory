@@ -10,7 +10,8 @@ import {
 } from "@sf/runtime";
 import type { Redis } from "ioredis";
 import type { Logger } from "pino";
-import { type AppInstance, buildApp } from "./app.js";
+import { buildApp } from "./app.js";
+import type { AppInstance } from "./lib/app-instance.js";
 import { createBudgetProbe } from "./lib/budget.js";
 import { DEPENDENCY_TIMEOUT_MS } from "./lib/dependency-timeout.js";
 import { createHealthProbes } from "./lib/health.js";

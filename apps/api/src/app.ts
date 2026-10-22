@@ -1,13 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { IncomingMessage } from "node:http";
 import { REQUEST_ID_HEADER } from "@sf/contracts";
-import Fastify, {
-  type FastifyBaseLogger,
-  type FastifyInstance,
-  type RawServerDefault,
-} from "fastify";
+import Fastify, { type FastifyBaseLogger } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import type { AppDeps } from "./deps.js";
+import type { AppInstance } from "./lib/app-instance.js";
+import { routeRegistrar } from "./lib/define-route.js";
 import { AccessLogController } from "./lib/request-log.js";
 import { decorateRequestState } from "./lib/request-state.js";
 import { registerAuth } from "./plugins/auth.js";
@@ -29,19 +27,6 @@ import { registerRoutes } from "./routes/index.js";
  * not an error, it is simply not used: the request gets a generated id.
  */
 const REQUEST_ID_PATTERN = /^[\w.:-]{1,128}$/;
-
-/**
- * The Fastify instance every route module is written against: same as
- * `FastifyInstance`, with the Zod type provider so that `schema.response`
- * types the handler return value.
- */
-export type AppInstance = FastifyInstance<
-  RawServerDefault,
-  IncomingMessage,
-  ServerResponse,
-  FastifyBaseLogger,
-  ZodTypeProvider
->;
 
 export interface BuildAppOptions {
   /**
@@ -77,16 +62,29 @@ function suppliedRequestId(req: IncomingMessage): string | undefined {
 /**
  * The application without a socket: no `listen`, no connections opened and
  * none closed - `server.ts` owns the lifecycle, and a test gets the same
- * instance through `app.inject`.
- *
- * Registration order is load-bearing. Fastify binds hooks to routes as the
- * routes are registered, and `@fastify/swagger` collects the routes the same
- * way, so both the auth hook and the OpenAPI plugins have to be in place
- * before the first route: reversing it silently publishes `/docs` or ships an
- * empty document.
+ * instance through `app.inject`. The two steps below, one after the other.
  */
 export function buildApp(deps: AppDeps, options: BuildAppOptions): AppInstance {
-  const app = Fastify({
+  const app = createInstance(options);
+  assembleApp(app, deps, options);
+  return app;
+}
+
+/**
+ * The instance with the options of the service and nothing registered on it.
+ * A step of its own so that a test can add an `onRoute` hook before the
+ * first route of the app: Fastify calls the hook when a route is registered,
+ * and the routes `assembleApp` puts on the root (`/openapi.json`) are
+ * registered there and then (`test/route-shape.test.ts`).
+ *
+ * Exported for that test alone: the app is built by `buildApp`, which calls
+ * this and `assembleApp` in their order. Called apart, the pair lets a
+ * caller register a route on the root before the auth hook is in place.
+ */
+export function createInstance(
+  options: Pick<BuildAppOptions, "logger">,
+): AppInstance {
+  return Fastify({
     // `logger` and `loggerInstance` are mutually exclusive in Fastify 5, and
     // the instance is the one the connections already write to.
     ...(options.logger === false
@@ -133,9 +131,27 @@ export function buildApp(deps: AppDeps, options: BuildAppOptions): AppInstance {
     // own shape and without the request id.
     return503OnClosing: false,
   }).withTypeProvider<ZodTypeProvider>();
+}
 
-  // Read and set by the controller above, the request log and the auth hook,
-  // whatever else is registered (`lib/request-state.ts`).
+/**
+ * Everything the app registers on the instance `createInstance` made.
+ *
+ * Registration order is load-bearing. Fastify binds hooks to routes as the
+ * routes are registered, and `@fastify/swagger` collects the routes the same
+ * way, so both the auth hook and the OpenAPI plugins have to be in place
+ * before the first route: reversing it silently publishes `/docs` or ships an
+ * empty document.
+ *
+ * Exported for `test/route-shape.test.ts` alone, like `createInstance`: the
+ * order of the two is kept by `buildApp`, the one way the app is built.
+ */
+export function assembleApp(
+  app: AppInstance,
+  deps: AppDeps,
+  options: Pick<BuildAppOptions, "adminPassword">,
+): void {
+  // Read and set by the log controller of `createInstance`, the request log
+  // and the auth hook, whatever else is registered (`lib/request-state.ts`).
   decorateRequestState(app);
 
   app.addHook("onSend", (request, reply, payload, done) => {
@@ -155,10 +171,11 @@ export function buildApp(deps: AppDeps, options: BuildAppOptions): AppInstance {
   // straight onto the root instance: `register` defers loading, so
   // `@fastify/swagger` starts collecting routes only once its own
   // registration runs. A route added before that is served but never
-  // documented - the document comes out with an empty `paths`.
+  // documented - the document comes out with an empty `paths`. The modules
+  // get a registrar over that child context, not the context itself: they
+  // can register a route through `defineRoute` and nothing else
+  // (docs/adr/0015-route-registrar.md).
   app.register(async (instance) => {
-    registerRoutes(instance, deps);
+    registerRoutes(routeRegistrar(instance), deps);
   });
-
-  return app;
 }

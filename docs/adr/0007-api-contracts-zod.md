@@ -22,7 +22,7 @@
   (`...errorResponses()` до статусов успеха, `SuccessReply<typeof responses>` как тип ответа -
   с 19.10.2026 его ставит помощник `defineRoute`, E0-12D,
   `withErrorEnvelope()` для статуса, который роут отдаёт штатно) - в `apps/api/src/routes/README.md`
-  и `apps/api/src/lib/route-schemas.ts`.
+  и `apps/api/src/lib/define-route.ts`.
 - **web** читает api через `@sf/api-client` (`packages/api-client/src/client.ts`,
   `createApiClient`): клиент разбирает ответ схемой из `@sf/contracts`, отказ api возвращает
   исключением `ApiError` с полями конверта, а ответ, который api не строило (сбой транспорта,

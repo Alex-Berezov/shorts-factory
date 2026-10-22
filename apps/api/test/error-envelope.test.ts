@@ -1,7 +1,7 @@
 import { REQUEST_ID_HEADER } from "@sf/contracts";
 import { AppError, NotFoundError } from "@sf/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AppInstance } from "../src/app.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
 import {
   BAD_URL,
   BAD_URL_SUFFIX,

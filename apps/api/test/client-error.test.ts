@@ -3,7 +3,7 @@ import { REQUEST_ID_HEADER } from "@sf/contracts";
 import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import type { ConnectionError } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AppInstance } from "../src/app.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
 import {
   type RefusedSocket,
   answerClientError,

@@ -1,15 +1,15 @@
 import type { SystemStatusResponse } from "@sf/contracts";
 import { SystemStatusResponseSchema } from "@sf/contracts";
-import type { AppInstance } from "../../app.js";
 import type { AppDeps } from "../../deps.js";
 import {
   OK_STATUS,
+  type RouteRegistrar,
   defineRoute,
   errorResponses,
-} from "../../lib/route-schemas.js";
+} from "../../lib/define-route.js";
 import { collect, dependencyCheck } from "../../lib/system-status.js";
 
-export function registerRoutes(app: AppInstance, deps: AppDeps): void {
+export function registerRoutes(registrar: RouteRegistrar, deps: AppDeps): void {
   const responses = {
     ...errorResponses(),
     [OK_STATUS]: SystemStatusResponseSchema,
@@ -20,7 +20,7 @@ export function registerRoutes(app: AppInstance, deps: AppDeps): void {
   // reply type would accept an error envelope in place of the status of the
   // service.
   defineRoute(
-    app,
+    registrar,
     {
       method: "GET",
       url: "/system/status",

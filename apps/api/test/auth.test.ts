@@ -5,7 +5,7 @@ import {
   fastify,
 } from "fastify";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AppInstance } from "../src/app.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
 import { decorateRequestState } from "../src/lib/request-state.js";
 import { registerAuth } from "../src/plugins/auth.js";
 import { DOCS_ROUTE, OPENAPI_ROUTE } from "../src/plugins/openapi.js";

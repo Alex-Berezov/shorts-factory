@@ -1403,8 +1403,8 @@ function noteCheckedGates(rules) {
 const NOTE_SELECTING_GATES = ['compose', 'tracker'];
 
 /**
- * Боевые формы роута: пробы S13/S14 читают эти файлы как пропуск, поэтому каждый из них
- * выбирает гейт harness-selftest (сверка - в его пробе выбора ниже).
+ * Боевые формы роута: пробы S14 и пропуска standards в модуле роута читают эти файлы как пропуск,
+ * поэтому каждый из них выбирает гейт harness-selftest (сверка - в его пробе выбора ниже).
  */
 const ROUTE_FORMS = ['apps/api/src/routes/health/index.ts', 'apps/api/src/routes/system/index.ts'];
 
@@ -2982,7 +2982,7 @@ checkGateSelection('test:int', {
 // (исходники пакетов) пробы не читают - их сверяет сам turbo, а пробы build/test:int сверяют
 // их с glob этих гейтов. next.config.* ни одна проба не читает (граф сборки - у turbo), на нём
 // самопроверка не выбирается.
-// Боевые формы роута (ROUTE_FORMS) читают пробы S13/S14 - их сверка здесь же (E0-12D).
+// Боевые формы роута (ROUTE_FORMS) читают пробы S14 и пропуска standards в модуле роута - их сверка здесь же (E0-12D).
 checkGateSelection('harness-selftest', {
   runWhat: '.claude/**, файлах, из которых turbo строит граф, файлах, которые читает проба test:int, и путях из note вне when',
   skipWhat: 'исходниках, lockfile, next.config.*, docs и путях из when и cmd гейтов-владельцев note',
@@ -3059,10 +3059,10 @@ checkGateSelection('harness-selftest', {
       },
     },
     {
-      name: 'его выбирает каждая боевая форма роута, которую читают пробы S13/S14',
+      name: 'его выбирает каждая боевая форма роута, которую читают пробы S14 и пропуска standards',
       fn: ({ runs }) => {
         const stray = ROUTE_FORMS.filter((f) => !runs(f));
-        if (stray.length) return 'пробы S13/S14 читают вне glob harness-selftest: ' + stray.join(', ');
+        if (stray.length) return 'пробы S14 и пропуска standards читают вне glob harness-selftest: ' + stray.join(', ');
         return { note: ROUTE_FORMS.length + ' файла' };
       },
     },
@@ -3265,22 +3265,37 @@ check('standards: console и process.env в packages/runtime/src пойманы,
  * Крах standards.js - красный, а не пропуск: и код вне 0/2, и исключение, пойманное L.guard
  * (код 0, в stderr HOOK_ERROR - см. withScratchTree). Засчитывается
  * только своё правило (L-020): соседнее правило на том же тексте строку не красит и не зеленит.
+ * id - строка с id правила или ANY_RULE - любое правило standards: id всех правил
+ * rules.common.json и rules.sf.json, прочитанные из самих файлов (W.. и S..), каждый в форме
+ * [id], как его печатает standards.js (render); отказ - код 2 и хотя бы один [id], пропуск - ни
+ * одного (модуль роута целиком, E0-12P), одна петля на оба случая. Пустой список id - красная
+ * проба: предикату, которому не с чем сверять, прошло бы любое тело.
  */
-function standardsCases(id, rel, refused, allowed) {
-  const tag = '[' + id + ']';
+const ANY_RULE = { label: 'любое правило', ids: standardsIds };
+/** id правил standards обоих файлов правил, как они записаны; файл, что не разобрался, - пуст. */
+function standardsIds() {
+  return [].concat((common && common.standards) || [], (repoRules && repoRules.standards) || [])
+    .map((rule) => rule && rule.id)
+    .filter((id) => typeof id === 'string' && id !== '');
+}
+function standardsCases(rule, rel, refused, allowed) {
+  const id = typeof rule === 'string' ? rule : rule.label;
+  const ids = typeof rule === 'string' ? [rule] : rule.ids();
+  if (!ids.length) return id + ': ни одного id правила standards в rules.common.json и rules.sf.json - сверять не с чем';
+  const named = (err) => ids.some((one) => err.includes('[' + one + ']'));
   return withScratchTree((tree) => {
     for (const body of refused) {
       tree.write(rel, body);
       const r = tree.standards(rel);
       if (r.err.includes(HOOK_ERROR)) return id + ' на запрещённом: standards.js упал внутри guard - ' + r.err.slice(0, 160);
-      if (r.code !== 2 || !r.err.includes(tag)) return 'не пойман ' + id + ': ' + JSON.stringify(body.slice(0, 120)) + ' - код ' + r.code + ' ' + r.err.slice(0, 160);
+      if (r.code !== 2 || !named(r.err)) return 'не пойман ' + id + ': ' + JSON.stringify(body.slice(0, 120)) + ' - код ' + r.code + ' ' + r.err.slice(0, 160);
     }
     for (const body of allowed) {
       tree.write(rel, body);
       const r = tree.standards(rel);
       if (r.code !== 0 && r.code !== 2) return id + ' на разрешённом: standards.js упал, код ' + r.code + ' ' + r.err.slice(0, 160);
       if (r.err.includes(HOOK_ERROR)) return id + ' на разрешённом: standards.js упал внутри guard - ' + r.err.slice(0, 160);
-      if (r.err.includes(tag)) return id + ' на разрешённом: ' + JSON.stringify(body.slice(0, 120)) + ' - ' + r.err.slice(0, 160);
+      if (named(r.err)) return id + ' на разрешённом: ' + JSON.stringify(body.slice(0, 120)) + ' - ' + r.err.slice(0, 160);
     }
     return { note: refused.length + ' отказ, ' + allowed.length + ' пропуск' };
   });
@@ -3466,52 +3481,96 @@ check('standards: серверные пакеты в apps/web/src (корень,
 });
 
 /**
- * Форма роута (E0-12D, Р6): роут модуля routes регистрируется только defineRoute из
- * src/lib/route-schemas.ts. Обе боевые формы - сами файлы health и system из репозитория -
- * пропуск S13 и S14. Отказ S13 - прямой вызов любым из восьми методов, .route( и
- * withTypeProvider на любом получателе (app, server, child, fastify, this, instance, app?.,
- * цепочка с .get( на своей строке), с ( и с <; пропуск - defineRoute, Promise.all, строки
- * комментария. Отказ S14 - defineRoute в файле без ...errorResponses() в коде: без спреда,
- * спред только в комментарии (//, блочный, строка JSDoc, хвост строки); пропуск - ключ response:
- * в файле без defineRoute (лог, тело ответа). Точные статусы 4xx/5xx правило не видит - их
- * проверяет apps/api/test/route-shape.test.ts.
+ * Форма роута (E0-12D, Р6; E0-12P): роут модуля routes регистрируется только defineRoute из
+ * src/lib/define-route.ts. Регистрацию мимо помощника держит тип: модуль получает RouteRegistrar
+ * без единого ключа экземпляра (apps/api/test/define-route.test.ts, docs/adr/0015-route-registrar.md),
+ * построчное правило S13 снято; экземпляр из хендлера (request.server, reply.server, this) держит
+ * разбор по AST в apps/api/test/route-modules.test.ts, построчное правило S17 снято (В1 E0-12P). Обе
+ * боевые формы - сами файлы health и system из репозитория - пропуск S14 и всех правил standards.
+ * Отказ S14 - defineRoute в файле без ...errorResponses() в коде: без спреда, спред только в
+ * комментарии (//, блочный, строка JSDoc, хвост строки); пропуск - ключ response: в файле без
+ * defineRoute (лог, тело ответа). Точные статусы 4xx/5xx правило не видит - их проверяет
+ * apps/api/test/route-shape.test.ts.
  */
 function routeFile(lines) {
-  return 'export function registerRoutes(app: AppInstance): void {\n' + lines.map((l) => '  ' + l + '\n').join('') + '}\n';
+  return 'export function registerRoutes(registrar: RouteRegistrar): void {\n' + lines.map((l) => '  ' + l + '\n').join('') + '}\n';
 }
-const ROUTE_METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'all'];
-const DEFINED_ROUTE = [
+const ROUTE_DEFINITION = [
   'const responses = { ...errorResponses(), [OK_STATUS]: X };',
-  'defineRoute(app, { method: "GET", url: "/x", responses, schema: { tags: ["x"] } }, handler);',
+  'defineRoute(registrar, { method: "GET", url: "/x", responses, schema: { tags: ["x"] } }, handler);',
 ];
-check('standards: S13 ловит регистрацию роута мимо defineRoute на любом получателе, боевые роуты - нет', () => {
+/** Тексты боевых форм роута (ROUTE_FORMS) из репозитория - пропуск в пробах S14 и модуля роута. */
+function routeFormTexts() {
+  return ROUTE_FORMS.map((form) => fs.readFileSync(path.join(ROOT, form), 'utf8'));
+}
+/**
+ * Пропуск модуля роута целиком (строка долга :644, E0-12P): вызовы с именами методов экземпляра на
+ * том, что экземпляром не является (repo.get, map.delete, searchParams.get, Promise.all), рядом с
+ * defineRoute и ...errorResponses() не отказываются ни одним правилом standards - ложный отказ
+ * снятого S13 не возвращается; то же для ложных отказов снятого S17 (В1 E0-12P): this в строковом
+ * литерале; `deps.config.server` правила standards не отказывают, его отказывает разбор по AST
+ * (apps/api/test/route-modules.test.ts), не S17. Отказ - любой [id] правила standards в замечаниях (standardsCases с
+ * ANY_RULE); крах - красный. Сторона отказа в том же пути показывает, что предикат совпадает и на
+ * S-, и на W-правиле: тело без ...errorResponses() (S14) и тело с @ts-ignore (W03 общего файла -
+ * действует здесь через склейку standards в lib.rulesFor, проба склейки ниже).
+ */
+check('standards: модуль роута с repo.get(, map.delete(, searchParams.get(, this в строке и defineRoute не отказывается ни одним правилом; S14 и W03 в том же пути - отказ', () => {
   const gone = missingDirs(ROUTE_FORMS);
   if (gone) return gone;
-  return standardsCases('S13', 'apps/api/src/routes/zz_selftest/index.ts', ROUTE_METHODS.map((m) =>
-    routeFile(['app.' + m + '("/x", { schema: { response: responses } }, handler);']),
-  ).concat(ROUTE_METHODS.map((m) =>
-    routeFile(['app.' + m + '<{ Reply: SuccessReply<typeof responses> }>("/x", handler);']),
-  )).concat([
-    routeFile(['server.get("/x", handler);']),
-    routeFile(['child.post<{ Body: B }>("/x", handler);']),
-    routeFile(['fastify.put("/x", handler);']),
-    routeFile(['this.delete("/x", handler);']),
-    routeFile(['app?.get("/x", handler);']),
-    routeFile(['app', '  .get("/x", handler);']),
-    routeFile(['app.route({ method: "GET", url: "/x", handler });']),
-    routeFile(['instance.route<G>({ method: "GET", url: "/x", handler });']),
-    routeFile(['app.withTypeProvider<ZodTypeProvider>().get("/x", handler);']),
-    routeFile(['const typed = app.withTypeProvider<ZodTypeProvider>();']),
-  ]), ROUTE_FORMS.map((rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8')).concat([
-    routeFile(DEFINED_ROUTE),
-    routeFile(DEFINED_ROUTE.concat(['const [a, b] = await Promise.all([one(), two()]);', 'const all = await Promise.all ([one()]);'])),
-    routeFile(['// app.get("/x", handler);', '/**', ' * app.route({}) and app.withTypeProvider()', ' */', 'const x = 1;']),
-  ]));
+  const bodies = routeFormTexts().concat([
+    routeFile(ROUTE_DEFINITION.concat([
+      'const found = repo.get(id);',
+      'map.delete(key);',
+      'const page = searchParams.get("page");',
+      'const [a, b] = await Promise.all([one(), two()]);',
+      'request.log.info("cannot undo this.");',
+      'const url = deps.config.server;',
+    ])),
+  ]);
+  return standardsCases(ANY_RULE, 'apps/api/src/routes/zz_selftest/index.ts', [
+    routeFile(['const responses = { [OK_STATUS]: X };', ROUTE_DEFINITION[1]]),
+    routeFile(ROUTE_DEFINITION.concat(['// @ts-ignore', 'const n: number = id;'])),
+  ], bodies);
+});
+/**
+ * Склейка standards (E0-12P, решение техлида по п.5 круга 3): lib.rulesFor отдаёт репозиторию со
+ * своим списком и общие правила - каждый id обоих файлов ровно один раз, общие первыми; при
+ * одинаковом id побеждает правило репозитория (mergeStandards). Откат к Object.assign - красный:
+ * W-правила пропадают из списка репозитория.
+ */
+check('lib.rulesFor склеивает standards общего файла и репозитория, одинаковый id - правило репозитория', () => {
+  const repo = L.repoFor(path.join(ROOT, 'package.json'));
+  if (!repo) return 'репозиторий проекта не найден lib.repoFor';
+  const got = (L.rulesFor(repo).standards || []).map((rule) => rule && rule.id);
+  const shared = ((common && common.standards) || []).map((rule) => rule.id);
+  const mine = ((repoRules && repoRules.standards) || []).map((rule) => rule.id);
+  if (!shared.length || !mine.length) return 'пустой список standards в файле правил - сверять не с чем';
+  const want = shared.filter((id) => !mine.includes(id)).concat(mine);
+  if (JSON.stringify(got) !== JSON.stringify(want)) return 'standards репозитория ' + JSON.stringify(got) + ', ждали ' + JSON.stringify(want);
+  if (typeof L.mergeStandards !== 'function') return 'lib.mergeStandards не экспортирован';
+  const merged = L.mergeStandards([{ id: 'X', from: 'common' }, { id: 'Y', from: 'common' }], [{ id: 'X', from: 'own' }]);
+  const seen = JSON.stringify(merged.map((rule) => rule.id + ':' + rule.from));
+  if (seen !== JSON.stringify(['Y:common', 'X:own'])) return 'одинаковый id: ' + seen + ', ждали ["Y:common","X:own"]';
+  return { note: got.length + ' правил: ' + shared.length + ' общих, ' + mine.length + ' своих' };
+});
+/**
+ * Склейка и правило без id (E0-12P, решение техлида по кругу 4, п.5): в множество id попадают только
+ * строки, поэтому общее правило без id не отбрасывается вместе с отсутствующим id у правила
+ * репозитория. Откат к `new Set(mine.map((rule) => rule && rule.id))` - красный: undefined в множестве
+ * выбрасывает все общие правила без id.
+ */
+check('lib.mergeStandards: общее правило без id переживает склейку', () => {
+  if (typeof L.mergeStandards !== 'function') return 'lib.mergeStandards не экспортирован';
+  const merged = L.mergeStandards([{ from: 'common-no-id' }, { id: 'Y', from: 'common' }], [{ from: 'own-no-id' }, { id: 'X', from: 'own' }]);
+  const seen = JSON.stringify(merged.map((rule) => rule.from));
+  const want = JSON.stringify(['common-no-id', 'common', 'own-no-id', 'own']);
+  if (seen !== want) return 'склейка ' + seen + ', ждали ' + want;
+  return { note: 'правила без id в обоих списках сохранены' };
 });
 check('standards: S14 ловит defineRoute без ...errorResponses() в коде файла, боевые роуты - нет', () => {
   const gone = missingDirs(ROUTE_FORMS);
   if (gone) return gone;
-  const route = DEFINED_ROUTE[1];
+  const route = ROUTE_DEFINITION[1];
   return standardsCases('S14', 'apps/api/src/routes/zz_selftest/index.ts', [
     routeFile(['const responses = { [OK_STATUS]: X };', route]),
     routeFile(['const failures = errorResponses();', 'const responses = { ...failures, [OK_STATUS]: X };', route]),
@@ -3519,8 +3578,8 @@ check('standards: S14 ловит defineRoute без ...errorResponses() в ко�
     routeFile(['/* ...errorResponses() */', 'const responses = { [OK_STATUS]: X };', route]),
     routeFile(['/**', ' * ...errorResponses() goes first', ' */', 'const responses = { [OK_STATUS]: X };', route]),
     routeFile(['const responses = { [OK_STATUS]: X }; // no ...errorResponses() here', route]),
-  ], ROUTE_FORMS.map((rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8')).concat([
-    routeFile(DEFINED_ROUTE),
+  ], routeFormTexts().concat([
+    routeFile(ROUTE_DEFINITION),
     routeFile(['request.log.info({ response: answer }, "answered");', 'const body = { response: x, ok: true };', 'reply.send({ response });']),
   ]));
 });

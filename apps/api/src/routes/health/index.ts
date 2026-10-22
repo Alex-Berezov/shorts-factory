@@ -1,13 +1,13 @@
 import { HEALTH_STATUS_CODES, HealthResponseSchema } from "@sf/contracts";
-import type { AppInstance } from "../../app.js";
 import type { AppDeps } from "../../deps.js";
 import {
+  type RouteRegistrar,
   defineRoute,
   errorResponses,
   withErrorEnvelope,
-} from "../../lib/route-schemas.js";
+} from "../../lib/define-route.js";
 
-export function registerRoutes(app: AppInstance, deps: AppDeps): void {
+export function registerRoutes(registrar: RouteRegistrar, deps: AppDeps): void {
   // 503 rather than 200 with a body to read: a container healthcheck and
   // `depends_on` in Compose (E0-11) branch on the status code alone. Which
   // state travels with which status is `HEALTH_STATUS_CODES` in the contract,
@@ -27,7 +27,7 @@ export function registerRoutes(app: AppInstance, deps: AppDeps): void {
   // The reply type is read off the object above rather than written out: see
   // `defineRoute`.
   defineRoute(
-    app,
+    registrar,
     {
       method: "GET",
       url: "/health",
@@ -40,16 +40,16 @@ export function registerRoutes(app: AppInstance, deps: AppDeps): void {
       },
       // A verdict about this moment: a proxy or a browser that kept it would
       // answer "up" for a database that has since gone away, or the other way
-      // round. On every answer of the route, not only the handler's: the 503
-      // of a service that is closing and a 500 leave through the error
-      // handler, and a cache with `stale-if-error` would keep serving such a
-      // 503 after the service came back. No `bodyLimit` next to it: Fastify
-      // 5.12.3 never reads the body of a GET (`bodyless` in `fastify.js:134`,
-      // `lib/handle-request.js:35`).
-      onSend: (_request, reply, payload, done) => {
-        reply.header("cache-control", "no-store");
-        done(null, payload);
-      },
+      // round. Not only on the handler's answers: the 503 of a service that
+      // is closing and a 500 leave through the error handler, and a cache
+      // with `stale-if-error` would keep serving such a 503 after the service
+      // came back. `defineRoute` sets `replyHeaders` in the `onSend` of the
+      // route, which those answers pass, Fastify's own default handler's
+      // included (measured in `test/instance-after-ready.test.ts`).
+      //
+      // No `bodyLimit` next to it: Fastify 5.12.3 never reads the body of a
+      // GET (`bodyless` in `fastify.js:134`, `lib/handle-request.js:35`).
+      replyHeaders: { "cache-control": "no-store" },
     },
     async (_request, reply) => {
       const report = await deps.health.check();

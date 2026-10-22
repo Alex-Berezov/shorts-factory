@@ -5,8 +5,8 @@ import {
   ValidationError,
 } from "@sf/core";
 import { z } from "zod";
-import type { AppInstance } from "../src/app.js";
-import { errorResponses } from "../src/lib/route-schemas.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
+import { errorResponses } from "../src/lib/define-route.js";
 
 /**
  * The routes that fail on purpose and the values they fail with, shared by

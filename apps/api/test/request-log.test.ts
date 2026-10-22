@@ -1,7 +1,7 @@
 import { loadEnv } from "@sf/config";
 import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AppInstance } from "../src/app.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
 import {
   BAD_URL,
   BAD_URL_SUFFIX,

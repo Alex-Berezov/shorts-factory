@@ -6,18 +6,22 @@ import { ErrorBodySchema, HealthResponseSchema } from "@sf/contracts";
 import Fastify, { type RouteOptions } from "fastify";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import type { AppInstance } from "../src/app.js";
+import { assembleApp, createInstance } from "../src/app.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
 import {
   OK_STATUS,
+  defineRoute,
   errorResponses,
+  isDefinedRoute,
+  routeRegistrar,
   withErrorEnvelope,
-} from "../src/lib/route-schemas.js";
+} from "../src/lib/define-route.js";
 import {
   DOCS_ROUTE,
   OPENAPI_ROUTE,
   registerOpenapi,
 } from "../src/plugins/openapi.js";
-import { buildTestApp } from "./helpers.js";
+import { TEST_PASSWORD, testDeps } from "./helpers.js";
 
 /**
  * The error envelope on every failure status of every route, checked on what
@@ -25,7 +29,7 @@ import { buildTestApp } from "./helpers.js";
  * key (`[HEALTH_STATUS_CODES.degraded]`) is beyond a pattern over a line, and
  * the rule of `rules.sf.json` (S14) only says whether `...errorResponses()` is
  * in the file at all. What a route must declare (`src/routes/README.md`,
- * `src/lib/route-schemas.ts`):
+ * `src/lib/define-route.ts`):
  *
  * - `4xx` and `5xx`, each the error envelope - `ErrorBodySchema` of
  *   `@sf/contracts`, the schema `errorResponses()` spreads;
@@ -377,39 +381,65 @@ async function documentationRoutes(): Promise<Set<string>> {
   return keys;
 }
 
+/** Code that registers routes on a context of the app it is handed. */
+type Registrant = (app: AppInstance) => void;
+
 /**
- * The routes of an app as Fastify registered them, without those of the
- * documentation plugins - left out by exact method and url
- * (`documentationRoutes`), so a route of `src/routes` under `/docs/`, an
- * explicit `HEAD` route and a route of several methods all stay in. The HEAD
- * twin Fastify adds to a GET route is checked like the route itself: it
- * carries the same schema. Not by `schema.hide` either: a route of
- * `src/routes` hidden from the document is still a route whose failures must
- * serialize. `extra` registers more routes, the way a module of `src/routes`
- * would.
+ * Every route an app registers, as Fastify hands it to `onRoute`, and those
+ * of them registered on the root while the app was assembled - before
+ * `ready()`, where `register` defers every child context to. The hook is
+ * added between `createInstance` and `assembleApp`, the two steps of
+ * `buildApp`, so it sees the routes the app puts straight on the root
+ * (`/openapi.json` of `registerOpenapi`) as well as those of the child
+ * contexts, which inherit it when they load. `atRoot` registers on the root
+ * right after the app is assembled, the way code called from `buildApp` next
+ * to `registerOpenapi(app)` would; `inChild` - on a child context, the way a
+ * plugin would.
  */
-async function ownRoutes(
-  extra?: (app: AppInstance) => void,
-): Promise<RouteOptions[]> {
-  const documentation = await documentationRoutes();
-  const app = buildTestApp();
-  const registered: RouteOptions[] = [];
+async function registeredRoutes(
+  registrants: { atRoot?: Registrant; inChild?: Registrant } = {},
+): Promise<{ all: RouteOptions[]; root: RouteOptions[] }> {
+  const app = createInstance({ logger: false });
+  const all: RouteOptions[] = [];
+  const root: RouteOptions[] = [];
+  let assembling = true;
   try {
-    // Before `ready()`: the routes go into a child context that loads during
-    // `ready()` and inherits the hooks of the root at that moment.
     app.addHook("onRoute", (route) => {
-      registered.push(route);
+      all.push(route);
+      if (assembling) root.push(route);
     });
-    if (extra !== undefined) {
+    assembleApp(app, testDeps(), { adminPassword: TEST_PASSWORD });
+    registrants.atRoot?.(app);
+    assembling = false;
+    const { inChild } = registrants;
+    if (inChild !== undefined) {
       app.register(async (child) => {
-        extra(child);
+        inChild(child);
       });
     }
     await app.ready();
   } finally {
     await app.close();
   }
-  return registered.filter((route) => !documentation.has(routeKey(route)));
+  return { all, root };
+}
+
+/**
+ * The routes of an app as Fastify registered them (`registeredRoutes`),
+ * without those of the documentation plugins - left out by exact method and
+ * url (`documentationRoutes`), so a route of `src/routes` under `/docs/`, an
+ * explicit `HEAD` route and a route of several methods all stay in. The HEAD
+ * twin Fastify adds to a GET route is checked like the route itself: it
+ * carries the same schema. Not by `schema.hide` either: a route of
+ * `src/routes` hidden from the document is still a route whose failures must
+ * serialize.
+ */
+async function ownRoutes(
+  registrants: { atRoot?: Registrant; inChild?: Registrant } = {},
+): Promise<RouteOptions[]> {
+  const documentation = await documentationRoutes();
+  const { all } = await registeredRoutes(registrants);
+  return all.filter((route) => !documentation.has(routeKey(route)));
 }
 
 /** Entries in the order of their route, for a comparison as a set. */
@@ -417,11 +447,57 @@ function byRoute<T extends { route: string }>(entries: T[]): T[] {
   return [...entries].sort((a, b) => a.route.localeCompare(b.route));
 }
 
+/** The violation of a route that `defineRoute` did not register. */
+const NOT_DEFINED = "not defined through defineRoute";
+
+/**
+ * The shape of each route, and whether `defineRoute` registered it - by its
+ * `config` (`isDefinedRoute`). A module of `src/routes` gets
+ * a `RouteRegistrar` and cannot register past the helper by type; any other
+ * code handed the instance - a function of `src/lib`, a plugin, `app.ts` -
+ * can, with a reply type written by hand, and is held here.
+ */
 function shapes(routes: RouteOptions[]) {
   return routes.map((route) => ({
     route: routeKey(route),
-    violations: routeShapeViolations(route.schema?.response),
+    violations: [
+      ...(isDefinedRoute(route.config) ? [] : [NOT_DEFINED]),
+      ...routeShapeViolations(route.schema?.response),
+    ],
   }));
+}
+
+/**
+ * A function of `src/lib` that is handed a context and registers a route
+ * past `defineRoute`, with a reply type written by hand and a
+ * `schema.response` in the right shape: nothing in the type or in the rules
+ * refuses it.
+ */
+function registerFromLib(app: AppInstance): void {
+  app.route<{ Reply: { status: "ok" } }>({
+    method: "GET",
+    url: "/from-lib",
+    schema: {
+      response: { ...errorResponses(), [OK_STATUS]: HealthResponseSchema },
+    },
+    handler: async () => ({ status: "ok" }),
+  });
+}
+
+/**
+ * Code called from `buildApp` with the root instance - a plugin of metrics,
+ * say - that registers a route straight on it with `app.get`.
+ */
+function registerOnRoot(app: AppInstance): void {
+  app.get<{ Reply: { status: "ok" } }>(
+    "/on-root",
+    {
+      schema: {
+        response: { ...errorResponses(), [OK_STATUS]: HealthResponseSchema },
+      },
+    },
+    async () => ({ status: "ok" }),
+  );
 }
 
 describe("routes of the registry", () => {
@@ -452,21 +528,24 @@ describe("routes of the registry", () => {
       response: { 200: HealthResponseSchema, 503: HealthResponseSchema },
     };
     const violations = [
+      NOT_DEFINED,
       "4xx is not the error envelope",
       "5xx is not the error envelope",
       "503 has no error envelope",
     ];
-    const routes = await ownRoutes((app) => {
-      app.head("/explicit-head", { schema: bare }, async () => undefined);
-      app.route({
-        method: ["GET", "POST"],
-        url: "/several",
-        schema: bare,
-        handler: async () => ({ status: "ok" as const }),
-      });
-      app.get("/docs/own", { schema: bare }, async () => ({
-        status: "ok" as const,
-      }));
+    const routes = await ownRoutes({
+      inChild: (app) => {
+        app.head("/explicit-head", { schema: bare }, async () => undefined);
+        app.route({
+          method: ["GET", "POST"],
+          url: "/several",
+          schema: bare,
+          handler: async () => ({ status: "ok" as const }),
+        });
+        app.get("/docs/own", { schema: bare }, async () => ({
+          status: "ok" as const,
+        }));
+      },
     });
     const seen = shapes(routes);
     expect(seen).toContainEqual({ route: "HEAD /explicit-head", violations });
@@ -475,25 +554,89 @@ describe("routes of the registry", () => {
   });
 
   it("checks a route hidden from the document like any other", async () => {
-    const routes = await ownRoutes((app) => {
-      app.get(
-        "/hidden",
-        {
-          schema: {
-            hide: true,
-            response: { 200: HealthResponseSchema, 503: HealthResponseSchema },
+    const routes = await ownRoutes({
+      inChild: (app) => {
+        app.get(
+          "/hidden",
+          {
+            schema: {
+              hide: true,
+              response: {
+                200: HealthResponseSchema,
+                503: HealthResponseSchema,
+              },
+            },
           },
-        },
-        async () => ({ status: "ok" as const }),
-      );
+          async () => ({ status: "ok" as const }),
+        );
+      },
     });
     expect(shapes(routes)).toContainEqual({
       route: "GET /hidden",
       violations: [
+        NOT_DEFINED,
         "4xx is not the error envelope",
         "5xx is not the error envelope",
         "503 has no error envelope",
       ],
+    });
+  });
+
+  it("refuses a route in shape that defineRoute did not register", async () => {
+    const routes = await ownRoutes({ inChild: registerFromLib });
+    expect(shapes(routes)).toContainEqual({
+      route: "GET /from-lib",
+      violations: [NOT_DEFINED],
+    });
+  });
+
+  it("refuses a route registered past defineRoute straight on the root of the app", async () => {
+    // What `registerMetrics(app)` called from `buildApp` next to
+    // `registerOpenapi(app)` would do: Fastify calls `onRoute` there and
+    // then, before any child context loads.
+    const routes = await ownRoutes({ atRoot: registerOnRoot });
+    expect(shapes(routes)).toContainEqual({
+      route: "GET /on-root",
+      violations: [NOT_DEFINED],
+    });
+  });
+
+  it("sees the root: OPENAPI_ROUTE is its only route without the mark, and a route of the documentation", async () => {
+    // The one route the app registers past `defineRoute` is left out of the
+    // checks as documentation, by the set `documentationRoutes` measures
+    // rather than by a list written here.
+    const documentation = await documentationRoutes();
+    const { root } = await registeredRoutes();
+    const unmarked = root
+      .filter((route) => !isDefinedRoute(route.config))
+      .map(routeKey);
+    expect(unmarked.sort()).toEqual(
+      [`GET ${OPENAPI_ROUTE}`, `HEAD ${OPENAPI_ROUTE}`].sort(),
+    );
+    expect(unmarked.filter((key) => !documentation.has(key))).toEqual([]);
+  });
+
+  it("passes a route defineRoute registered on the instance it was handed", async () => {
+    const routes = await ownRoutes({
+      inChild: (app) => {
+        defineRoute(
+          routeRegistrar(app),
+          {
+            method: "GET",
+            url: "/defined-in-extra",
+            responses: {
+              ...errorResponses(),
+              [OK_STATUS]: HealthResponseSchema,
+            },
+            schema: {},
+          },
+          async () => ({ status: "ok" as const }),
+        );
+      },
+    });
+    expect(shapes(routes)).toContainEqual({
+      route: "GET /defined-in-extra",
+      violations: [],
     });
   });
 });

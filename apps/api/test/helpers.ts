@@ -13,11 +13,7 @@ import {
   type Recorder,
   recordingLogger,
 } from "@sf/runtime/test-support/recording-logger";
-import {
-  type AppInstance,
-  type BuildAppOptions,
-  buildApp,
-} from "../src/app.js";
+import { type BuildAppOptions, buildApp } from "../src/app.js";
 import type {
   AppDeps,
   BudgetProbe,
@@ -26,6 +22,7 @@ import type {
   QueuesSnapshot,
   WorkerProbe,
 } from "../src/deps.js";
+import type { AppInstance } from "../src/lib/app-instance.js";
 
 /**
  * A recorder on the options the service builds its logger from
@@ -132,13 +129,15 @@ interface AppOverrides {
 export type TestAppOverrides = AppOverrides & ProbeOverride;
 
 /**
- * `buildApp` with stubbed dependencies and no logging: the probes are the only
- * thing between these tests and a real database, and pino output would drown
- * the run.
+ * The dependencies of a test app: stubs, each replaced by the one a test
+ * passes. The probes are the only thing between these tests and a real
+ * database.
  */
-export function buildTestApp(overrides: TestAppOverrides = {}): AppInstance {
+export function testDeps(
+  overrides: Omit<TestAppOverrides, "adminPassword" | "routes" | "logger"> = {},
+): AppDeps {
   const report: HealthReport = { db: "up", redis: "up", ...overrides.report };
-  const deps: AppDeps = {
+  return {
     health: overrides.health ?? { check: async () => report },
     buildInfo: overrides.buildInfo ?? {
       version: "0.0.1-test",
@@ -148,8 +147,14 @@ export function buildTestApp(overrides: TestAppOverrides = {}): AppInstance {
     worker: overrides.worker ?? { read: async () => LIVE_WORKER },
     budget: overrides.budget ?? { collect: async () => IDLE_BUDGET },
   };
+}
 
-  const app = buildApp(deps, {
+/**
+ * `buildApp` with stubbed dependencies (`testDeps`) and no logging: pino
+ * output would drown the run.
+ */
+export function buildTestApp(overrides: TestAppOverrides = {}): AppInstance {
+  const app = buildApp(testDeps(overrides), {
     adminPassword: overrides.adminPassword ?? TEST_PASSWORD,
     logger: overrides.logger ?? false,
   });
@@ -166,4 +171,18 @@ export function buildTestApp(overrides: TestAppOverrides = {}): AppInstance {
  */
 export function parseErrorBody(payload: string): ErrorBody {
   return ErrorBodySchema.parse(JSON.parse(payload));
+}
+
+/**
+ * An error the app's error handler cannot map: reading it throws, so the
+ * handler throws, and Fastify's default handler takes the request.
+ */
+export function unmappableError(): Error {
+  const unmappable = new Error("unmappable failure");
+  Object.defineProperty(unmappable, "validation", {
+    get(): never {
+      throw new Error("the error handler itself failed");
+    },
+  });
+  return unmappable;
 }

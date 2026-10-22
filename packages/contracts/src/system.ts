@@ -14,7 +14,7 @@ import { z } from "zod";
  * new probe state, or a field spelled differently, passes typecheck and is
  * then rejected on the wire as a 500. The same rule holds on the other side of
  * the boundary: `apps/api` reads the reply type of a route off the schema it
- * declared (`apps/api/src/lib/route-schemas.ts`, `SuccessReply`).
+ * declared (`apps/api/src/lib/define-route.ts`, `SuccessReply`).
  */
 
 /** Result of one dependency probe. */
