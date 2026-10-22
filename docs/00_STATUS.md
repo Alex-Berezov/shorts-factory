@@ -4,16 +4,14 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-22. **Не �
 
 ## Сводка
 
-- **Прогресс:** `███████░░░░░░░░░░░░░░░░░░░░░░░` 33/151 задач, 32.9 / 167.9 оценочных дней.
+- **Прогресс:** `███████░░░░░░░░░░░░░░░░░░░░░░░` 34/151 задач, 33.9 / 167.9 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после
+- **В работе:** ничего — возьмите задачу из «Следующие»
 - **Заблокировано:** нет
 
 ## Сейчас в работе
 
-| Задача | Название | Оценка | Начата |
-|---|---|---|---|
-| [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | 2026-10-22 |
+_Нет задач в работе._
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
@@ -31,7 +29,7 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-22. **Не �
 
 | | Эпик | Задачи | Дни (сделано / всего) | Документ |
 |---|---|---|---|---|
-| 🔄 | **E0** Каркас проекта и инфраструктура | `█████████░░░` 33/42 | 32.9 / 41.4 | [30_E0_TASKS.md](30_E0_TASKS.md) |
+| 🔄 | **E0** Каркас проекта и инфраструктура | `██████████░░` 34/42 | 33.9 / 41.4 | [30_E0_TASKS.md](30_E0_TASKS.md) |
 | ⬜ | **E12** Импорт ручной фазы (Phase 0) | `░░░░░░░░░░░░` 0/5 | 0 / 4 | [42_E12_TASKS.md](42_E12_TASKS.md) |
 | ⬜ | **E1** Source Radar | `░░░░░░░░░░░░` 0/12 | 0 / 15.5 | [31_E1_TASKS.md](31_E1_TASKS.md) |
 | ⬜ | **E2** Video Intelligence / Content DNA | `░░░░░░░░░░░░` 0/10 | 0 / 11 | [32_E2_TASKS.md](32_E2_TASKS.md) |
@@ -86,7 +84,7 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-22. **Не �
 | ✅ | [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-when-гейтов-timeoutsec---only-с-glob-when-testintcomposetracker) | gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker | 1 д | ✅E0-13 ✅E0-12D | 2026-10-21 | 2026-10-21 |
 | ✅ | [E0-12N](TECH_DEBT.md#e0-12n-корневые-тесты-и-скрипты-repo-files-turbo-inputs-ci-config-dockerfile-probe-image-no-search-list-общий-test-support-приложений) | Корневые тесты и скрипты: repo-files, turbo-inputs, ci-config, dockerfile, probe-image, no-search-list, общий test-support приложений | 1 д | ✅E0-13 ✅E0-12F | 2026-10-21 | 2026-10-21 |
 | ✅ | [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) | CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта | 0.5 д | ✅E0-13 ✅E0-12F | 2026-10-21 | 2026-10-22 |
-| 🔄 | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | ✅E0-13 ✅E0-12D | 2026-10-22 |  |
+| ✅ | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | ✅E0-13 ✅E0-12D | 2026-10-22 | 2026-10-22 |
 | ⬜ | [E0-12Q](TECH_DEBT.md#e0-12q-sfruntime-api-worker-форма-модулей-после-e0-12b---стадия-redis-в-shutdownts-единая-форма-опций-redis-фабрик-стадия-db-воркера-через-stageof-один-источник-состояния-queue-stats-однопроходный-обход-cause) | @sf/runtime, api, worker: форма модулей после E0-12B - стадия Redis в shutdown.ts, единая форма опций Redis-фабрик, стадия db воркера через stageOf, один источник состояния queue-stats, однопроходный обход cause | 0.5 д | ✅E0-13 ✅E0-12B ✅E0-12E |  |  |
 | ⬜ | [E0-12R](TECH_DEBT.md#e0-12r-sfruntime-worker-вердикт-и-закрытие-фабрики-queue-redact-глубже-уровня-smoke-cli-и-ctrlc-через-остановку-пакета) | @sf/runtime, worker: вердикт и закрытие фабрики Queue, redact глубже уровня, smoke CLI и Ctrl+C через остановку пакета | 1 д | ✅E0-13 ✅E0-12B ✅E0-12G ⬜E0-12Q |  |  |
 | ⬜ | [E0-12S](TECH_DEBT.md#e0-12s-sfdb-раскол-migratets-на-migration-lockts-проверка-дрейфа-схемы-ci-в-scriptscheck-schema-driftmjs-с-юнитом-и-гейтом) | @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом | 1 д | ✅E0-12I |  |  |

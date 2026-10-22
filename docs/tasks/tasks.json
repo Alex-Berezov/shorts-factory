@@ -1918,9 +1918,11 @@
       "E0-12D"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-19",
-    "started_at": "2026-10-22"
+    "started_at": "2026-10-22",
+    "done_at": "2026-10-22",
+    "note": "Route modules get a narrow RouteRegistrar, registration only via defineRoute, S13 replaced by type and AST tests"
   },
   {
     "id": "E0-12Q",
