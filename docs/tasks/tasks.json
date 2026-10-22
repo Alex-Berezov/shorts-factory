@@ -1901,9 +1901,11 @@
       "E0-12F"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-19",
-    "started_at": "2026-10-21"
+    "started_at": "2026-10-21",
+    "done_at": "2026-10-22",
+    "note": "test:int под замком прогона и проверкой чужих сессий, inputs test:int под замком (h), keepConnection только у клиента замка"
   },
   {
     "id": "E0-12P",
