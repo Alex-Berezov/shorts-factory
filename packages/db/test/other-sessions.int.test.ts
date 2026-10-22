@@ -1,6 +1,5 @@
-import postgres from "postgres";
 import { describe, expect, it, vi } from "vitest";
-import { openTestSql, testDatabaseUrl } from "../test-support/fixture.js";
+import { openMaintenanceSql, openTestSql } from "../test-support/fixture.js";
 import {
   SESSION_CHECK_APPLICATION,
   SESSION_SAMPLING,
@@ -22,18 +21,6 @@ import { TEST_STACK } from "../test-support/stack-guard.js";
 /** How long a refusal may take: every read of the window, and room for the server. */
 const REFUSAL_TIMEOUT_MS =
   SESSION_SAMPLING.samples * SESSION_SAMPLING.pauseMs + 10_000;
-
-/**
- * A client on another database of the same server - `pnpm dev` works on the
- * dev database of the same Postgres. Its `pg_stat_activity` is the whole
- * server's, so a case watches the test database from it without being a
- * session there itself.
- */
-function elsewhere(): postgres.Sql {
-  const url = testDatabaseUrl();
-  url.pathname = "/postgres";
-  return postgres(url.toString(), { max: 1 });
-}
 
 describe("assertNoOtherTestSessions", () => {
   it("passes when no other client is on the test database", async () => {
@@ -69,7 +56,13 @@ describe("assertNoOtherTestSessions", () => {
   );
 
   it("does not count a session on another database of the same server", async () => {
-    const other = elsewhere();
+    // A client on another database of the same server - `pnpm dev` works on
+    // the dev database of the same Postgres. Its `pg_stat_activity` is the
+    // whole server's, so a case watches the test database from it without
+    // being a session there itself. The maintenance database, opened the one
+    // way the test support opens a database of the test server besides the
+    // test one (`openMaintenanceSql`, through `assertTestServerDatabaseName`).
+    const other = openMaintenanceSql();
     try {
       await other`SELECT 1`;
 
@@ -82,7 +75,7 @@ describe("assertNoOtherTestSessions", () => {
   it("does not count a client that leaves between two reads: there in the first, gone by the second", async () => {
     // The backend of the package before, closing as the next one starts.
     const leaving = openTestSql();
-    const watcher = elsewhere();
+    const watcher = openMaintenanceSql();
     try {
       const [row] = await leaving<
         { pid: number }[]
@@ -124,7 +117,7 @@ describe("assertNoOtherTestSessions", () => {
       // The check of a second run, started while this one holds its client:
       // to it, the client of this check is just another session.
       const nested: string[] = [];
-      const watcher = elsewhere();
+      const watcher = openMaintenanceSql();
       try {
         await assertNoOtherTestSessions({
           onRead: async (read) => {

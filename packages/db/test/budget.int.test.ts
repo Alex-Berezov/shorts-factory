@@ -1,5 +1,13 @@
 import { BudgetExceededError } from "@sf/core";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import {
   type BudgetGuard,
   type BudgetLimits,
@@ -40,6 +48,13 @@ beforeAll(() => {
   guard = createBudgetGuard({ db: db(), limits: LIMITS });
 });
 
+// Every case starts from an empty table: two cases that wrote into one window
+// would otherwise each read the other's spend, and the set would pass or fail
+// by the order it ran in.
+beforeEach(async () => {
+  await db().$client`delete from api_usage_log`;
+});
+
 describe("createBudgetGuard against the spend table", () => {
   it("lets a call through while the cap has room", async () => {
     const usage = createUsageLogger(db(), { jobId: "radar.snapshot/1" });
@@ -58,11 +73,13 @@ describe("createBudgetGuard against the spend table", () => {
 
   it("refuses the call once the day's quota cap is reached", async () => {
     const usage = createUsageLogger(db(), { jobId: "radar.snapshot/2" });
-    await usage({
-      provider: "youtube_data",
-      operation: "videos.list",
-      units: 50,
-    });
+    for (let call = 0; call < 2; call += 1) {
+      await usage({
+        provider: "youtube_data",
+        operation: "videos.list",
+        units: 50,
+      });
+    }
 
     const error = await guard
       .assert("youtube_data")
@@ -120,7 +137,6 @@ describe("createBudgetGuard against the spend table", () => {
    * to be visible to the guard as spend, not as nothing.
    */
   it("counts spend too small for the column to hold exactly", async () => {
-    await db().$client`delete from api_usage_log`;
     const usage = createUsageLogger(db(), { jobId: "gemini.price/1" });
     for (let i = 0; i < 100; i++) {
       await usage({
@@ -153,7 +169,6 @@ describe("the day a cap is counted in", () => {
   const BEFORE_MIDNIGHT_UTC = new Date("2026-03-13T23:00:00Z");
 
   it("keeps the units of the Pacific day the UTC day has already dropped", async () => {
-    await db().$client`delete from api_usage_log`;
     await db().insert(apiUsageLog).values({
       provider: "youtube_data",
       operation: "videos.list",
@@ -187,7 +202,6 @@ describe("the day a cap is counted in", () => {
   });
 
   it("counts the money caps in UTC", async () => {
-    await db().$client`delete from api_usage_log`;
     await db().insert(apiUsageLog).values({
       provider: "gemini",
       operation: "generateContent",
@@ -215,7 +229,6 @@ describe("the day a cap is counted in", () => {
  */
 describe("countBudgetChecks against the spend table", () => {
   it("answers every cap in one statement with the totals of check", async () => {
-    await db().$client`delete from api_usage_log`;
     const usage = createUsageLogger(db(), { jobId: "status.read/1" });
     await usage({
       provider: "youtube_data",

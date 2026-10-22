@@ -8,6 +8,7 @@ import {
   assertLocalTestPostgres,
   assertLocalTestRedis,
   assertTestDatabaseName,
+  assertTestServerDatabaseName,
   suiteRedisUrl,
 } from "../test-support/stack-guard.js";
 
@@ -274,6 +275,25 @@ describe("assertTestDatabaseName", () => {
       /database "shorts_factory"/,
     );
     expect(() => assertTestDatabaseName(undefined)).toThrow(/database ""/);
+  });
+});
+
+describe("assertTestServerDatabaseName", () => {
+  it("lets through the test database and the maintenance one", () => {
+    expect(() =>
+      assertTestServerDatabaseName("shorts_factory_test"),
+    ).not.toThrow();
+    expect(() => assertTestServerDatabaseName("postgres")).not.toThrow();
+  });
+
+  it("refuses any other database of the test server, the dev one first", () => {
+    // The dev database lives on the same server: an address derived with its
+    // name would pass every check of the host and the port.
+    for (const name of ["shorts_factory", "template1", ""]) {
+      expect(() => assertTestServerDatabaseName(name)).toThrow(
+        `refusing database "${name}" of the test server`,
+      );
+    }
   });
 });
 

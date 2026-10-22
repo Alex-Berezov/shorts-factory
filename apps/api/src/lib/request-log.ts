@@ -299,7 +299,7 @@ const PREMATURE_CLOSE = "ERR_STREAM_PREMATURE_CLOSE";
  * down: a socket the server destroys itself - `requestTimeout`,
  * `connectionTimeout`, `forceCloseConnections` - reads as the client leaving,
  * and no public property tells the two apart. None of those options is set
- * by the api today (TECH_DEBT, E0-12Q).
+ * by the api today (TECH_DEBT, E0-12Y).
  */
 function clientWentAway(error: Error, request: FastifyRequest): boolean {
   return errorCode(error) === PREMATURE_CLOSE && request.raw.socket.destroyed;

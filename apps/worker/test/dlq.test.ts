@@ -178,10 +178,9 @@ describe("createFailedHandler", () => {
   );
 
   it("copies the largest safe timestamp under itself", async () => {
-    // What really arrives from Redis is narrower: BullMQ keeps 14 significant
-    // digits in Lua, so an `opts.timestamp` of `2**53` comes back as `9`, an
-    // ordinary safe integer. That path is real bullmq's, and its landing is an
-    // integration one (docs/TECH_DEBT.md, E0-12Q).
+    // What really arrives from Redis is measured against real bullmq in
+    // `dlq.int.test.ts`: on Redis 7 `2**53` comes back whole, past the safe
+    // range, and takes tail 0.
     expect(await dlqIdOf(Number.MAX_SAFE_INTEGER)).toEqual({
       attempts: 1,
       removeOnFail: false,
@@ -192,18 +191,16 @@ describe("createFailedHandler", () => {
   it.each([
     ["Infinity", Number.POSITIVE_INFINITY],
     ["2**53, past the safe range", 2 ** 53],
-  ])(
-    "guards a timestamp of %s, which never arrives, with tail 0",
-    async (_label, timestamp) => {
-      // Unreachable from Redis (`parseInt` gives neither), kept as the guard
-      // of the rule's other side: a refusal would lose the copy.
-      expect(await dlqIdOf(timestamp)).toEqual({
-        attempts: 1,
-        removeOnFail: false,
-        jobId: "dlq/radar.score/radar.score/abc/24h/0",
-      });
-    },
-  );
+  ])("guards a timestamp of %s with tail 0", async (_label, timestamp) => {
+    // `Infinity` never arrives from Redis (`parseInt` does not give it);
+    // `2**53` does, and its path through real bullmq is landed in
+    // `dlq.int.test.ts`. Either way a refusal would lose the copy.
+    expect(await dlqIdOf(timestamp)).toEqual({
+      attempts: 1,
+      removeOnFail: false,
+      jobId: "dlq/radar.score/radar.score/abc/24h/0",
+    });
+  });
 
   it("leaves a job that will be retried alone", async () => {
     const dlq = fakeDlq();

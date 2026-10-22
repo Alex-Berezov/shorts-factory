@@ -340,6 +340,112 @@ describe("the logger of a service", () => {
     expect(raw()).not.toContain("sup3r-deep-s3cret");
   });
 
+  it("walks the chain of causes of an error once for its message and its stack", () => {
+    // The same output comes out of one walk or two, so the walk is counted
+    // where it starts: a `cause` that is a getter on the outermost error. A
+    // walk of the chain (`causesOf`) reads it once and the `cause` field may
+    // read it once more; a second walk is a third read. The bound is "at most
+    // one walk", not an exact count, so writing the field without reading the
+    // getter again stays green.
+    const bottom = new Error("bottom");
+    let reads = 0;
+    const outer = new Error("outer");
+    Object.defineProperty(outer, "cause", {
+      enumerable: false,
+      get() {
+        reads += 1;
+        return bottom;
+      },
+    });
+    const { log, lines } = serviceLogger();
+
+    log.error({ err: outer }, "counted");
+
+    expect(lines[0]?.err).toMatchObject({ message: "outer: bottom" });
+    expect(reads).toBeLessThanOrEqual(2);
+  });
+
+  it("writes a chain of causes once, each link in order, down to its depth", () => {
+    // The whole `err` of one line: the outermost message and stack carry every
+    // link, the links themselves carry no stack, the fields of each link come
+    // in one order, and the walk ends at its depth.
+    const bottom = new Error("bottom");
+    const member = new Error("member");
+    const third = Object.assign(new Error("third", { cause: bottom }), {
+      code: "E_THIRD",
+    });
+    const second = new AggregateError([member], "second", { cause: third });
+    const first = new Error("first", { cause: second });
+    const outer = new Error("outer", { cause: first });
+    let deep = new Error("link 9");
+    const links = [deep];
+    for (let i = 8; i >= 1; i -= 1) {
+      deep = new Error(`link ${i}`, { cause: deep });
+      links.unshift(deep);
+    }
+    const deepOuter = new Error("link 0", { cause: deep });
+    const { log, lines } = serviceLogger();
+
+    log.error({ err: outer }, "a");
+    log.error({ err: deepOuter }, "b");
+
+    const chain = [first, second, third, bottom];
+    expect(lines[0]?.err).toEqual({
+      type: "Error",
+      message: "outer: first: second: third: bottom",
+      stack: [outer, ...chain]
+        .map((link) => link.stack ?? "")
+        .join("\ncaused by: "),
+      cause: {
+        type: "Error",
+        message: "first",
+        cause: {
+          type: "AggregateError",
+          message: "second",
+          cause: {
+            type: "Error",
+            message: "third",
+            code: "E_THIRD",
+            cause: { type: "Error", message: "bottom" },
+          },
+          errors: [{ type: "Error", message: "member", stack: member.stack }],
+        },
+      },
+    });
+    const written = lines[0]?.err as Record<string, Record<string, unknown>>;
+    expect(Object.keys(written)).toEqual(["type", "message", "stack", "cause"]);
+    expect(Object.keys(written.cause?.cause as object)).toEqual([
+      "type",
+      "message",
+      "cause",
+      "errors",
+    ]);
+    expect(
+      Object.keys(
+        (written.cause?.cause as Record<string, unknown>).cause as object,
+      ),
+    ).toEqual(["type", "message", "code", "cause"]);
+
+    // Eight links below the outermost error and not one more.
+    const written8 = links.slice(0, 8);
+    let expected: Record<string, unknown> | undefined;
+    for (const link of [...written8].reverse()) {
+      expected = {
+        type: "Error",
+        message: link.message,
+        ...(expected === undefined ? {} : { cause: expected }),
+      };
+    }
+    expect(lines[1]?.err).toEqual({
+      type: "Error",
+      message: ["link 0", ...written8.map((link) => link.message)].join(": "),
+      stack: [deepOuter, ...written8]
+        .map((link) => link.stack ?? "")
+        .join("\ncaused by: "),
+      cause: expected,
+    });
+  });
+
   it.each([
     ["a string", "plain text thrown"],
     ["null", null],

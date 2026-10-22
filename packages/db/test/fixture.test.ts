@@ -1,5 +1,6 @@
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clientOptions } from "../src/client.js";
 import type { TestSession } from "../test-support/other-sessions.js";
 
 /**
@@ -66,8 +67,10 @@ vi.mock("@sf/config/vitest/setup", () => ({}));
 const {
   assertMigrated,
   emptyTestDatabase,
+  openMaintenanceSql,
   openTestDb,
   openTestSql,
+  testServerDatabaseUrl,
   useTestDb,
 } = await import("../test-support/fixture.js");
 
@@ -159,6 +162,7 @@ describe("the fixture checks the stack before it opens anything", () => {
     ["openTestDb", () => openTestDb()],
     ["emptyTestDatabase", () => emptyTestDatabase()],
     ["assertMigrated", () => assertMigrated()],
+    ["openMaintenanceSql", () => openMaintenanceSql()],
   ])("%s refuses a Postgres on another machine", async (_name, call) => {
     stub.state.env.DATABASE_URL =
       "postgresql://sf:sf@db.example.com:5442/shorts_factory_test";
@@ -183,7 +187,30 @@ describe("the fixture checks the stack before it opens anything", () => {
     // The bound on a connection attempt is the one `createDb` sets; the raw
     // client is opened apart from it only to keep the driver's own parsers.
     openTestSql();
-    expect(stub.state.options).toEqual([{ max: 1, connect_timeout: 10 }]);
+    expect(stub.state.options).toEqual([clientOptions({ max: 1 })]);
+  });
+
+  it("opens the maintenance database of the test server with the options of the package, one connection", () => {
+    // Without the bound of the package a server that never answers holds
+    // the self-check of the advisory locks until the case times out.
+    openMaintenanceSql();
+    expect(stub.state.urls).toEqual([
+      "postgresql://sf:sf@localhost:5442/postgres",
+    ]);
+    expect(stub.state.options).toEqual([clientOptions({ max: 1 })]);
+  });
+
+  it("derives another database of the test server only by a name it lets through", () => {
+    // The dev database lives on the same server: a derived address with its
+    // name would pass every check of the host and the port.
+    expect(() => testServerDatabaseUrl("shorts_factory")).toThrow(
+      /refusing database "shorts_factory" of the test server/,
+    );
+    expect(testServerDatabaseUrl("postgres").href).toBe(
+      "postgresql://sf:sf@localhost:5442/postgres",
+    );
+    expect(testServerDatabaseUrl("shorts_factory_test").href).toBe(LOCAL_DB);
+    expect(stub.state.opened).toBe(0);
   });
 
   it("checks Redis too in assertMigrated, the entry check of a suite", async () => {
@@ -1019,6 +1046,21 @@ describe("the session check of the entry checks", () => {
       (error) => error instanceof Error && error.cause === stub.state.endError,
     );
     expect(stub.state.ended).toBe(1);
+  });
+
+  it("keys a session by pid and start: a pid the server gave again is another session", () => {
+    const [first, again] = sessionCheck.sessionsOf([
+      session(),
+      session({ backendStart: "2026-10-21 18:11:15+00" }),
+    ]);
+    if (first === undefined || again === undefined) {
+      throw new Error("sessionsOf dropped a row");
+    }
+
+    expect(first.pid).toBe(again.pid);
+    expect(sessionCheck.sessionKey(first)).not.toBe(
+      sessionCheck.sessionKey(again),
+    );
   });
 
   it("names a session it cannot date or place as such, not as null", () => {

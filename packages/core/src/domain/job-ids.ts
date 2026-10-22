@@ -175,7 +175,12 @@ export const jobIds = {
    * attempts made always equal the attempts allowed and tell two records
    * apart in no way, while the timestamp differs exactly when there really is
    * a second record to keep - the same id enqueued again after
-   * `removeOnFail` dropped the first instance.
+   * `removeOnFail` dropped the first instance. The timestamp comes back from
+   * Redis through Lua: on Redis 7.4.7 two stamps above 1e14 that differ in
+   * their last digit come back apart, so two such instances still get two
+   * ids - for stamps that are safe integers; a stamp past `2**53` takes tail
+   * 0 (`dlqTimestamp`, ADR-0008). Measured in
+   * `apps/worker/test/dlq.int.test.ts`, E0-12Q.
    */
   dlqEntry(queue: string, originalId: string, createdAtMs: number): string {
     return finalize(

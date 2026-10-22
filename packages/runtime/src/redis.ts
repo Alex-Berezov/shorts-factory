@@ -1,6 +1,5 @@
 import { Redis } from "ioredis";
 import type { RuntimeLogger } from "./runtime-logger.js";
-import { type CloseWarning, type ShutdownStage, stageOf } from "./shutdown.js";
 
 /**
  * The Redis clients of every process: three factories, one per connection
@@ -37,8 +36,14 @@ interface ClientListeners {
   onReady?: () => void;
 }
 
-/** The `error` listener every client gets, and the rest when asked for. */
-function withListeners(client: Redis, listeners: ClientListeners): Redis {
+/**
+ * The `error` listener every client gets, and the health reporting of
+ * `createRedisHealthListeners` when the caller gives a logger. Without one the
+ * listener only keeps the failure from ending the process.
+ */
+function withListeners(client: Redis, log: RuntimeLogger | undefined): Redis {
+  const listeners: ClientListeners =
+    log === undefined ? {} : createRedisHealthListeners(log);
   client.on("error", (err: Error) => {
     listeners.onError?.(err);
   });
@@ -46,15 +51,6 @@ function withListeners(client: Redis, listeners: ClientListeners): Redis {
     client.on("ready", listeners.onReady);
   }
   return client;
-}
-
-/** The health reporting of a client given a logger, nothing without one. */
-function healthOf(log: RuntimeLogger | undefined): ClientListeners {
-  if (log === undefined) {
-    return {};
-  }
-  const health = createRedisHealthListeners(log);
-  return { onError: health.onError, onReady: health.onReady };
 }
 
 export interface QueueRedisOptions {
@@ -96,11 +92,11 @@ export function createQueueRedis(
       retryStrategy: (attempt: number) =>
         Math.min(attempt * 200, QUEUE_MAX_RECONNECT_DELAY_MS),
     }),
-    healthOf(options.log),
+    options.log,
   );
 }
 
-interface RequestRedisOptions {
+export interface RequestRedisOptions {
   /**
    * How long a command sent down an open socket may go unanswered before it
    * fails by itself ("Command timed out"). The deadline of a request gives up
@@ -147,7 +143,7 @@ export function createRequestRedis(
       retryStrategy: (attempt: number) =>
         Math.min(attempt * 200, REQUEST_MAX_RECONNECT_DELAY_MS),
     }),
-    healthOf(options.log),
+    options.log,
   );
 }
 
@@ -174,7 +170,7 @@ export function createProbeRedis(
       maxRetriesPerRequest: 1,
       retryStrategy: () => null,
     }),
-    {},
+    undefined,
   );
 }
 
@@ -219,12 +215,6 @@ function createRedisErrorReporter(log: RuntimeLogger): RedisErrorReporter {
   };
 }
 
-/** The two things every entry point does with the health of its client. */
-interface RedisHealthListeners {
-  onError(err: Error): void;
-  onReady(): void;
-}
-
 /**
  * An outage reported at a level that fades, and a reconnect that makes the
  * next outage news again - and says so, because with the levels fading this
@@ -234,7 +224,7 @@ interface RedisHealthListeners {
  * a logger, so that a second entry point (the smoke CLI, the DLQ replay of
  * E13-02) cannot get half of it.
  */
-function createRedisHealthListeners(log: RuntimeLogger): RedisHealthListeners {
+function createRedisHealthListeners(log: RuntimeLogger): ClientListeners {
   const reporter = createRedisErrorReporter(log);
   return {
     onError: (err: Error): void => {
@@ -293,33 +283,4 @@ export async function closeRedis(
     client.disconnect();
     return { kind: "disconnected", err };
   }
-}
-
-/**
- * The client as a stage of a stop, for every process the same way. A socket
- * torn down instead of a QUIT - the client was not connected, or the QUIT was
- * refused - is still a closed client (`closeRedis`), so it is no failure of
- * the stop; but it is not a QUIT either, and the line of the stop says so,
- * with the refusal when there was one. Without this the worker wrote a
- * refused QUIT as `closed`, and the reason was lost.
- *
- * `client` is read when the stop runs: a stop that comes before the client
- * was opened has nothing to close, and says that instead of `closed`.
- */
-export function redisStage(
-  client: () => ClosableRedis | undefined,
-): ShutdownStage {
-  return stageOf(
-    "redis",
-    client,
-    async (opened): Promise<CloseWarning | undefined> => {
-      const outcome = await closeRedis(opened);
-      if (outcome.kind === "quit") {
-        return undefined;
-      }
-      return outcome.err === undefined
-        ? { warning: "closed by disconnect" }
-        : { warning: "closed by disconnect", err: outcome.err };
-    },
-  );
 }

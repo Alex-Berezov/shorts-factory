@@ -1,42 +1,19 @@
 import type { Redis } from "ioredis";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import {
-  type ClosableRedis,
   type ProbeRedisOptions,
   type QueueRedisOptions,
+  type RequestRedisOptions,
   closeRedis,
   createProbeRedis,
   createQueueRedis,
   createRequestRedis,
-  redisStage,
 } from "../src/redis.js";
-import { NOT_OPENED } from "../src/shutdown.js";
 import { recordingLogger } from "../test-support/recording-logger.js";
+import { stubClient } from "../test-support/stub-redis.js";
 
 /** Nothing listens on port 1: the client is torn down before it matters. */
 const CLOSED_REDIS_URL = "redis://127.0.0.1:1";
-
-/** Records how the client was asked to go away, and how it answered. */
-function stubClient(
-  status: string,
-  refusal?: Error,
-): ClosableRedis & { calls: string[] } {
-  const calls: string[] = [];
-  return {
-    calls,
-    status,
-    quit: async () => {
-      calls.push("quit");
-      if (refusal !== undefined) {
-        throw refusal;
-      }
-      return "OK";
-    },
-    disconnect: () => {
-      calls.push("disconnect");
-    },
-  };
-}
 
 /**
  * The health a client reports through the logger it is given: the outage at a
@@ -130,40 +107,6 @@ describe("closeRedis", () => {
   });
 });
 
-describe("redisStage", () => {
-  it("answers nothing of its own after a QUIT", async () => {
-    const client = stubClient("ready");
-
-    await expect(redisStage(() => client).close()).resolves.toBeUndefined();
-  });
-
-  it("answers a warning with the refusal when the QUIT was refused", async () => {
-    // The worker wrote this as `closed`, and the refusal was lost.
-    const refusal = new Error("Connection is closed.");
-    const client = stubClient("ready", refusal);
-
-    await expect(redisStage(() => client).close()).resolves.toEqual({
-      warning: "closed by disconnect",
-      err: refusal,
-    });
-  });
-
-  it("answers a warning without an error for a client that was not connected", async () => {
-    const client = stubClient("reconnecting");
-
-    await expect(redisStage(() => client).close()).resolves.toEqual({
-      warning: "closed by disconnect",
-    });
-  });
-
-  it("says there was nothing to close before the client was opened", async () => {
-    const stage = redisStage(() => undefined);
-
-    expect(stage.name).toBe("redis");
-    await expect(stage.close()).resolves.toBe(NOT_OPENED);
-  });
-});
-
 describe("the factories", () => {
   let client: Redis | undefined;
 
@@ -198,6 +141,15 @@ describe("the factories", () => {
     expect(client.options.commandTimeout).toBe(1_234);
     expect(client.options.connectTimeout).toBe(1_000);
     expect(client.options.retryStrategy?.(100)).toBe(2_000);
+  });
+
+  it("takes a bound on a command and a logger on the client of requests, and nothing else", () => {
+    // An exported interface of the module, like the options of the queue and
+    // the probe client; none of the three is in the barrel (`index.ts`: an
+    // option type stays in its module until an app has to name one).
+    expectTypeOf<keyof RequestRedisOptions>().toEqualTypeOf<
+      "commandTimeoutMs" | "log"
+    >();
   });
 
   it("gives up at once on the probe client instead of waiting for Redis", () => {

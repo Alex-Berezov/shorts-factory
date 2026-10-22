@@ -1,5 +1,6 @@
 import { env } from "@sf/config";
 import { sql } from "drizzle-orm";
+import type { Db } from "../src/client.js";
 import { type ProbeDb, ProbeLimitError, createProbeDb } from "../src/probe.js";
 import { silentTestDatabase, unreachableTestDatabase } from "./fixture.js";
 import { TEST_STACK, assertLocalTestPostgres } from "./stack-guard.js";
@@ -271,19 +272,37 @@ async function lastingSessions(
     if (found.length === 0) {
       return [];
     }
-    const lasting = found.filter((session) => seen.has(keyOf(session)));
+    const lasting = found.filter((session) => seen.has(sessionKey(session)));
     if (lasting.length > 0) {
       return lasting;
     }
     for (const session of found) {
-      seen.add(keyOf(session));
+      seen.add(sessionKey(session));
     }
   }
   return found;
 }
 
-function keyOf(session: TestSession): string {
+/**
+ * What tells two sessions apart: pid + backend_start. A pid the server gives
+ * again is another session - the same pid with another start is not the
+ * session seen before.
+ */
+export function sessionKey(session: TestSession): string {
   return `${session.pid} ${session.backendStart ?? ""}`;
+}
+
+/**
+ * The sessions of the test database the check counts, read once through
+ * `db`: the query, the narrowing (`sessionsOf`) and the filter
+ * (`countedSessions`) of the check, for a test that asks which sessions a
+ * command left open. The check reads through the same three, apart only in
+ * where it catches: a read it cannot make is a refusal of its own there.
+ */
+export async function countedTestSessions(
+  db: Pick<Db, "execute">,
+): Promise<TestSession[]> {
+  return countedSessions(sessionsOf(await db.execute(SESSIONS_QUERY)));
 }
 
 /**

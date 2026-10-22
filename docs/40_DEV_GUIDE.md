@@ -168,7 +168,9 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
    `createProbeRedis(url, { connectTimeoutMs })` для одноразовой проверки - только подпутём
    `@sf/runtime/redis` (в барреле её нет: процесс проверки не грузит bullmq и pino; дедлайн -
    `@sf/runtime/deadline`). Закрытие
-   в остановке - стадия `redisStage(() => client)`, вне её - `closeRedis`.
+   в остановке - стадия `redisStage(() => client)` (из барреля; модуль
+   `packages/runtime/src/redis-stage.ts` поверх `closeRedis` и `stageOf`, подпутём не
+   отдаётся), вне её - `closeRedis`.
 3. **Очереди** - `createQueueFactory({ connection, log, readOnly, defaultJobOptions })`:
    писатель воркера - `createJobQueueFactory(connection, log)` из
    `apps/worker/src/lib/job-policy.ts` (`DEFAULT_JOB_OPTIONS` у писателя обязательны по типу),

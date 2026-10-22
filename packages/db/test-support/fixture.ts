@@ -1,4 +1,5 @@
 import { env } from "@sf/config";
+import { sql } from "drizzle-orm";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import postgres from "postgres";
 import { tableExists } from "../src/catalog.js";
@@ -11,9 +12,11 @@ import {
   migrationGap,
 } from "./migration-check.js";
 import {
+  MAINTENANCE_DATABASE,
   assertLocalTestPostgres,
   assertLocalTestRedis,
   assertTestDatabaseName,
+  assertTestServerDatabaseName,
 } from "./stack-guard.js";
 
 /**
@@ -39,13 +42,29 @@ export function openTestDb(): Db {
 
 /**
  * The URL of the test database once the guard has passed it, for a test that
- * derives another address from it - a relay in front of the same server,
- * another database of the same server. Built from here, the derived address
- * cannot start from a URL the guard never saw.
+ * derives another address from it - a relay in front of the same server
+ * (`./relay.ts`). Built from here, the derived address cannot start from a
+ * URL the guard never saw. Another database of the same server is derived by
+ * `testServerDatabaseUrl`, which checks the name it is given: a name written
+ * into this URL by hand is not checked again.
  */
 export function testDatabaseUrl(): URL {
   assertLocalTestPostgres(env.DATABASE_URL);
   return new URL(env.DATABASE_URL);
+}
+
+/**
+ * The address of database `name` on the test server: the guarded URL of the
+ * test database (`testDatabaseUrl`) with its name swapped and nothing else.
+ * The name is checked before anything is built, by the guard
+ * (`assertTestServerDatabaseName`, `./stack-guard.ts`): the dev database of
+ * the same server is refused.
+ */
+export function testServerDatabaseUrl(name: string): URL {
+  assertTestServerDatabaseName(name);
+  const url = testDatabaseUrl();
+  url.pathname = `/${name}`;
+  return url;
 }
 
 /**
@@ -112,6 +131,22 @@ export function useTestDb(
 export function openTestSql(): postgres.Sql {
   assertLocalTestPostgres(env.DATABASE_URL);
   return postgres(env.DATABASE_URL, clientOptions({ max: 1 }));
+}
+
+/**
+ * A raw client of the maintenance database `postgres` of the test server,
+ * for the self-checks that hold or wait for a lock outside the test
+ * database (`./advisory-locks.ts` reads them). The address comes from
+ * `testServerDatabaseUrl`, which checks the name it swaps in; the options are
+ * those of `openTestSql`, so a server that never answers is a
+ * `CONNECT_TIMEOUT` within the bound of every other client, not a case
+ * running into its own timeout.
+ */
+export function openMaintenanceSql(): postgres.Sql {
+  return postgres(
+    testServerDatabaseUrl(MAINTENANCE_DATABASE).toString(),
+    clientOptions({ max: 1 }),
+  );
 }
 
 /**
@@ -227,13 +262,18 @@ export function silentTestDatabase(
   );
 }
 
+/**
+ * The drizzle journal of the database, through the drizzle handle both
+ * times: whether the table is there and what it holds are read the same way,
+ * so an option of one level of access cannot quietly differ from the other.
+ */
 async function readAppliedMigrations(db: Db): Promise<Migration[]> {
   if (!(await tableExists(db, "drizzle.__drizzle_migrations"))) {
     return [];
   }
-  return db.$client<{ createdAt: string; hash: string }[]>`
-    SELECT created_at::text AS "createdAt", hash FROM drizzle.__drizzle_migrations
-  `;
+  return db.execute<{ createdAt: string; hash: string }>(
+    sql`SELECT created_at::text AS "createdAt", hash FROM drizzle.__drizzle_migrations`,
+  );
 }
 
 /**

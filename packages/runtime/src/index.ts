@@ -20,8 +20,8 @@ export {
   closeRedis,
   createQueueRedis,
   createRequestRedis,
-  redisStage,
 } from "./redis.js";
+export { redisStage } from "./redis-stage.js";
 export {
   type RepeatedSigint,
   SIGINT_REPEAT_WINDOW_MS,

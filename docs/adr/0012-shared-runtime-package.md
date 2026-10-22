@@ -42,9 +42,10 @@
   те же затухающие уровни),
   `createProbeRedis` (одна попытка, без переподключения); `error`-слушатель внутри каждой;
   один `closeRedis`: не `ready` -> `disconnect()`, иначе `quit()` с `catch -> disconnect()`,
-  исход `{ kind: "quit" } | { kind: "disconnected"; err? }`; `redisStage` - один перевод
-  исхода в стадию остановки для api и worker (`disconnected` -> `warn` «closed by disconnect»
-  с отказом QUIT, если он был);
+  исход `{ kind: "quit" } | { kind: "disconnected"; err? }`; `redisStage` - отдельный модуль
+  (`redis-stage.ts`) поверх `closeRedis` и `stageOf`, один перевод исхода в стадию остановки
+  для api и worker (`disconnected` -> `warn` «closed by disconnect» с отказом QUIT, если он
+  был); модуль клиентов и модуль остановки друг о друге не знают (E0-12Q);
 - **фабрика `Queue`** - ленивый кэш по имени, `isQueueName`, флаг закрытия, `error`-слушатель
   на каждом `Queue` (ошибка общего клиента, которую bullmq пересылает каждому `Queue`, и
   отказ соединения молчат - их пишет клиент, прочие ошибки - строка лога; пересылка узнаётся

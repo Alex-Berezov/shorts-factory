@@ -1927,7 +1927,7 @@
   {
     "id": "E0-12Q",
     "epic": "E0",
-    "title": "@sf/runtime, api, worker: форма модулей после E0-12B - стадия Redis в shutdown.ts, единая форма опций Redis-фабрик, стадия db воркера через stageOf, один источник состояния queue-stats, однопроходный обход cause",
+    "title": "@sf/runtime, api, worker: форма модулей после E0-12B - стадия Redis в redis-stage.ts, единая форма опций Redis-фабрик, стадия db воркера через stageOf, один источник состояния queue-stats, однопроходный обход cause",
     "estimate": "0.5 д",
     "estimate_days": 0.5,
     "deps": [
@@ -1936,8 +1936,9 @@
       "E0-12E"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-19"
+    "status": "in_progress",
+    "added_at": "2026-10-19",
+    "started_at": "2026-10-22"
   },
   {
     "id": "E0-12R",
@@ -2038,5 +2039,21 @@
     "doc": "TECH_DEBT.md",
     "status": "todo",
     "added_at": "2026-10-21"
+  },
+  {
+    "id": "E0-12Y",
+    "epic": "E0",
+    "title": "apps/api, @sf/config: разрез request-log, маршруты отказов в одном месте, requestId сокетного отказа, clientWentAway под замком, auth без броска на порядок регистрации, loadEnv без копии process.env",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-13",
+      "E0-12G",
+      "E0-12P",
+      "E0-12Q"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-22"
   }
 ]

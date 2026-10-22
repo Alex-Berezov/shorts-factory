@@ -89,12 +89,16 @@
     (`lazyConnect`), свойство «адрес, который страж пропустил, драйвер набирает на тестовом
     стеке» (E0-12E); URL, который не разбирается, - отказ без текста URL
     (в `TypeError` от `new URL` был бы пароль); `assertTestDatabaseName(name)` - для ответа
-    `current_database()`; `suiteRedisUrl(redisUrl, suite)` - сначала `assertLocalTestRedis`
+    `current_database()`; `assertTestServerDatabaseName(name)` - имя другой базы тестового сервера,
+    которую тест открывает на чтение (тестовая и служебная `postgres`; dev-база того же сервера -
+    отказ), для `testServerDatabaseUrl` фикстуры (E0-12Q); `suiteRedisUrl(redisUrl, suite)` - сначала `assertLocalTestRedis`
     по URL окружения, затем тот же сервер в базе набора: открыть Redis набора мимо стража нельзя;
   - `@sf/db/test-support/fixture` - только для int-наборов (читает `env` из `@sf/config`: ребро
     `db -> config` у `test-support/**` - то же исключение, что у `test/**`, записано в §6 System
     Design и ADR-0002; из `src/**` фикстура не импортируется, замок - `test/dependency-direction.test.ts`): `openTestDb`,
     `openTestSql` (оба сначала зовут Postgres-половину стража; Redis-URL их не касается),
+    `openMaintenanceSql` (служебная база `postgres` того же сервера через `testServerDatabaseUrl`,
+    опции - `clientOptions`; для самопроверок помощников `advisory-locks.ts`, E0-12Q),
     `emptyTestDatabase` (через свой `openTestSql`; страж по URL и по `current_database()`
     перед `DROP SCHEMA`), `resetTestDatabase` (`emptyTestDatabase` и миграции), `assertMigrated()` - проверка int-набора,
     который сам не мигрирует: страж всего стека (Redis тоже - процессы воркера читают

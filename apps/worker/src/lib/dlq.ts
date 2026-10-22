@@ -64,14 +64,23 @@ export function isFinalFailure(job: FailedJob, err: unknown): boolean {
 /**
  * The creation time as the dlq id carries it. The job a worker sees is read
  * back from Redis, where BullMQ restores `timestamp` with `parseInt` of what
- * the caller passed as `opts.timestamp`. Real inputs: a negative integer, NaN,
- * an integer that lost precision in Lua (14 significant digits: `2**53`
- * arrives as `9`); `Infinity` and values beyond `MAX_SAFE_INTEGER` never reach
- * `dlqTimestamp`. `jobIds.dlqEntry` takes only a safe integer of zero or more
- * (ADR-0009) and throws on anything else, which would lose the copy into the
- * `catch` below - so anything else becomes 0. Two dirty moments of one id then
- * share a dlq id and the second copy is deduplicated; that trade is accepted
- * in ADR-0008.
+ * the caller passed as `opts.timestamp`, written through Lua.
+ *
+ * Measured on Redis 7.4.7 (`apps/worker/test/dlq.int.test.ts`, E0-12Q), two
+ * points: `2**53` comes back whole, as 9007199254740992, past the safe range;
+ * two stamps above 1e14 that differ in their last digit come back apart.
+ * Inputs besides an ordinary stamp: a negative integer, NaN, and `2**53`
+ * itself; `Infinity` never reaches `dlqTimestamp` (`parseInt` does not give
+ * it). A larger stamp is not measured: one Lua writes in exponent form (from
+ * 1e17 on, say `1e+17`) would come back from `parseInt` as a small safe
+ * integer and pass here as it is.
+ *
+ * `jobIds.dlqEntry` takes only a safe integer of zero or more (ADR-0009) and
+ * throws on anything else, which would lose the copy into the `catch` below -
+ * so anything else becomes 0. Two dirty moments of one id then share a dlq
+ * id and the second copy is deduplicated; that trade is accepted in ADR-0008.
+ * Another major version of Redis is not measured; the int cases name the
+ * version they hold for.
  */
 function dlqTimestamp(ts: number): number {
   return Number.isSafeInteger(ts) && ts >= 0 ? ts : 0;

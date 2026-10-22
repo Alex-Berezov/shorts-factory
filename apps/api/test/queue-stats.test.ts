@@ -307,10 +307,108 @@ describe("createQueueStats", () => {
     await stats.close();
   });
 
+  /**
+   * The sharing ends on the first line of the close: a request made while the
+   * close waits for the pass in flight starts its own and gets the refusal of
+   * the factory, while the request joined before the close still gets the
+   * answer of its pass.
+   */
+  it("refuses a request during the close while a pass is in flight; the pass already joined still answers", async () => {
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reads = vi.fn(() => gate);
+    beforeCounts = reads;
+    const stats = createQueueStats({ connection, log });
+
+    const pending = stats.collect();
+    const closing = stats.close();
+    const late = stats.collect();
+
+    await expect(late).rejects.toThrow(/after the queue factory was closed/);
+    release();
+    await expect(pending).resolves.toMatchObject({ dlq: { size: 3 } });
+    await closing;
+    expect(reads).toHaveBeenCalledTimes(QUEUE_NAMES.length);
+    expect(closedQueues).toHaveLength(QUEUE_NAMES.length);
+  });
+
+  /**
+   * With no pass to join the request starts one of its own, and the factory -
+   * closed from the first line of its close - refuses it, with its own text:
+   * there is no second state of the close here to answer first.
+   */
+  it("refuses a request during the close when no pass is in flight, through the factory", async () => {
+    const reads = vi.fn(async () => {});
+    beforeCounts = reads;
+    const stats = createQueueStats({ connection, log });
+
+    const closing = stats.close();
+    const late = stats.collect();
+
+    await expect(late).rejects.toThrow(/after the queue factory was closed/);
+    await closing;
+    expect(reads).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The edge of the drain: a pass that outlives `drainTimeoutMs` is not waited
+   * for. The queues close under it, and the request joined to it before the
+   * close is left to that pass - the close neither answers nor refuses it.
+   */
+  it("closes under a pass longer than the drain and leaves the request joined to it before the close unanswered", async () => {
+    vi.useFakeTimers();
+    const hung = vi.fn(() => new Promise<void>(() => {}));
+    beforeCounts = hung;
+    const stats = createQueueStats({ connection, log, drainTimeoutMs: 20 });
+    let settled = false;
+    const mark = (): void => {
+      settled = true;
+    };
+
+    stats.collect().then(mark, mark);
+    await vi.advanceTimersByTimeAsync(0);
+    const closing = stats.close();
+    await vi.advanceTimersByTimeAsync(20);
+    await closing;
+
+    expect(closedQueues).toHaveLength(QUEUE_NAMES.length);
+    expect(hung).toHaveBeenCalledTimes(QUEUE_NAMES.length);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(false);
+  });
+
+  /**
+   * A pass the close did not wait for may hang on after it: a request made
+   * once the close is over must not join it - the stage after this one closes
+   * the client under it, and the page would blame Redis - but get the refusal
+   * of the factory.
+   */
+  it("refuses a request after a close that outlived a pass, instead of joining that pass", async () => {
+    vi.useFakeTimers();
+    const hung = vi.fn(() => new Promise<void>(() => {}));
+    beforeCounts = hung;
+    const stats = createQueueStats({ connection, log, drainTimeoutMs: 20 });
+
+    void stats.collect().catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    const closing = stats.close();
+    await vi.advanceTimersByTimeAsync(20);
+    await closing;
+
+    await expect(stats.collect()).rejects.toThrow(
+      /after the queue factory was closed/,
+    );
+    expect(hung).toHaveBeenCalledTimes(QUEUE_NAMES.length);
+  });
+
   it("refuses a request that arrives after the close", async () => {
     const stats = createQueueStats({ connection, log });
     await stats.close();
 
-    await expect(stats.collect()).rejects.toThrow(/closed/);
+    await expect(stats.collect()).rejects.toThrow(
+      /after the queue factory was closed/,
+    );
   });
 });

@@ -37,6 +37,12 @@ export interface UsagePeriodOptions {
  */
 export type UsageQuerier = Pick<Db, "select">;
 
+/**
+ * The part of a `Db` a write of a usage row needs: one `insert`. Narrow for
+ * the reason `UsageQuerier` is: a transaction handle writes the same row.
+ */
+export type UsageWriter = Pick<Db, "insert">;
+
 /** One row of `api_usage_log` as a caller may write it. */
 export type ApiUsageInsert = Omit<
   typeof apiUsageLog.$inferInsert,
@@ -214,9 +220,42 @@ export const apiUsageLogRepo = {
    *
    * `id` is excluded for the same class of reason: it is a `serial`, and a
    * value supplied by hand bypasses the sequence and collides with it later.
+   *
+   * The type alone does not keep them out: an object wider than the entry,
+   * passed through a variable, is not checked for excess fields and carries
+   * both at runtime. So the row is built from the fields of the entry, one by
+   * one, and a field the entry leaves out is left out of the row too - not
+   * written as `null`: drizzle sends `default` for a column the row does not
+   * name, so a default a later migration gives a column still applies. The
+   * field is dropped with a spread, not passed as `undefined`: the type of
+   * `values()` under `exactOptionalPropertyTypes` does not take an explicit
+   * `undefined` (TS2769).
+   *
+   * `unwritten` is the lock on that list: the keys of `ApiUsageInsert` (the
+   * insert type drizzle infers from the table, less `id`, `createdAt`) the
+   * row does not name. A column added to the table reaches that type, and
+   * left out here it is a type error naming it rather than a field silently
+   * never written. It checks the keys only, not what is written under them.
+   *
+   * Takes the part of a `Db` it uses, like the aggregates (`UsageQuerier`): a
+   * transaction handle writes the same row.
    */
-  async insert(db: Db, entry: ApiUsageInsert): Promise<void> {
-    await db.insert(apiUsageLog).values(entry);
+  async insert(db: UsageWriter, entry: ApiUsageInsert): Promise<void> {
+    const row = {
+      provider: entry.provider,
+      operation: entry.operation,
+      ...(entry.units === undefined ? {} : { units: entry.units }),
+      ...(entry.tokensIn === undefined ? {} : { tokensIn: entry.tokensIn }),
+      ...(entry.tokensOut === undefined ? {} : { tokensOut: entry.tokensOut }),
+      ...(entry.costUsd === undefined ? {} : { costUsd: entry.costUsd }),
+      ...(entry.jobId === undefined ? {} : { jobId: entry.jobId }),
+    };
+    const unwritten: Record<
+      Exclude<keyof ApiUsageInsert, keyof typeof row>,
+      never
+    > = {};
+    void unwritten;
+    await db.insert(apiUsageLog).values(row);
   },
 
   /**

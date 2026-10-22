@@ -30,7 +30,13 @@
  *   options from it, and a URL that only looks local is still refused;
  * - Postgres database: by the name in the URL here, and by the name the server
  *   reports (`current_database()`) in `emptyTestDatabase` through
- *   `assertTestDatabaseName`;
+ *   `assertTestDatabaseName`; a database of the test server a test opens
+ *   besides it - the maintenance one - by a name
+ *   `assertTestServerDatabaseName` lets through, which `testServerDatabaseUrl`
+ *   of `./fixture.ts` asks before it swaps the name in. Every such handle of
+ *   the suites today comes from `openMaintenanceSql` on top of it; a test that
+ *   rewrote the path of a URL itself would pass the host and port checks
+ *   above and nothing else - that is a convention, not a lock;
  * - Redis database: the number `.env.test` names - the description of the
  *   stack a suite was pointed at. The database a suite then works in is
  *   derived from it by `suiteRedisUrl`, from the registry below, and
@@ -225,6 +231,36 @@ export function assertTestDatabaseName(name: string | undefined): void {
   if (name !== TEST_STACK.database) {
     throw new Error(
       `refusing to write to database "${name ?? ""}": integration tests only run against "${TEST_STACK.database}" (${ENV_TEST})`,
+    );
+  }
+}
+
+/** The maintenance database every Postgres server has (`openMaintenanceSql`, `./fixture.ts`). */
+export const MAINTENANCE_DATABASE = "postgres";
+
+/**
+ * Databases of the test server a test may open besides the test database:
+ * the maintenance database, where the self-checks of `./advisory-locks.ts`
+ * hold a lock that is not the test's. The dev database of the same server is
+ * not among them.
+ */
+const OTHER_TEST_SERVER_DATABASES: ReadonlySet<string> = new Set([
+  MAINTENANCE_DATABASE,
+]);
+
+/**
+ * Refuses a database of the test server a test may not open: anything but
+ * the test database and `OTHER_TEST_SERVER_DATABASES` - the dev database of
+ * the same server among them. For a name swapped into the guarded URL of the
+ * test database (`testServerDatabaseUrl`, `./fixture.ts`), before the address
+ * is built. The self-checks hold a session advisory lock there and write to no
+ * table, so the maintenance database passes here and not `assertTestDatabaseName`,
+ * which stands in front of the writes.
+ */
+export function assertTestServerDatabaseName(name: string): void {
+  if (name !== TEST_STACK.database && !OTHER_TEST_SERVER_DATABASES.has(name)) {
+    throw new Error(
+      `refusing database "${name}" of the test server: a test opens "${TEST_STACK.database}" or ${[...OTHER_TEST_SERVER_DATABASES].map((other) => `"${other}"`).join(", ")} only (${ENV_TEST})`,
     );
   }
 }

@@ -130,12 +130,15 @@ function causesOf(source: object): object[] {
  * The message and the stack of the outermost error the way pino writes them
  * (`messageWithCauses`, `stackWithCauses` of pino-std-serializers): those of
  * every cause appended, so that one field reads as the whole story. Bounded
- * by the same depth as the fields below.
+ * by the same depth as the fields below; `chain` is `causesOf(source)`,
+ * walked once by the caller.
  */
-function withCauses(source: object): { message?: string; stack?: string } {
+function withCauses(
+  source: object,
+  chain: readonly object[],
+): { message?: string; stack?: string } {
   const message = text(source, "message");
   const stack = text(source, "stack");
-  const chain = causesOf(source);
   return {
     ...(message === undefined
       ? {}
@@ -277,9 +280,10 @@ function serializeError(err: unknown): unknown {
   if (!isObject(err)) {
     return err;
   }
-  return pickFields(err, { type: typeOf(err), ...withCauses(err) }, 0, {
+  const chain = causesOf(err);
+  return pickFields(err, { type: typeOf(err), ...withCauses(err, chain) }, 0, {
     seen: new Set<object>([err]),
-    stacked: new Set<object>(causesOf(err)),
+    stacked: new Set<object>(chain),
   });
 }
 

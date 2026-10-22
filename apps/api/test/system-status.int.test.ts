@@ -198,8 +198,12 @@ describe("GET /system/status against the live stack", () => {
         body.queues?.find((entry) => entry.name === PROBE_QUEUE),
       ).toMatchObject({ paused: false });
     } finally {
-      await queue.resume();
-      await queues.close();
+      // A refused `resume` must not leave the factory open.
+      try {
+        await queue.resume();
+      } finally {
+        await queues.close();
+      }
     }
   });
 

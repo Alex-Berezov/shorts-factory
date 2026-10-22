@@ -1,5 +1,6 @@
-import { ValidationError } from "@sf/core";
-import { eq, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { type Provider, ValidationError } from "@sf/core";
+import { TransactionRollbackError, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -264,8 +265,9 @@ describe("apiUsageLogRepo.sumUsage", () => {
    * without options - lets a call past an exhausted cap.
    */
   it("ends a window without `now` on the database clock, not the process one", async () => {
-    // A provider no fixture writes to, so the window below holds exactly the
-    // row this case inserts.
+    // The other `cartesia` rows of this file are dated in May 2026 ("sums a
+    // set of providers…"), outside today's window: the window below holds
+    // exactly the row this case inserts.
     const provider = "cartesia";
     const scope = { providers: [provider] } as const;
     await apiUsageLogRepo.insert(db(), {
@@ -352,8 +354,9 @@ describe("apiUsageLogRepo.sumUsage", () => {
    * and no millisecond rounding of a JS `Date` takes part.
    */
   it("stamps a row with the database clock; createdAt and id are not the caller's to give", async () => {
-    // Likewise unused by the fixtures - the count below is this row alone.
-    const provider = "openai_tts";
+    // Written by no other case of this file - the count below is this row
+    // alone.
+    const provider = "youtube_analytics";
 
     const stampedByCaller: Parameters<typeof apiUsageLogRepo.insert>[1] = {
       provider,
@@ -375,13 +378,7 @@ describe("apiUsageLogRepo.sumUsage", () => {
     };
     void [stampedByCaller, numberedByCaller];
 
-    const before = await db().$client<{ before: string }[]>`
-      SELECT now()::text AS before
-    `;
-    const beforeText = before[0]?.before;
-    if (beforeText === undefined) {
-      throw new Error("SELECT now() returned no row");
-    }
+    const before = await databaseClockText();
 
     await apiUsageLogRepo.insert(db(), {
       provider,
@@ -392,10 +389,133 @@ describe("apiUsageLogRepo.sumUsage", () => {
     const stamped = await db().$client<{ count: string }[]>`
       SELECT count(*)::text AS count FROM api_usage_log
       WHERE provider = ${provider}
-        AND created_at >= ${beforeText}::timestamptz
+        AND created_at >= ${before}::timestamptz
         AND created_at <= now()
     `;
     expect(stamped[0]?.count).toBe("1");
+  });
+
+  /**
+   * The type keeps `createdAt` and `id` out of a literal; an object that is
+   * wider than the type - built elsewhere, passed through a variable - is not
+   * checked for excess fields, and at runtime it carries both. The repository
+   * writes the columns of the entry and nothing else: a stamp of the caller,
+   * whether a backdated one or the process clock running behind the database,
+   * and a hand-written id never reach the table.
+   */
+  it("writes only the columns of the entry from an object wider than its type", async () => {
+    // The operations carry a mark of this run of the case: the counts below
+    // are these two rows, whatever else any case writes under `system`.
+    const provider: Provider = "system";
+    const mark = `wide-${randomUUID()}`;
+    const operations = [`${mark}.backdated`, `${mark}.process-clock`];
+    const databaseNow = await currentDatabaseTime();
+    const before = await databaseClockText();
+
+    const backdated = {
+      provider,
+      operation: `${mark}.backdated`,
+      units: 1,
+      createdAt: new Date(0),
+      id: 999_999,
+    };
+    await apiUsageLogRepo.insert(db(), backdated);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // A process clock an hour behind the database stamps its own `Date`.
+      vi.setSystemTime(new Date(databaseNow.getTime() - 3_600_000));
+      const processStamped = {
+        provider,
+        operation: `${mark}.process-clock`,
+        units: 1,
+        createdAt: new Date(),
+      };
+      await apiUsageLogRepo.insert(db(), processStamped);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const rows = await db().$client<{ all: string; stamped: string }[]>`
+      SELECT count(*)::text AS all,
+        count(*) FILTER (
+          WHERE id <> 999999
+            AND created_at >= ${before}::timestamptz
+            AND created_at <= now()
+        )::text AS stamped
+      FROM api_usage_log
+      WHERE provider = ${provider} AND operation = ANY(${operations})
+    `;
+    expect(rows[0]).toEqual({ all: "2", stamped: "2" });
+  });
+
+  /**
+   * A field the entry leaves out is left out of the insert, and the column
+   * gets what the table gives it. None of the columns has a default today, so
+   * the case gives each of the five optional ones a default inside a
+   * transaction it rolls back: an insert that wrote `null` for any field it
+   * was not given would override it, and a later migration adding a default -
+   * or `NOT NULL DEFAULT` - would see it ignored or every write of a cost
+   * refused. The rollback takes the defaults and the row with it, so a run
+   * cut short here leaves the shared test database as the migrations made it.
+   */
+  it("leaves a field the entry does not give to the default of its column", async () => {
+    const operation = `default-${randomUUID()}`;
+    let written: Array<{
+      units: number | null;
+      tokensIn: number | null;
+      tokensOut: number | null;
+      costUsd: string | null;
+      jobId: string | null;
+    }> = [];
+
+    await expect(
+      db().transaction(async (tx) => {
+        await tx.execute(sql`
+          ALTER TABLE api_usage_log
+            ALTER COLUMN units SET DEFAULT 7,
+            ALTER COLUMN tokens_in SET DEFAULT 8,
+            ALTER COLUMN tokens_out SET DEFAULT 9,
+            ALTER COLUMN cost_usd SET DEFAULT 0.5,
+            ALTER COLUMN job_id SET DEFAULT 'default-job'
+        `);
+        await apiUsageLogRepo.insert(tx, { provider: "system", operation });
+        written = await tx
+          .select({
+            units: apiUsageLog.units,
+            tokensIn: apiUsageLog.tokensIn,
+            tokensOut: apiUsageLog.tokensOut,
+            costUsd: apiUsageLog.costUsd,
+            jobId: apiUsageLog.jobId,
+          })
+          .from(apiUsageLog)
+          .where(eq(apiUsageLog.operation, operation));
+        tx.rollback();
+      }),
+    ).rejects.toThrow(TransactionRollbackError);
+
+    expect(written).toEqual([
+      {
+        units: 7,
+        tokensIn: 8,
+        tokensOut: 9,
+        costUsd: "0.50000",
+        jobId: "default-job",
+      },
+    ]);
+    const left = await db().$client<
+      { column_name: string; column_default: string | null }[]
+    >`
+      SELECT column_name, column_default FROM information_schema.columns
+      WHERE table_name = 'api_usage_log'
+        AND column_name IN ('units', 'tokens_in', 'tokens_out', 'cost_usd', 'job_id')
+      ORDER BY column_name
+    `;
+    expect(left).toEqual(
+      ["cost_usd", "job_id", "tokens_in", "tokens_out", "units"].map(
+        (column_name) => ({ column_name, column_default: null }),
+      ),
+    );
   });
 
   /**
@@ -432,14 +552,23 @@ describe("apiUsageLogRepo.sumUsage", () => {
   });
 });
 
-/** The clock the rows are stamped with; text, like every timestamp here. */
-async function currentDatabaseTime(): Promise<Date> {
-  const rows = await db().$client<{ now: string }[]>`SELECT now() AS now`;
+/**
+ * The clock the rows are stamped with, as the text Postgres gives: compared
+ * back in SQL (`::timestamptz`) it keeps its microseconds, which a JS `Date`
+ * would round away. The one reader of that clock in this file.
+ */
+async function databaseClockText(): Promise<string> {
+  const rows = await db().$client<{ now: string }[]>`SELECT now()::text AS now`;
   const now = rows[0]?.now;
   if (now === undefined) {
     throw new Error("SELECT now() returned no row");
   }
-  return new Date(now);
+  return now;
+}
+
+/** The same clock as a `Date`, for a case that sets the process clock by it. */
+async function currentDatabaseTime(): Promise<Date> {
+  return new Date(await databaseClockText());
 }
 
 /**

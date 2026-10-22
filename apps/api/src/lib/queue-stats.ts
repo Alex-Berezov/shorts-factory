@@ -89,7 +89,6 @@ export function createQueueStats(options: QueueStatsOptions): QueueStats {
       ? {}
       : { drainTimeoutMs: options.drainTimeoutMs }),
   });
-  let closed = false;
 
   const read = async (): Promise<QueuesSnapshot> => {
     // One round of commands over one socket, not a walk: 29 queues answered
@@ -137,29 +136,51 @@ export function createQueueStats(options: QueueStatsOptions): QueueStats {
    * pass is joined until it settles, which it does by itself: a command sent
    * is bounded by the `commandTimeout` of the client, and a reader `Queue`
    * does not wait for a client that is not ready.
+   *
+   * The sharing ends on the first line of the close: a pass the close does
+   * not wait for may hang on, and a request joined to it would get the
+   * "Connection is closed" of a later stage instead of the refusal of the
+   * factory.
    */
-  const shared = singleFlight(read);
+  let shared = singleFlight(read);
 
   return {
     async collect(): Promise<QueuesSnapshot> {
-      if (closed) {
-        throw new Error("queue stats were asked for after they were closed");
-      }
       return shared();
     },
 
     /**
-     * Stops taking requests, gives the reads already running a bounded moment
-     * to finish, and then closes the queues.
+     * Gives the reads already running a bounded moment to finish, and then
+     * closes the queues.
      *
      * Both halves matter. Closing under a request in flight answers it with
      * "Connection is closed" - the last status page before a SIGTERM would
      * blame Redis for a shutdown of ours. Waiting for it without a bound is
      * the other failure: the stop would hang until the shutdown deadline
      * killed it, leaving Redis unclosed and the exit code at 1.
+     *
+     * The state of the close is the factory's, not a flag of its own here,
+     * and the factory is closed from the first line of its own `close()`; the
+     * sharing ends on the first line of this one. A request goes one of two
+     * ways:
+     *
+     * - **Joined before the close:** it waits for its own pass. A pass that
+     *   settles within `drainTimeoutMs` answers it - the pass reads queues the
+     *   factory already holds. A pass that outlives the drain is not waited
+     *   for: the queues close under it and the request is not answered by the
+     *   close. Its commands stay on the shared client, and the stage after
+     *   this one closes that client under them ("Connection is closed"), which
+     *   a page would report as a failure of Redis. In the api no page is
+     *   waiting by then: the stop closes Fastify first, which drains the
+     *   requests it routed (`compose-app.ts`), so a pass left over is one
+     *   every request has already given up on at its own deadline.
+     * - **Arrived from the first line of the close on:** it starts a pass of
+     *   its own, and the factory refuses its first queue - a plain `Error` the
+     *   page answers with a 500. It never joins a pass the close may leave
+     *   hanging.
      */
     async close(): Promise<void> {
-      closed = true;
+      shared = read;
       await queues.close();
     },
   };

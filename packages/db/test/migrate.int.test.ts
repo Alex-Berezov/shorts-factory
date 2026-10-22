@@ -1,6 +1,5 @@
 import { sql as drizzleSql } from "drizzle-orm";
 import { readMigrationFiles } from "drizzle-orm/migrator";
-import postgres from "postgres";
 import {
   afterAll,
   beforeAll,
@@ -27,10 +26,15 @@ import {
 } from "../test-support/advisory-locks.js";
 import {
   emptyTestDatabase,
+  openMaintenanceSql,
   openTestSql,
   resetTestDatabase,
   testDatabaseUrl,
 } from "../test-support/fixture.js";
+import {
+  countedTestSessions,
+  sessionKey,
+} from "../test-support/other-sessions.js";
 import { openRelay } from "../test-support/relay.js";
 import { RUN_LOCK_KEY } from "../test-support/run-lock.js";
 import { captureProcessOutput } from "./capture-output.js";
@@ -73,19 +77,64 @@ const TEST_DATABASE_URL = testDatabaseUrl().href;
 
 const sql = openTestSql();
 
+/** The drizzle handle of the file, apart from `sql`: drizzle sets the parsers of the client it wraps. */
+const sessionsDb = createDb(TEST_DATABASE_URL, { max: 1 });
+
 /**
  * Waits until no session of the test database holds an advisory lock. A
  * session closed while it still held one - the unlock failed, the process
  * left - is ended by the server asynchronously, so a read right after
  * `closeDb` can still see that lock. A run that released its lock itself
  * (`migrateDb` unlocks before `runMigrations` closes the handle, as in the
- * `beforeEach` of this file) leaves none behind to wait for: the cases that
- * read `heldAdvisoryLocks(sql)` straight after it read the state as it is.
+ * `beforeEach(migrate)` hooks of this file) leaves none behind to wait for:
+ * the cases that read `heldAdvisoryLocks(sql)` straight after it read the
+ * state as it is.
  */
 async function expectNoAdvisoryLocks(): Promise<void> {
   await vi.waitFor(
     async () => {
       expect(await heldAdvisoryLocks(sql)).toBe(0);
+    },
+    { timeout: 5_000, interval: 50 },
+  );
+}
+
+/**
+ * The client sessions of the test database right now, as the entry check of
+ * the run counts them (`countedTestSessions`): no autovacuum or other process
+ * of the server, no healthcheck. Each is its `sessionKey` - a pid the server
+ * gave again to a session the command left open is not the session of before.
+ * Both handles of the file are opened first: a session this file opens after
+ * the snapshot would count as one the command left.
+ */
+async function testDatabaseSessions(): Promise<string[]> {
+  await sql`SELECT 1`;
+  const sessions = await countedTestSessions(sessionsDb);
+  return sessions.map(sessionKey);
+}
+
+/**
+ * An entry point run in this process leaves the test database as it found
+ * it: no advisory lock, and no session of its own - closed by the command,
+ * not by the process exiting, which here it does not. `before` is
+ * `testDatabaseSessions()` read before the command; the session of the run
+ * lock or a backend still ending from a hook is in it and does not count.
+ *
+ * The locks are read first, while a session the command forgot is still
+ * open: a closed session holds no lock whatever the run did, so read after
+ * the session is gone the lock could not fail. An entry point that kept its
+ * lock and its session fails the first read; one that released the lock but
+ * never closed its handle fails the second. Both wait: the server ends a
+ * closed session, and the lock with it, asynchronously.
+ */
+async function expectEntryPointLeftNothing(before: string[]): Promise<void> {
+  await expectNoAdvisoryLocks();
+  await vi.waitFor(
+    async () => {
+      const left = (await testDatabaseSessions()).filter(
+        (key) => !before.includes(key),
+      );
+      expect(left, "sessions the entry point left open").toEqual([]);
     },
     { timeout: 5_000, interval: 50 },
   );
@@ -211,29 +260,30 @@ function underTheLock(observed: ObservedStatement[]): ObservedStatement[] {
 }
 
 // The file starts from a reset database - a stray type a previous run left
-// under a full journal is gone - and every case from a migrated one:
-// `runMigrations` applies nothing to one, and the whole folder to one a
-// previous case emptied. A case about an empty or a broken database makes it
-// so itself, and resets it in its `finally`.
+// under a full journal is gone. A case that needs a migrated database gets
+// one from the `beforeEach(migrate)` of its `describe`: `runMigrations`
+// applies nothing to one, and the whole folder to one a previous case
+// emptied. A case about an empty or a broken database lives in a `describe`
+// "... from an empty database" without that hook - migrating first only to
+// empty it again was a run and a lock for nothing - makes the database so
+// itself, and resets it in its `finally`. The helpers of the test support at
+// the end read `pg_locks` only and need neither.
 beforeAll(async () => {
   await resetTestDatabase();
 });
 
-beforeEach(async () => {
+/** The hook of every `describe` whose cases start from a migrated database. */
+async function migrate(): Promise<void> {
   await runMigrations(TEST_DATABASE_URL);
-});
+}
 
 afterAll(async () => {
+  await closeDb(sessionsDb);
   await sql.end();
 });
 
 describe("runMigrations", () => {
-  it("creates every table of System Design §5 on an empty database", async () => {
-    await emptyTestDatabase();
-    await runMigrations(TEST_DATABASE_URL);
-
-    expect(await publicTables()).toEqual(TABLES_SECTION_5);
-  });
+  beforeEach(migrate);
 
   it("is idempotent: a second run applies nothing and does not fail", async () => {
     const before = await publicTables();
@@ -244,6 +294,15 @@ describe("runMigrations", () => {
     // one table and created another would keep the count.
     expect(await publicTables()).toEqual(before);
     expect(before).toEqual(TABLES_SECTION_5);
+  });
+});
+
+describe("runMigrations from an empty database", () => {
+  it("creates every table of System Design §5 on an empty database", async () => {
+    await emptyTestDatabase();
+    await runMigrations(TEST_DATABASE_URL);
+
+    expect(await publicTables()).toEqual(TABLES_SECTION_5);
   });
 
   /**
@@ -265,43 +324,7 @@ describe("runMigrations", () => {
 });
 
 describe("migrateDb", () => {
-  /**
-   * The Compose `migrate` service and a developer's `pnpm db:migrate` can
-   * start together. drizzle reads its journal before its transaction, so
-   * without the advisory lock both runners see an empty journal and the second
-   * fails on `CREATE TYPE ... already exists`.
-   */
-  it("serialises two runners started together on an empty database", async () => {
-    await emptyTestDatabase();
-    const first = createDb(TEST_DATABASE_URL, { max: 1 });
-    const second = createDb(TEST_DATABASE_URL, { max: 1 });
-
-    try {
-      const outcomes = await Promise.allSettled([
-        migrateDb(first),
-        migrateDb(second),
-      ]);
-
-      expect(outcomes.map((outcome) => outcome.status)).toEqual([
-        "fulfilled",
-        "fulfilled",
-      ]);
-      const applied = outcomes.map((outcome) =>
-        outcome.status === "fulfilled" ? outcome.value.applied : -1,
-      );
-      expect(applied.sort((a, b) => a - b)).toEqual([0, SHIPPED_MIGRATIONS]);
-    } finally {
-      await closeDb(first);
-      await closeDb(second);
-    }
-
-    const journal = await sql<{ hash: string; runs: number }[]>`
-      SELECT hash, count(*)::int AS runs FROM drizzle.__drizzle_migrations
-      GROUP BY hash
-    `;
-    expect(journal).toHaveLength(SHIPPED_MIGRATIONS);
-    expect(journal.every((row) => row.runs === 1)).toBe(true);
-  });
+  beforeEach(migrate);
 
   it("waits for the lock at most MIGRATION_LOCK_WAIT_MS by default", async () => {
     const db = createDb(TEST_DATABASE_URL, { max: 1 });
@@ -369,7 +392,49 @@ describe("migrateDb", () => {
   });
 });
 
+describe("migrateDb from an empty database", () => {
+  /**
+   * The Compose `migrate` service and a developer's `pnpm db:migrate` can
+   * start together. drizzle reads its journal before its transaction, so
+   * without the advisory lock both runners see an empty journal and the second
+   * fails on `CREATE TYPE ... already exists`.
+   */
+  it("serialises two runners started together on an empty database", async () => {
+    await emptyTestDatabase();
+    const first = createDb(TEST_DATABASE_URL, { max: 1 });
+    const second = createDb(TEST_DATABASE_URL, { max: 1 });
+
+    try {
+      const outcomes = await Promise.allSettled([
+        migrateDb(first),
+        migrateDb(second),
+      ]);
+
+      expect(outcomes.map((outcome) => outcome.status)).toEqual([
+        "fulfilled",
+        "fulfilled",
+      ]);
+      const applied = outcomes.map((outcome) =>
+        outcome.status === "fulfilled" ? outcome.value.applied : -1,
+      );
+      expect(applied.sort((a, b) => a - b)).toEqual([0, SHIPPED_MIGRATIONS]);
+    } finally {
+      await closeDb(first);
+      await closeDb(second);
+    }
+
+    const journal = await sql<{ hash: string; runs: number }[]>`
+      SELECT hash, count(*)::int AS runs FROM drizzle.__drizzle_migrations
+      GROUP BY hash
+    `;
+    expect(journal).toHaveLength(SHIPPED_MIGRATIONS);
+    expect(journal.every((row) => row.runs === 1)).toBe(true);
+  });
+});
+
 describe("migrateDb on failure", () => {
+  beforeEach(migrate);
+
   /**
    * `lock_timeout` 0 is "wait forever" - the hang the wait exists to prevent;
    * a fraction or NaN would reach Postgres as a raw error.
@@ -445,28 +510,6 @@ describe("migrateDb on failure", () => {
     }
   });
 
-  /** A failed migration leaves the caller's session as it found it. */
-  it("puts both session settings back when a migration fails", async () => {
-    await emptyTestDatabase();
-    // The first statement of 0000_core, already there: the migration fails.
-    await sql`CREATE TYPE public.snapshot_point AS ENUM ('1h')`;
-    const db = createDb(TEST_DATABASE_URL, { max: 1 });
-    try {
-      await db.execute(drizzleSql`set lock_timeout = '5s'`);
-      await db.execute(drizzleSql`set statement_timeout = '45s'`);
-      await db.execute(drizzleSql`set client_min_messages = error`);
-      await expect(migrateDb(db)).rejects.toMatchObject({ code: "42710" });
-      expect(await sessionSettings(db)).toEqual({
-        lock_timeout: "5s",
-        statement_timeout: "45s",
-        client_min_messages: "error",
-      });
-    } finally {
-      await closeDb(db);
-      await resetTestDatabase();
-    }
-  });
-
   /**
    * The very first step of taking the lock - setting the wait - fails: the
    * run fails with it before it holds the lock or changed the session, and
@@ -526,24 +569,6 @@ describe("migrateDb on failure", () => {
       expect(await heldAdvisoryLocks(sql)).toBe(0);
     } finally {
       await closeDb(db);
-    }
-  });
-
-  /**
-   * The handle stays open after the failure - the session, and with it a lock
-   * nobody released, would outlive the run that took it.
-   */
-  it("releases the lock when a migration fails", async () => {
-    await emptyTestDatabase();
-    // The first statement of 0000_core, already there: the migration fails.
-    await sql`CREATE TYPE public.snapshot_point AS ENUM ('1h')`;
-    const db = createDb(TEST_DATABASE_URL, { max: 1 });
-    try {
-      await expect(migrateDb(db)).rejects.toMatchObject({ code: "42710" });
-      expect(await heldAdvisoryLocks(sql)).toBe(0);
-    } finally {
-      await closeDb(db);
-      await resetTestDatabase();
     }
   });
 
@@ -613,7 +638,10 @@ describe("migrateDb on failure", () => {
   /**
    * The migrations are applied; only the unlock after them failed. That is
    * not a failed run - the outcome comes back, the failure goes to the
-   * callback, and closing the handle ends the lock with the session.
+   * callback, and closing the handle ends the lock with the session. Both
+   * halves are read: the lock held while the handle is open - the unlock
+   * really did not happen - and gone once it is closed; without the first
+   * read the second could not fail.
    */
   it("returns the outcome when only the unlock fails, and reports the failure", async () => {
     const db = createDb(TEST_DATABASE_URL, { max: 1 });
@@ -628,6 +656,7 @@ describe("migrateDb on failure", () => {
       expect(fault.hits).toBe(1);
       expect(onReleaseError).toHaveBeenCalledTimes(1);
       expect(onReleaseError).toHaveBeenCalledWith("unlock", unlockError);
+      expect(await heldAdvisoryLocks(sql)).toBe(1);
     } finally {
       await closeDb(db);
     }
@@ -906,6 +935,48 @@ describe("migrateDb on failure", () => {
       await closeDb(db);
     }
   });
+});
+
+describe("migrateDb on failure from an empty database", () => {
+  /** A failed migration leaves the caller's session as it found it. */
+  it("puts both session settings back when a migration fails", async () => {
+    await emptyTestDatabase();
+    // The first statement of 0000_core, already there: the migration fails.
+    await sql`CREATE TYPE public.snapshot_point AS ENUM ('1h')`;
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
+    try {
+      await db.execute(drizzleSql`set lock_timeout = '5s'`);
+      await db.execute(drizzleSql`set statement_timeout = '45s'`);
+      await db.execute(drizzleSql`set client_min_messages = error`);
+      await expect(migrateDb(db)).rejects.toMatchObject({ code: "42710" });
+      expect(await sessionSettings(db)).toEqual({
+        lock_timeout: "5s",
+        statement_timeout: "45s",
+        client_min_messages: "error",
+      });
+    } finally {
+      await closeDb(db);
+      await resetTestDatabase();
+    }
+  });
+
+  /**
+   * The handle stays open after the failure - the session, and with it a lock
+   * nobody released, would outlive the run that took it.
+   */
+  it("releases the lock when a migration fails", async () => {
+    await emptyTestDatabase();
+    // The first statement of 0000_core, already there: the migration fails.
+    await sql`CREATE TYPE public.snapshot_point AS ENUM ('1h')`;
+    const db = createDb(TEST_DATABASE_URL, { max: 1 });
+    try {
+      await expect(migrateDb(db)).rejects.toMatchObject({ code: "42710" });
+      expect(await heldAdvisoryLocks(sql)).toBe(0);
+    } finally {
+      await closeDb(db);
+      await resetTestDatabase();
+    }
+  });
 
   /**
    * A 57014 from inside the migration - the lock was free, a statement of
@@ -960,7 +1031,10 @@ describe("migrateDb on failure", () => {
  * `migrate` service fail before they take the lock.
  */
 describe("the db:migrate entry point", () => {
+  beforeEach(migrate);
+
   it("migrates through its own connection and exits with 0", async () => {
+    const before = await testDatabaseSessions();
     const { out, err } = captureProcessOutput();
     let exitCode: typeof process.exitCode;
     try {
@@ -976,7 +1050,7 @@ describe("the db:migrate entry point", () => {
       `migrations: nothing to apply, ${SHIPPED_MIGRATIONS} already applied\n`,
     ]);
     expect(exitCode).toBe(0);
-    await expectNoAdvisoryLocks();
+    await expectEntryPointLeftNothing(before);
   });
 });
 
@@ -988,6 +1062,7 @@ describe("the migrate-and-seed entry point", () => {
   it("migrates an empty database and seeds it through its own connection, exiting with 0", async () => {
     await emptyTestDatabase();
     vi.resetModules();
+    const before = await testDatabaseSessions();
     const { out, err } = captureProcessOutput();
     let exitCode: typeof process.exitCode;
     try {
@@ -1005,7 +1080,7 @@ describe("the migrate-and-seed entry point", () => {
         "app settings seeded\n",
       ]);
       expect(exitCode).toBe(0);
-      await expectNoAdvisoryLocks();
+      await expectEntryPointLeftNothing(before);
     } finally {
       await resetTestDatabase();
     }
@@ -1046,9 +1121,7 @@ describe("the advisory lock helpers of the test support", () => {
 
   /** A lock on another database of the same server is not this test's. */
   it("does not count an advisory lock held on another database", async () => {
-    const url = testDatabaseUrl();
-    url.pathname = "/postgres";
-    const other = postgres(url.toString(), { max: 1 });
+    const other = openMaintenanceSql();
     try {
       await other`SELECT pg_advisory_lock(42)`;
       expect(await heldAdvisoryLocks(sql)).toBe(0);
@@ -1063,10 +1136,8 @@ describe("the advisory lock helpers of the test support", () => {
    * it by the pid it was given.
    */
   it("does not take a session waiting on another database for a waiter", async () => {
-    const url = testDatabaseUrl();
-    url.pathname = "/postgres";
-    const holder = postgres(url.toString(), { max: 1 });
-    const waiter = postgres(url.toString(), { max: 1 });
+    const holder = openMaintenanceSql();
+    const waiter = openMaintenanceSql();
     let waiting: Promise<void> = Promise.resolve();
     try {
       await holder`SELECT pg_advisory_lock(42)`;

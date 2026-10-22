@@ -71,21 +71,17 @@ export interface BootstrapOptions {
 /**
  * The connections of the entry point as the last stages of the stop, in
  * closing order: Redis, then the database. Redis goes through `redisStage` of
- * `@sf/runtime`, the same stage as the api's: a QUIT that was refused, or a
- * client torn down because it was not connected, is a `warn` that says so -
- * with the refusal - rather than a `closed` that hides it.
+ * `@sf/runtime` (its own module on top of `closeRedis` and `stageOf`), the
+ * same stage as the api's: a QUIT that was refused, or a client torn down
+ * because it was not connected, is a `warn` that says so - with the refusal -
+ * rather than a `closed` that hides it. The database is a stage of `stageOf`,
+ * the way the api builds its own.
  */
 export function connectionStages(
   redis: ClosableRedis,
   db: Db,
 ): ShutdownStage[] {
-  return [
-    redisStage(() => redis),
-    {
-      name: "db",
-      close: () => closeDb(db),
-    },
-  ];
+  return [redisStage(() => redis), stageOf("db", () => db, closeDb)];
 }
 
 /**
