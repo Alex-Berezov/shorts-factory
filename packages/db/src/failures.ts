@@ -4,8 +4,9 @@ import { errorCode } from "@sf/core";
  * How the migration runner and its entry points put a failure into words -
  * one place, so that `runMigrations` and `pnpm db:migrate` say the same
  * failure the same way. Knows nothing of the runner itself: the names of its
- * steps live in `migrate.ts`, which reads this module, never the other way
- * round.
+ * steps live in `migration-lock.ts` (the lock and its release) and
+ * `migrate.ts` (`count_journal`), which both read this module, never the
+ * other way round.
  */
 
 /** The message of a failure, or its stack when `stack` is asked for. */

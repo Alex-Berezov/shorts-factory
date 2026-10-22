@@ -1,11 +1,11 @@
 import { withCleanup } from "../cleanup.js";
 import { describeError } from "../failures.js";
+import type { MigrationOutcome } from "../migrate.js";
 import {
   MigrationLockTimeoutError,
-  type MigrationOutcome,
   type ReleaseStep,
   releaseStepFailure,
-} from "../migrate.js";
+} from "../migration-lock.js";
 
 /**
  * What `pnpm db:migrate`, `pnpm db:seed` (and the Compose `migrate` service,

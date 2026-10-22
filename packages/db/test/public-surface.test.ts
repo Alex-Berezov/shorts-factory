@@ -36,11 +36,20 @@ const SHARED_TEST_SUPPORT: readonly (readonly [string, string])[] = [
     "test-support/entry-check/migrated-stack.ts",
   ],
 ];
+
+/**
+ * Addresses inside the package no importer may reach. Each module of `src`
+ * in its `.ts` form; `exports` closes a path whatever its extension, so the
+ * `.js` form and the bare one are held once each (`cli/migrate.js`,
+ * `migration-lock`) rather than for every module.
+ */
 const DEEP_IMPORTS: readonly string[] = [
   "@sf/db/src/cli/migrate.ts",
   "@sf/db/src/cli/migrate.js",
   "@sf/db/src/cli/seed.ts",
   "@sf/db/src/migrate.ts",
+  "@sf/db/src/migration-lock.ts",
+  "@sf/db/src/migration-lock",
   // The guard's old address, replaced by test-support: an import left on it
   // must fail loudly rather than reach a second copy.
   "@sf/db/test/local-host-guard.js",
@@ -121,9 +130,10 @@ describe("@sf/db root module", () => {
    * The migration runner and the seed are for the entry points of
    * `src/cli/` and the test support of this package, which import them from
    * `src/`; a re-export without a consumer is a second way in that the next
-   * epic would settle on by accident. The lock and the session-level runner
-   * are for the entry point next to them (`src/cli/migrate.ts`) only, and a
-   * lock taken anywhere but `migrateDb` would serialise nothing. `openDb` is
+   * epic would settle on by accident. The lock - its own module,
+   * `src/migration-lock.ts` - and the session-level runner are for the entry
+   * point next to them (`src/cli/migrate.ts`) only, and a lock taken anywhere
+   * but `migrateDb` would serialise nothing. `openDb` is
    * the opening `createDb` and `createProbeDb` share: from outside it would
    * be a way to put a session parameter of a probe on a service handle. The
    * class of a busy lock and the wording of failures (`failures.ts`) are for
@@ -139,6 +149,8 @@ describe("@sf/db root module", () => {
     "openDb",
     "MigrationLockTimeoutError",
     "releaseStepFailure",
+    "withMigrationLock",
+    "stepNamer",
     "describeError",
     "throwFailures",
   ])("keeps %s inside the package", (name) => {

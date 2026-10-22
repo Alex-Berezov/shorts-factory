@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
@@ -35,6 +34,7 @@ import {
   cleanStack,
   realpathIn,
 } from "./compose-fixture.js";
+import { type Gate, chosenOn, gateOf } from "./gate-choice.js";
 import {
   readRepoFile,
   readRepoJson,
@@ -2494,47 +2494,14 @@ describe("checkInterpolation", () => {
  * reading of the syntax of `when` lives here (B4, E0-12K).
  */
 describe("COMPOSE_SOURCES and the when of the compose gate", () => {
-  const GateSchema = z.object({
-    gates: z.array(
-      z.object({ id: z.string(), when: z.string() }).passthrough(),
-    ),
-  });
-  const ChoiceSchema = z.array(z.object({ run: z.boolean() }).passthrough());
-
-  /** The compose gate as rules.sf.json has it. */
-  function composeGate(): z.infer<typeof GateSchema>["gates"][number] {
-    const { gates } = GateSchema.parse(
-      readRepoJson(".claude/hooks/rules.sf.json"),
-    );
-    const gate = gates.find((one) => one.id === "compose");
-    if (gate === undefined) throw new Error("no compose gate");
-    return gate;
-  }
-
-  /** `selectGates` of gates.js, a CommonJS module of the hooks. */
-  function selectGates(): (...args: unknown[]) => unknown {
-    const hooks: unknown = createRequire(import.meta.url)(
-      "../.claude/hooks/gates.js",
-    );
-    if (
-      typeof hooks !== "object" ||
-      hooks === null ||
-      !("selectGates" in hooks) ||
-      typeof hooks.selectGates !== "function"
-    ) {
-      throw new Error(".claude/hooks/gates.js exports no selectGates");
-    }
-    const select = hooks.selectGates;
-    return (...args) => Reflect.apply(select, undefined, args);
-  }
+  /** The compose gate, read on the first case that asks, not on the collection. */
+  let composeGate: Gate | undefined;
 
   /** Whether gates.js chooses the compose gate on a change of `file` alone. */
-  function chosen(file: string): boolean {
-    const choices = ChoiceSchema.parse(
-      selectGates()([composeGate()], [file], null),
-    );
-    return choices[0]?.run === true;
-  }
+  const chosen = (file: string): boolean => {
+    composeGate ??= gateOf("compose");
+    return chosenOn(composeGate, file);
+  };
 
   const BuildSchema = z.union([
     z.string(),

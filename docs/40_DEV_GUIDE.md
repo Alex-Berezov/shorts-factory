@@ -128,8 +128,14 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
    `packages/db/migrations/NNNN_<epic>.sql`.
    _Почему `--name`:_ без него drizzle-kit придумывает случайное имя, а переименование файла
    ломает раннер, который ищет миграцию по имени из `migrations/meta/_journal.json` (`README.md`).
-   CI краснеет на схеме без миграции (`db:generate` + пустой `git status` папки миграций +
-   `db:check`); локально папку миграций проверяет `pnpm --filter @sf/db db:check`.
+   Схему без миграции ловит `node scripts/check-schema-drift.mjs`: шаг CI «Schema drift» и
+   локальный гейт `schema-drift` (выбирается на правке схемы, папки миграций, `drizzle.config.ts`,
+   манифеста `@sf/db`, `packages/db/tsconfig.json` и `tsconfig.base.json`, `pnpm-lock.yaml`, самого
+   скрипта и его импортов из `scripts/lib/`; точный перечень - `when` гейта в `.claude/hooks/rules.sf.json`). Скрипт гонит `drizzle-kit generate` в копию папки миграций
+   (`packages/db/node_modules/.cache/schema-drift-*`; дерево не трогает, незакоммиченная миграция
+   в дереве считается), затем `drizzle-kit check` по самой папке. Код 1 - дрейф: новая миграция,
+   вопрос о переименовании, коллизия снапшотов (подсказка в stderr - сгенерируй миграцию сам
+   с `--name`); код 2 - проверка не состоялась. Правила и коды - ADR-0002, «Дрейф схемы в CI».
 3. **Применённую миграцию не править** - только новая миграция. Применить: `pnpm db:migrate`
    (база разработки) и миграция тестовой базы (`README.md`, «Getting started», шаг 7).
 4. **Репозиторий** - `packages/db/src/repos/<таблица>.ts` объектом `xxxRepo` с функциями

@@ -10,16 +10,14 @@ import {
   vi,
 } from "vitest";
 import { type Db, closeDb, createDb } from "../src/client.js";
+import { migrateDb, migrationsFolder, runMigrations } from "../src/migrate.js";
 import {
   MIGRATE_NEEDS_SINGLE_CONNECTION,
   MIGRATION_LOCK_KEY,
   MIGRATION_LOCK_WAIT_MS,
   MigrationLockTimeoutError,
-  migrateDb,
   migrationLockTimeoutMessage,
-  migrationsFolder,
-  runMigrations,
-} from "../src/migrate.js";
+} from "../src/migration-lock.js";
 import {
   heldAdvisoryLocks,
   waitForAdvisoryWaiter,

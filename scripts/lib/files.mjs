@@ -29,6 +29,36 @@ export function codeOf(error) {
 }
 
 /**
+ * The message of a failure for a line of a root script: the `message` of an
+ * `Error`, the text of anything else that was thrown.
+ *
+ * @param {unknown} error
+ * @returns {string}
+ */
+export function messageOf(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Whether a run of `spawnSync` was stopped at its time limit: node gives it
+ * `ETIMEDOUT` in `error`, the signal it was killed with in `signal`. The
+ * `code` is read off any object in `error`, not only an `Error` (unlike
+ * `codeOf`): the reading `probe-image.mjs` had before it moved here.
+ *
+ * @param {{ error?: unknown }} run
+ * @returns {boolean}
+ */
+export function timedOut(run) {
+  const { error } = run;
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ETIMEDOUT"
+  );
+}
+
+/**
  * Whether `error` says the path is gone: `ENOENT`, nothing else. `EPERM`,
  * `EBUSY` or `EACCES` say the path cannot be read, not that it is not there -
  * a second look through `existsSync` cannot tell them apart either, since it
@@ -248,8 +278,7 @@ function listedPaths(root, spawn) {
   } catch (error) {
     // A spawn that throws instead of returning its error is the same failure
     // to list the tree, named by the root - not by the command it carries.
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`git ls-files in ${root} failed: ${message}`, {
+    throw new Error(`git ls-files in ${root} failed: ${messageOf(error)}`, {
       cause: error,
     });
   }
@@ -280,8 +309,7 @@ function readListedFile(path) {
     return readFileSync(path, "utf8");
   } catch (error) {
     if (isNoListedFile(error)) return null;
-    const message = error instanceof Error ? error.message : String(error);
-    throw new UnreadableFileError(message, {
+    throw new UnreadableFileError(messageOf(error), {
       cause: error,
       code: codeOf(error),
       path,

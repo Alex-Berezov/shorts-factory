@@ -12,7 +12,7 @@ import { TEST_STACK } from "./stack-guard.js";
 /**
  * Key of the session-level advisory lock an integration run holds on the
  * test database from its entry check to its teardown. Its own key, not the
- * one of the migration runner (`MIGRATION_LOCK_KEY` in `../src/migrate.ts`):
+ * one of the migration runner (`MIGRATION_LOCK_KEY` in `../src/migration-lock.ts`):
  * a run migrates under that one, and would wait for itself. It spells "SFRN"
  * in ASCII; it only has to be unique among the advisory locks of the test
  * database, and it lives in the test support only - nothing the product runs
@@ -40,7 +40,7 @@ const lockQueries = (key: number) => ({
   release: sql`SELECT pg_advisory_unlock(${key}::bigint) AS released`,
   // A bigint key lies over two oid columns - its upper half in `classid`,
   // its lower half in `objid`, `objsubid` 1 (as `HELD_MIGRATION_LOCK` of
-  // `../src/migrate.ts` reads it).
+  // `../src/migration-lock.ts` reads it).
   holders: sql`
     SELECT l.pid,
            a.application_name AS "applicationName",

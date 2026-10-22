@@ -1971,8 +1971,9 @@
       "E0-12I"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-20"
+    "status": "in_progress",
+    "added_at": "2026-10-20",
+    "started_at": "2026-10-22"
   },
   {
     "id": "E0-12T",

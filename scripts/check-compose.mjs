@@ -82,7 +82,7 @@ import {
   controlEnvOf,
   defaultComposeFile,
 } from "./compose-rules.mjs";
-import { isGone, readIfFile } from "./lib/files.mjs";
+import { isGone, messageOf, readIfFile } from "./lib/files.mjs";
 import { canonical, isEntry, nameOn, repoRoot } from "./lib/paths.mjs";
 
 /**
@@ -203,17 +203,6 @@ function dockerEnvOf(env, platform, dropped) {
 }
 
 /**
- * Why a read of a file or a path failed: its message. Not for a call of
- * docker - see `composeFailureOf`.
- *
- * @param {unknown} error
- * @returns {string}
- */
-function detailOf(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-
-/**
  * How a failed call of docker ended when it ran - `exited with code N`,
  * `was ended by SIGTERM`, or a limit of the gate (more output than the buffer of the call holds,
  * `ENOBUFS`, which Node ends with SIGTERM), told by the
@@ -297,7 +286,7 @@ function commandOf(args) {
  */
 function composeFailureOf(error, ranAndFailed) {
   const ending = endingOf(error);
-  if (ending === undefined) return [detailOf(error)];
+  if (ending === undefined) return [messageOf(error)];
   // Not a command to repeat: by hand the call would not meet the limit.
   if (ending.gateLimit) {
     return [
@@ -389,7 +378,7 @@ export function main(argv, deps = {}) {
       return canonical(path, realpath);
     } catch (error) {
       err(`check-compose: cannot resolve ${what} ${path}`);
-      err(detailOf(error instanceof Error ? error.cause : error));
+      err(messageOf(error instanceof Error ? error.cause : error));
       return null;
     }
   };
@@ -623,7 +612,7 @@ export function main(argv, deps = {}) {
     } catch (error) {
       if (!(error instanceof UnreadableInputError)) throw error;
       err(`check-compose: cannot read ${error.path}, a file the rules check`);
-      err(detailOf(error.cause));
+      err(messageOf(error.cause));
       return 1;
     }
     if (problems.length > 0) {

@@ -1617,17 +1617,19 @@ function neighboursExtra(exempt) {
  * extra-строка checkGateSelection: ни один файл настоящего дерева, который видит git
  * (`git ls-files`), кроме mustRun, гейт не выбирает - when не шире файлов выбора пробы на
  * всём дереве, а не только на ручном mustSkip (E0-12M). Отказ - до 10 имён и их число.
+ * exempt - маски каталогов, которые when берёт целиком (`packages/db/migrations/**`): файл
+ * под ними выбирает гейт законно и в mustRun не перечисляется (E0-12S).
  */
-function trackedOutsideExtra() {
+function trackedOutsideExtra(exempt = []) {
   return {
-    name: 'ни один файл, который видит git, кроме файлов выбора, его не выбирает',
+    name: 'ни один файл, который видит git, кроме файлов выбора' + (exempt.length ? ' и масок целиком (' + exempt.join(', ') + ')' : '') + ', его не выбирает',
     fn: ({ runs }, spec) => {
       const r = run('git', ['-c', 'core.quotepath=false', 'ls-files', '-z'], { cwd: ROOT });
       if (r.error) return 'git ls-files не запустился: ' + r.error.message;
       if (r.status !== 0) return 'git ls-files: ' + (r.status === null ? 'сигнал ' + r.signal : 'код ' + r.status) + ': ' + String(r.stderr || '').trim();
       const files = String(r.stdout || '').split('\0').filter(Boolean);
       if (!files.length) return 'git ls-files не вернул ни одного файла';
-      const stray = files.filter((f) => !spec.mustRun.includes(f) && runs(f));
+      const stray = files.filter((f) => !spec.mustRun.includes(f) && !exempt.some((g) => L.matchGlob(g, f)) && runs(f));
       if (stray.length) {
         return 'when шире файлов выбора: выбирает его на ' + stray.slice(0, 10).join(', ') +
           (stray.length > 10 ? ' и ещё ' + (stray.length - 10) : '') + ' (всего ' + stray.length + ')';
@@ -1857,6 +1859,67 @@ checkGateSelection('tracker', {
         }
       },
     },
+  ],
+});
+
+// Гейт дрейфа схемы @sf/db (E0-12S): when - ровно то, что читает scripts/check-schema-drift.mjs
+// и запуск drizzle-kit через tsx (L-018). Схема и папка миграций - маски целиком: новая таблица
+// или миграция выбирает гейт без правки when.
+const SCHEMA_DRIFT_WHOLE = ['packages/db/src/schema/**', 'packages/db/migrations/**'];
+checkGateSelection('schema-drift', {
+  runWhat: 'схеме, миграциях и том, что читает скрипт дрейфа',
+  skipWhat: 'посторонних',
+  mustRun: [
+    'packages/db/src/schema/index.ts',
+    'packages/db/src/schema/system.ts',
+    'packages/db/migrations/0000_core.sql',
+    'packages/db/migrations/meta/_journal.json',
+    'packages/db/migrations/meta/0000_snapshot.json',
+    'packages/db/drizzle.config.ts',
+    // скрипты обхода db:generate/db:check и диапазон drizzle-kit
+    'packages/db/package.json',
+    // tsx читает их при запуске drizzle-kit: правка ломает запуск
+    'packages/db/tsconfig.json',
+    'tsconfig.base.json',
+    // версии drizzle-kit и tsx
+    'pnpm-lock.yaml',
+    'scripts/check-schema-drift.mjs',
+    'scripts/lib/files.mjs',
+    'scripts/lib/json.mjs',
+    'scripts/lib/paths.mjs',
+  ],
+  mustSkip: [
+    'packages/db/src/migrate.ts',
+    'packages/db/src/migration-lock.ts',
+    'packages/db/src/repos/api-usage-log.ts',
+    'packages/db/src/schema.ts',
+    'packages/db/migrations.json',
+    'packages/db/test/tsconfig.json',
+    'packages/api/tsconfig.json',
+    'tsconfig.json',
+    'package.json',
+    'scripts/check-compose.mjs',
+    'scripts/lib/yaml-doc.mjs',
+    'scripts/lib/manifest.mjs',
+    'test/check-schema-drift.test.ts',
+    'test/schema-drift-fixture.ts',
+  ],
+  extra: [
+    {
+      name: 'его скрипт на месте',
+      fn: ({ gate }) => {
+        const m = /^node\s+(\S+)$/.exec(String(gate.cmd || ''));
+        if (!m) return 'cmd гейта schema-drift не node <скрипт>: ' + gate.cmd;
+        if (!fs.existsSync(path.join(ROOT, m[1]))) return 'скрипта ' + m[1] + ' нет на диске';
+        return true;
+      },
+    },
+    { name: 'пути файлов в его note на диске', fn: ({ gate }) => notePathsOnDisk(gate) },
+    // Проба отказа: when без packages/db/tsconfig.json (его читает tsx при запуске drizzle-kit)
+    // не выбирает гейт на нём.
+    refusalExtra('packages/db/tsconfig.json', 'packages/db/drizzle.config.ts', 'when без packages/db/tsconfig.json не выбирает его на этом файле (проба отказа)'),
+    neighboursExtra(SCHEMA_DRIFT_WHOLE),
+    trackedOutsideExtra(SCHEMA_DRIFT_WHOLE),
   ],
 });
 

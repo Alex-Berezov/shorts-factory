@@ -29,7 +29,11 @@
  * 0 when clean, with the number of files scanned.
  */
 import { resolve } from "node:path";
-import { UnreadableFileError, readTrackedFiles } from "./lib/files.mjs";
+import {
+  UnreadableFileError,
+  messageOf,
+  readTrackedFiles,
+} from "./lib/files.mjs";
 import { repoRoot } from "./lib/paths.mjs";
 import { breaksRule, isSource } from "./lib/search-list.mjs";
 
@@ -46,8 +50,7 @@ const REQUIRED = ["apps", "packages", "scripts", "test"];
  * @returns {never}
  */
 function scanFailed(what, error) {
-  const cause = error instanceof Error ? error.message : String(error);
-  console.error(`no-search-list: cannot scan ${what}: ${cause}`);
+  console.error(`no-search-list: cannot scan ${what}: ${messageOf(error)}`);
   process.exit(2);
 }
 

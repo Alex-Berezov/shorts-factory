@@ -12,7 +12,7 @@ import {
   MigrationLockTimeoutError,
   type ReleaseStep,
   migrationLockTimeoutMessage,
-} from "../src/migrate.js";
+} from "../src/migration-lock.js";
 import { captureProcessOutput } from "./capture-output.js";
 
 /**
@@ -647,8 +647,10 @@ describe("entry points", () => {
   ) => Promise<{ applied: number; total: number }>;
 
   /**
-   * Replaces `migrateDb` only: what `run.ts` takes from the same module - the
-   * class of a busy lock and the texts of the steps - stays the real one.
+   * Replaces `migrateDb` only, the one name `run.ts` and the entry points
+   * take from `migrate.ts`: the class of a busy lock and the texts of the
+   * steps come from another module, `migration-lock.ts`, which is not mocked
+   * and stays the real one.
    */
   function mockMigrateDb(migrateDb: MigrateDbStub): void {
     vi.doMock("../src/migrate.js", async (importOriginal) => ({

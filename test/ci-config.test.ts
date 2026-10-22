@@ -1,6 +1,13 @@
 import { parseEnv } from "node:util";
 import { beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
+import {
+  DRIZZLE_KIT_BIN,
+  DRIZZLE_KIT_RUNS,
+  DRIZZLE_KIT_TIMEOUT_MS,
+  STALE_COPY_MS,
+  drizzleKitSpec,
+} from "../scripts/check-schema-drift.mjs";
 import { imageTag } from "../scripts/probe-image.mjs";
 import { APP_DOCKERFILE, imagesOf } from "./dockerfile.js";
 import {
@@ -57,13 +64,12 @@ const stepsOf = (job: string): Step[] => stepsIn(workflow, job);
 const isMigrate = (step: Step) =>
   step.run?.includes("src/cli/migrate.ts") === true;
 
-/** The steps that turn CI red on a schema change without its migration. */
-const GENERATE = "pnpm --filter @sf/db db:generate < /dev/null";
-const isGenerate = (step: Step) => step.run?.includes(GENERATE) === true;
-const isDriftCheck = (step: Step) =>
-  step.run?.includes("git status --porcelain -- packages/db/migrations") ===
-  true;
-const isDbCheck = (step: Step) => step.run === "pnpm --filter @sf/db db:check";
+/**
+ * The one step that turns CI red on a schema change without its migration;
+ * its rules live in the script (scripts/check-schema-drift.mjs).
+ */
+const SCHEMA_DRIFT = "node scripts/check-schema-drift.mjs";
+const isSchemaDrift = (step: Step) => step.run === SCHEMA_DRIFT;
 
 /** The value of `key` in the top-level `concurrency:` of a text of ci.yml. */
 function workflowValue(
@@ -176,7 +182,7 @@ describe("ci.yml job ci", () => {
       (step) => step.run === "pnpm lint",
       (step) => step.run === "pnpm typecheck",
       (step) => step.run === "pnpm test",
-      isGenerate,
+      isSchemaDrift,
       isMigrate,
       (step) => step.run === "pnpm test:int",
       (step) => step.run === "pnpm build",
@@ -251,48 +257,51 @@ describe("ci.yml job ci", () => {
   });
 
   /**
-   * A schema change without its migration: generate writes the missing
-   * migration, the porcelain of the folder - untracked files included - must
-   * stay empty, and drizzle-kit checks the folder itself. Generate and check
-   * start drizzle-kit the one way the bypass of `db:generate` does (decision
-   * R4 of E0-12C), so the step breaks with it.
+   * A schema change without its migration: one step runs the script of the
+   * schema drift, bounded, after install and before the integration tests.
+   * The three shell steps it replaced - generate, the porcelain of the
+   * folder, db:check - must not come back next to it: the rules of drizzle-kit
+   * live in one place. The script starts drizzle-kit the one way the bypass
+   * of `db:generate` and `db:check` does (decision R4 of E0-12C), so its path
+   * of the binary is held equal to the scripts of the manifest, and the
+   * loader it imports into node to the command they name. The step outlasts the
+   * runs of drizzle-kit the script makes, so the script names why it stopped,
+   * and ends well before a copy of the folder it makes counts as left behind.
    */
   it("checks that the migrations match the schema", () => {
-    const generate = steps.findIndex(isGenerate);
-    const drift = steps.findIndex(isDriftCheck);
-    const check = steps.findIndex(isDbCheck);
+    const drift = steps.findIndex(isSchemaDrift);
     const install = runs.indexOf("pnpm install --frozen-lockfile");
     const integration = runs.indexOf("pnpm test:int");
     const scripts = readManifest("packages/db").scripts ?? {};
-    const bypass = "tsx ./node_modules/drizzle-kit/bin.cjs ";
+    const bypass = `tsx ${DRIZZLE_KIT_BIN} `;
 
-    expect([install, generate, drift, check, integration]).not.toContain(-1);
-    expect(install).toBeLessThan(generate);
-    expect(generate).toBeLessThan(drift);
-    expect(drift).toBeLessThan(check);
-    expect(check).toBeLessThan(integration);
-    expect(steps[drift]?.run).toContain('test -z "$drift" || {');
+    expect([install, drift, integration]).not.toContain(-1);
+    expect(install).toBeLessThan(drift);
+    expect(drift).toBeLessThan(integration);
+    const stepMs = (steps[drift]?.["timeout-minutes"] ?? 0) * 60_000;
+    expect(stepMs).toBeGreaterThan(DRIZZLE_KIT_RUNS * DRIZZLE_KIT_TIMEOUT_MS);
+    expect(STALE_COPY_MS).toBeGreaterThan(stepMs);
+    expect(steps.filter(isSchemaDrift)).toHaveLength(1);
+    for (const replaced of [
+      "db:generate",
+      "db:check",
+      "drizzle-kit",
+      "git status --porcelain",
+    ]) {
+      expect(
+        runs.filter((run) => run?.includes(replaced) === true),
+        replaced,
+      ).toEqual([]);
+    }
     expect(scripts["db:generate"]).toBe(`${bypass}generate`);
     expect(scripts["db:check"]).toBe(`${bypass}check`);
-  });
-
-  /**
-   * An ambiguous rename makes generate ask a question: with stdin open it
-   * waits for the answer, with stdin at its end it gives up and exits with 0
-   * having written nothing. The step closes stdin, is bounded, and fails
-   * unless generate printed one of the lines it finishes with.
-   */
-  it("fails generate fast when it stopped at a question", () => {
-    const step = steps.find(isGenerate);
-    const script = step?.run ?? "";
-
-    expect(step?.["timeout-minutes"]).toBeGreaterThan(0);
-    expect(script).toContain("set -o pipefail");
-    expect(script).toContain(`${GENERATE} 2>&1 | tee "$log"`);
-    expect(script).toContain(
-      'grep -qE "No schema changes, nothing to migrate|Your SQL migration file" "$log" || {',
-    );
-    expect(script).toMatch(/\|\| \{\n[^}]*\n\s+exit 1\n\s*\}/);
+    const [command] = (scripts["db:generate"] ?? "").split(" ");
+    expect(drizzleKitSpec("packages/db", ["check"]).args).toEqual([
+      "--import",
+      command,
+      DRIZZLE_KIT_BIN,
+      "check",
+    ]);
   });
 
   it("lets no step fail quietly", () => {

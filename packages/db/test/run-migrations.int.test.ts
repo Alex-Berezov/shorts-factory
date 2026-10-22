@@ -7,8 +7,7 @@ import {
   it,
   vi,
 } from "vitest";
-import type { MigrateStatement } from "../src/migrate.js";
-import { runMigrations } from "../src/migrate.js";
+import { type MigrateStatement, runMigrations } from "../src/migrate.js";
 import { heldAdvisoryLocks } from "../test-support/advisory-locks.js";
 import {
   emptyTestDatabase,

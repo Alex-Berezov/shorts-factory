@@ -26,6 +26,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { messageOf, timedOut } from "./lib/files.mjs";
 import { readManifestFields, workspaceDirs } from "./lib/manifest.mjs";
 import { isEntry } from "./lib/paths.mjs";
 
@@ -531,17 +532,6 @@ export function dockerRun(
 }
 
 /**
- * Whether a run was ended by the time limit of `spawnProbe`.
- *
- * @param {ProbeRun} run
- * @returns {boolean}
- */
-export function timedOut(run) {
-  const { error } = run;
-  return error !== undefined && "code" in error && error.code === "ETIMEDOUT";
-}
-
-/**
  * The result line of a run - the last non-blank line of its stdout - or null
  * when there is none of the expected shape.
  *
@@ -644,8 +634,9 @@ export function main(argv, deps = {}) {
   try {
     checks = checksOf(image, read, dirs);
   } catch (error) {
-    const cause = error instanceof Error ? error.message : String(error);
-    err(`probe-image: could not work out the checks of ${image}: ${cause}`);
+    err(
+      `probe-image: could not work out the checks of ${image}: ${messageOf(error)}`,
+    );
     return 2;
   }
 

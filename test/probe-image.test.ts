@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
+import { timedOut } from "../scripts/lib/files.mjs";
 import type { PackageManifest } from "../scripts/lib/manifest.mjs";
 import { repoRoot } from "../scripts/lib/paths.mjs";
 import {
@@ -31,7 +32,6 @@ import {
   main,
   resultOf,
   spawnProbe,
-  timedOut,
   workspaceChecks,
 } from "../scripts/probe-image.mjs";
 import { imagesOf } from "./dockerfile.js";

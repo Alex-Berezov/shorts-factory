@@ -92,39 +92,23 @@ jobs:
       - run: node scripts/tasks.mjs render --check
       - run: node .claude/hooks/harness-selftest.js
       # Schema drift: a change of packages/db/src/schema without the migration
-      # it needs. db:generate writes that migration into the checkout - a new
-      # SQL file nobody tracks, a changed journal and snapshot - and
-      # `git status --porcelain` lists both kinds, where `git diff` would miss
-      # the untracked file. db:check then checks the folder itself: snapshots
-      # that collide (two branches that each added a migration) - generate
-      # prints that collision and still exits with 0. Both drive drizzle-kit
-      # through the same tsx bypass as a developer's run, so a drizzle upgrade
-      # that breaks the bypass turns this red too.
-      # A renamed column is ambiguous, and generate asks "created or renamed"
-      # (checked with drizzle-kit 0.28): with stdin left open it waits for the
-      # answer, with stdin at its end it gives up, writes nothing and exits
-      # with 0 - the drift would pass. So stdin is /dev/null, the step is
-      # bounded, and generate must have said that it finished: one of its two
-      # closing lines, or the step fails.
-      - name: Generate the migration the schema needs
+      # it needs. The rules live in the script, the gate of the same name runs
+      # it locally. It runs drizzle-kit generate with stdin closed and a time
+      # limit, through the same tsx bypass as `db:generate`, so a drizzle
+      # upgrade that breaks the bypass turns this red too; generate exits with
+      # 0 on an ambiguous rename (it asks "created or renamed" and gives up)
+      # and on snapshots that collide (two branches that each added a
+      # migration), so the script reads its output and fails on both, and on
+      # a run that stopped before its closing line. Generate writes into a
+      # temporary copy of the migrations folder, never into the tree: any
+      # file of the copy it added or changed is drift. db:check is the second
+      # line: the folder itself. Another installed version of drizzle-kit
+      # fails the step until its output is recorded again
+      # (test/schema-drift-fixture.ts). The step outlasts the two runs of
+      # drizzle-kit, so the script, not the runner, says why a run stopped.
+      - name: Schema drift
         timeout-minutes: 5
-        run: |
-          set -o pipefail
-          log="$RUNNER_TEMP/db-generate.log"
-          pnpm --filter @sf/db db:generate < /dev/null 2>&1 | tee "$log"
-          grep -qE "No schema changes, nothing to migrate|Your SQL migration file" "$log" || {
-            echo "drizzle-kit generate stopped before it finished - a rename it asks about, or snapshots that collide: run pnpm db:generate --name <epic> locally, answer it and commit the migration"
-            exit 1
-          }
-      - name: Migrations match the schema
-        run: |
-          drift="$(git status --porcelain -- packages/db/migrations)"
-          test -z "$drift" || {
-            printf '%s\n' "$drift"
-            echo "the schema changed without its migration: run pnpm db:generate --name <epic> and commit the migration"
-            exit 1
-          }
-      - run: pnpm --filter @sf/db db:check
+        run: node scripts/check-schema-drift.mjs
       # The entry of `pnpm db:migrate` with .env.test read by node's dotenv parser,
       # not by a shell. --env-file sets only what the environment lacks, so a
       # variable the runner already has wins over the file. For this step only:

@@ -20,7 +20,7 @@
 
 Граница проходит не по пакету, а по слою внутри пакета:
 
-- **Библиотека** (`src/client.ts`, `src/migrate.ts`, `src/seed.ts`, `src/repos/**`,
+- **Библиотека** (`src/client.ts`, `src/migrate.ts`, `src/migration-lock.ts`, `src/seed.ts`, `src/repos/**`,
   `src/schema/**`) конфигурации не знает: `createDb(url)`, `closeDb(db)`,
   `runMigrations(url)`, `seedAppSettings(db)` - соединение или его адрес приходит параметром.
   Здесь действует `db -> core`, импорт `@sf/config` запрещён.
@@ -209,7 +209,7 @@ M already applied`; `app settings seeded`), отказ - одну строку �
 Сбои CLI `migrate` различимы по классу и тексту, ни один сбой возврата сессии или закрытия не
 теряется.
 
-- **Занятый лок - `MigrationLockTimeoutError`** (`packages/db/src/migrate.ts`, поле `waitMs` =
+- **Занятый лок - `MigrationLockTimeoutError`** (`packages/db/src/migration-lock.ts` с E0-12S, поле `waitMs` =
   `lockWaitMs`, `cause` - ошибка драйвера, текст - `migrationLockTimeoutMessage(waitMs)`). Ожидание
   лока ограничено одним `lock_timeout`: шаг `lock_wait` ставит `lock_timeout = lockWaitMs` и
   `statement_timeout = 0` (ровно 0), исходные значения сессии читаются заранее (`read_session`) и
@@ -232,12 +232,12 @@ M already applied`; `app settings seeded`), отказ - одну строку �
 - **Шаги возврата сессии названы, их три:** `ReleaseStep` = `unlock` | `client_min_messages` |
   `timeouts` (`lock_timeout` и `statement_timeout` одним statement, Р5 E0-12I),
   `onReleaseError(step, error)`. Текст - один источник
-  `releaseStepFailure(step, error)` в `src/migrate.ts` (Р3 E0-12I): `releasing the migration lock
+  `releaseStepFailure(step, error)` в `src/migration-lock.ts` (Р3 E0-12I, модуль - E0-12S): `releasing the migration lock
   failed: …` для `unlock`, `restoring client_min_messages failed: …`, `restoring lock_timeout and
   statement_timeout failed: …` для `timeouts`; его печатает CLI и им же
   названа ошибка `runMigrations`. Имя шага - открывающий комментарий текста statement (`/* step:lock
   */ select pg_advisory_lock(...)`): его видит лог Postgres, по нему тесты находят шаг; реестра
-  объектов в рантайме нет. `MIGRATION_LOCK_KEY` экспортирован из `src/migrate.ts`, но не из баррели
+  объектов в рантайме нет. `MIGRATION_LOCK_KEY` экспортирован из `src/migration-lock.ts`, но не из баррели
   (`public-surface.test.ts`): int-кейс «лок, взятый сессией раньше, переживает упавшую попытку» берёт
   его так, как мог бы вызывающий (Р5 E0-12I). Сбои шагов упавшей попытки взять лок (`unlock`,
   `timeouts`) не проглатываются: первый упавший уходит в `onReleaseError`, брошена по-прежнему
@@ -271,25 +271,60 @@ M already applied`; `app settings seeded`), отказ - одну строку �
   всё же нет, наружу идёт ошибка драйвера.
   Точка входа образа `migrate`; переключение `CMD` Dockerfile - E0-12J, `pnpm db:migrate` и
   `pnpm db:seed` не меняются.
-- **Дрейф схемы в CI** (`.github/workflows/ci.yml`, job `ci`, до шага `db:migrate`):
-  шаг «Generate the migration the schema needs» - `db:generate < /dev/null` с `timeout-minutes: 5`
-  и проверкой, что generate напечатал одну из своих завершающих строк (`No schema changes,
-  nothing to migrate` / `Your SQL migration file`); затем шаг «Migrations match the schema» -
-  пустой `git status --porcelain -- packages/db/migrations` (porcelain видит и неотслеживаемый
-  новый SQL, `git diff` - нет), затем `pnpm --filter @sf/db db:check`. Проверено на drizzle-kit
-  0.28 (20.10.2026, Windows и Linux-контейнер `node:22` - поведение одинаковое): на неоднозначном переименовании колонки generate спрашивает «created or
-  renamed» и при открытом stdin ждёт ответа до таймаута, а при закрытом - сдаётся, ничего не
-  пишет и выходит с 0 (дрейф прошёл бы); на коллизии снапшотов двух веток generate печатает
-  ошибку и выходит с 0, краснеет только `db:check` (exit 1). Обе ситуации шаг generate теперь
-  роняет сам. `db:check` запускает drizzle-kit тем же обходом через `tsx`, что `db:generate`
-  (Р4 E0-12C): поломку обхода ловит тот же шаг.
+- **Дрейф схемы в CI** (переписано E0-12S, Р1-Р8 техлида 22.10.2026): правила живут в
+  `scripts/check-schema-drift.mjs`; job `ci` зовёт его одним шагом `Schema drift`
+  (`timeout-minutes: 5`, после `pnpm test`, до шага `db:migrate`), локально - гейт `schema-drift`
+  (`.claude/hooks/rules.sf.json`, та же команда, `timeoutSec` 150 - выше двух прогонов drizzle-kit
+  по 60 с и запаса 30 с, так что причину называет скрипт, а не хук). Порядок прогона: версия
+  установленного drizzle-kit (`packages/db/node_modules/drizzle-kit/package.json`) равна
+  `DRIZZLE_KIT_VERSION` (`0.28.1`), иначе exit 2 - признаки вывода записаны для неё
+  (`test/schema-drift-fixture.ts`, юнит запирает равенство версий); `packages/db/migrations` как на
+  диске (с незакоммиченной миграцией) копируется во временный каталог
+  `packages/db/node_modules/.cache/schema-drift-*` (`COPY_PARENT`; `.cache` создаётся при отсутствии;
+  на диске пакета и вне индекса git - `node_modules` в `.gitignore`; не `os.tmpdir()`, который на
+  машине разработки лежит на другом диске, Р5 E0-12S; копии `schema-drift-*` старше `STALE_COPY_MS`
+  (30 мин - выше `timeoutSec` гейта и предела шага CI, юниты запирают) - остаток прогона, снятого
+  снаружи до `finally`, - удаляются при старте, младшие не трогаются: их может держать параллельный прогон);
+  `drizzle-kit generate --dialect postgresql --schema ./src/schema/index.ts --out <копия>` пишет
+  только в копию (один процесс `process.execPath --import tsx ./node_modules/drizzle-kit/bin.cjs`,
+  Р6 E0-12S: загрузчик `tsx` вместо его CLI, так что предел 60 с снимает сам процесс drizzle-kit;
+  `cwd: packages/db` от корня репозитория, без оболочки, stdin закрыт - тот же обход через `tsx`,
+  что у `db:generate`, Р4 E0-12C; `--config` 0.28.1
+  с `--out` не принимает, поэтому значения - константа `DRIZZLE_CONFIG`, юнит требует равенства
+  `drizzle.config.ts` целиком: ключ, добавленный в файл, а generate в копии не переданный, краснит юнит; `--out` drizzle-kit читает от рабочего каталога, поэтому копия названа
+  относительным путём от `packages/db`); разбор вывода построчно (`classifyGenerate`); сравнение
+  файлов копии до и после generate по пути и sha256 - любой добавленный, изменённый или удалённый
+  файл - дрейф; копия удаляется в `finally` при любом исходе; затем `drizzle-kit check` по самой
+  папке через `drizzle.config.ts` (`classifyCheck`). Исходы generate: `clean`, `wrote`,
+  `rename_question` (неоднозначное переименование: при закрытом stdin generate сдаётся на вопросе
+  «created or renamed», ничего не пишет и выходит с 0), `snapshot_collision` (две ветки добавили по
+  миграции: generate печатает `... which is a collision.` и выходит с 0), `unfinished` (нет
+  завершающей строки, сигнал, предел, ненулевой код без известного признака). Исходы check: `fine`
+  (код 0 и `Everything's fine`), `inconsistent` (код 1 и коллизия или `data is malformed`),
+  `unfinished` (всё прочее, в т.ч. модуль не загрузился). Коды: 0 - чисто; 1 - дрейф (generate
+  изменил копию или сказал, что пишет миграцию, вопрос о переименовании, коллизия, `check` нашёл
+  папку несогласованной), подсказка и изменённые файлы копии в stderr; 2 - проверка не состоялась
+  (сбой запуска, переполнение буфера, предел, нераспознанный вывод generate или check, копия не
+  сделана или лежит на другом диске, чем `packages/db`, другая версия drizzle-kit, исключение из
+  прогона - `runEntry` переводит его в 2 с текстом, а не в 1 необработанного броска). Дерево прогон
+  не трогает: верная незакоммиченная миграция копируется вместе с папкой и гейт не красит, а
+  повторный прогон после красного - снова красный (прошлый ничего в дереве не оставил).
+  С закрытым stdin generate на вопросе выходит сам за секунды, предел - страховка. Поведение
+  drizzle-kit 0.28.1 записано живьём 22.10.2026 (Windows) запуском `--import tsx` и совпадает,
+  кроме путей копии и случайного имени миграции, с записью через CLI tsx того же дня и с записанным
+  20.10.2026 на Windows и в Linux-контейнере `node:22` (E0-12I). Как перезаписать вывод на новой
+  версии drizzle-kit - докблок `test/schema-drift-fixture.ts` (в журнале `DECISIONS.md` Р3 E0-12S
+  фикстура названа прежним именем `test/schema-drift-output.ts`).
 - **`errorCode` (Р2 E0-12I):** чтение `code` у `unknown` - в `@sf/core`, свой модуль
   `packages/core/src/domain/error-code.ts` (экспорт через `index.ts`, тест
   `packages/core/test/error-code.test.ts`); `domain/errors.ts` - только `AppError` и наследники.
   Владелец - `@sf/core`: ядро без зависимостей видно всем пакетам, кроме `@sf/config`; копии
   в `@sf/runtime` и `@sf/db` сняты, копии в `@sf/config` остаются строкой долга (ребро
   `config -> core` закрыто S15/S16). Модуль `src/failures.ts` в `@sf/db` - `describeError` и
-  `throwFailures` - не импортирует `migrate.ts` (Р3 E0-12I): имена шагов и их тексты живут там.
+  `throwFailures` - не импортирует ни `migrate.ts`, ни `migration-lock.ts` (Р3 E0-12I): имена шагов лока
+  (`LockStatement`) и тексты шагов возврата живут в `migration-lock.ts`, шаг журнала `count_journal`
+  (`MigrateStatement` = `LockStatement | "count_journal"`) - в `migrate.ts`; оба называют шаги через
+  `stepNamer` и не знают имён друг друга.
 - Что проверяет: `packages/db/test/cli-run.test.ts` (тексты по шагу, итог до закрытия, текст
   сбоя закрытия по итогу прогона, коды выхода Р1, класс без стека, `runSetupCli`, точки входа),
   `packages/db/test/failures.test.ts` (`throwFailures`), `packages/db/test/cleanup.test.ts`
@@ -302,5 +337,10 @@ M already applied`; `app settings seeded`), отказ - одну строку �
   сбоев возврата и закрытия в `runMigrations`, лок на момент закрытия, `resetTestDatabase` без подсчёта
   журнала), помощники `heldAdvisoryLocks`/`waitForAdvisoryWaiter` - `packages/db/test-support/advisory-locks.ts`
   (фильтр по базе соединения), `test/ci-config.test.ts` («checks that the
-  migrations match the schema», «fails generate fast when it stopped at a question»). Решение -
-  `docs/TECH_DEBT.md § E0-12I`.
+  migrations match the schema»: один шаг `Schema drift`, старые три не вернулись, путь бинаря
+  drizzle-kit и загрузчик `--import` скрипта равны скриптам манифеста, предел шага выше двух прогонов
+  drizzle-kit и ниже `STALE_COPY_MS`), `test/check-schema-drift.test.ts` (исход на каждый случай на записанном выводе
+  drizzle-kit 0.28.1 `test/schema-drift-fixture.ts`, копия во временном каталоге, повторный прогон
+  после красного, `DRIZZLE_CONFIG` равен `drizzle.config.ts`, копия на другом диске, удаление
+  остатков старше `STALE_COPY_MS`, `runEntry`, число запусков = `DRIZZLE_KIT_RUNS`, проба `when` и `timeoutSec` гейта
+  `schema-drift` через `test/gate-choice.ts`), проба гейта в `.claude/hooks/harness-selftest.js`. Решение - `docs/TECH_DEBT.md § E0-12I`, § E0-12S.

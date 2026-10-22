@@ -6,24 +6,26 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-10-22. **Не �
 
 - **Прогресс:** `███████░░░░░░░░░░░░░░░░░░░░░░░` 36/153 задач, 35.4 / 169.4 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** ничего — возьмите задачу из «Следующие»
+- **В работе:** [E0-12S](TECH_DEBT.md#e0-12s-sfdb-раскол-migratets-на-migration-lockts-проверка-дрейфа-схемы-ci-в-scriptscheck-schema-driftmjs-с-юнитом-и-гейтом) @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом
 - **Заблокировано:** нет
 
 ## Сейчас в работе
 
-_Нет задач в работе._
+| Задача | Название | Оценка | Начата |
+|---|---|---|---|
+| [E0-12S](TECH_DEBT.md#e0-12s-sfdb-раскол-migratets-на-migration-lockts-проверка-дрейфа-схемы-ci-в-scriptscheck-schema-driftmjs-с-юнитом-и-гейтом) | @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом | 1 д | 2026-10-22 |
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
 | Задача | Название | Оценка | Эпик |
 |---|---|---|---|
-| [E0-12S](TECH_DEBT.md#e0-12s-sfdb-раскол-migratets-на-migration-lockts-проверка-дрейфа-схемы-ci-в-scriptscheck-schema-driftmjs-с-юнитом-и-гейтом) | @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом | 1 д | E0 |
 | [E0-12T](TECH_DEBT.md#e0-12t-harness-selftest-int-конфиги-через-vitestnode-и-testimportsts-полнота-дерева-пробы-снимок-игнорируемых-хвосты-р9-e0-12d) | harness-selftest: int-конфиги через vitest/node и test/imports.ts, полнота дерева пробы, снимок игнорируемых, хвосты Р9 E0-12D | 1 д | E0 |
 | [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s14-формы-s15s16-сверка-носителей-замок-zod) | rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S14, формы S15/S16, сверка носителей, замок zod | 1 д | E0 |
 | [E0-12W](TECH_DEBT.md#e0-12w-общий-test-support-приложений-sfruntimetest-support-dev-command-child-run-imports-int-хелперы-asserthashed-adr-0011) | Общий test-support приложений: @sf/runtime/test-support (dev-command, child-run, imports), int-хелперы, assertHashed, ADR-0011 | 1.5 д | E0 |
 | [E0-12X](TECH_DEBT.md#e0-12x-трекер-и-ссылки-на-долг-optset-якорь-render---check-zod-tasksjson-filelinerefs-форма-ссылок-на-techdebt) | Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT | 1 д | E0 |
+| [E0-12Y](TECH_DEBT.md#e0-12y-appsapi-sfconfig-разрез-request-log-маршруты-отказов-в-одном-месте-requestid-сокетного-отказа-clientwentaway-под-замком-auth-без-броска-на-порядок-регистрации-loadenv-без-копии-processenv) | apps/api, @sf/config: разрез request-log, маршруты отказов в одном месте, requestId сокетного отказа, clientWentAway под замком, auth без броска на порядок регистрации, loadEnv без копии process.env | 1 д | E0 |
 
-Взять в работу: `node scripts/tasks.mjs start E0-12S`
+Взять в работу: `node scripts/tasks.mjs start E0-12T`
 
 ## Прогресс по эпикам
 
@@ -87,7 +89,7 @@ _Нет задач в работе._
 | ✅ | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | ✅E0-13 ✅E0-12D | 2026-10-22 | 2026-10-22 |
 | ✅ | [E0-12Q](TECH_DEBT.md#e0-12q-sfruntime-api-worker-форма-модулей-после-e0-12b---стадия-redis-в-redis-stagets-единая-форма-опций-redis-фабрик-стадия-db-воркера-через-stageof-один-источник-состояния-queue-stats-однопроходный-обход-cause) | @sf/runtime, api, worker: форма модулей после E0-12B - стадия Redis в redis-stage.ts, единая форма опций Redis-фабрик, стадия db воркера через stageOf, один источник состояния queue-stats, однопроходный обход cause | 0.5 д | ✅E0-13 ✅E0-12B ✅E0-12E | 2026-10-22 | 2026-10-22 |
 | ✅ | [E0-12R](TECH_DEBT.md#e0-12r-sfruntime-worker-вердикт-и-закрытие-фабрики-queue-redact-глубже-уровня-smoke-cli-и-ctrlc-через-остановку-пакета) | @sf/runtime, worker: вердикт и закрытие фабрики Queue, redact глубже уровня, smoke CLI и Ctrl+C через остановку пакета | 1 д | ✅E0-13 ✅E0-12B ✅E0-12G ✅E0-12Q | 2026-10-22 | 2026-10-22 |
-| ⬜ | [E0-12S](TECH_DEBT.md#e0-12s-sfdb-раскол-migratets-на-migration-lockts-проверка-дрейфа-схемы-ci-в-scriptscheck-schema-driftmjs-с-юнитом-и-гейтом) | @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом | 1 д | ✅E0-12I |  |  |
+| 🔄 | [E0-12S](TECH_DEBT.md#e0-12s-sfdb-раскол-migratets-на-migration-lockts-проверка-дрейфа-схемы-ci-в-scriptscheck-schema-driftmjs-с-юнитом-и-гейтом) | @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом | 1 д | ✅E0-12I | 2026-10-22 |  |
 | ⬜ | [E0-12T](TECH_DEBT.md#e0-12t-harness-selftest-int-конфиги-через-vitestnode-и-testimportsts-полнота-дерева-пробы-снимок-игнорируемых-хвосты-р9-e0-12d) | harness-selftest: int-конфиги через vitest/node и test/imports.ts, полнота дерева пробы, снимок игнорируемых, хвосты Р9 E0-12D | 1 д | ✅E0-13 ✅E0-12L |  |  |
 | ⬜ | [E0-12U](TECH_DEBT.md#e0-12u-harness-selftest-пробы-гейтов-в-selftest-gatesjs-разрез-раздела-гейтов) | harness-selftest: пробы гейтов в selftest-gates.js, разрез раздела гейтов | 0.5 д | ✅E0-13 ⬜E0-12T |  |  |
 | ⬜ | [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s14-формы-s15s16-сверка-носителей-замок-zod) | rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S14, формы S15/S16, сверка носителей, замок zod | 1 д | ✅E0-13 ✅E0-12D |  |  |

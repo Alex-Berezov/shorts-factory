@@ -8,8 +8,10 @@ import {
   isGone,
   isNoListedFile,
   isNotFile,
+  messageOf,
   readIfFile,
   readTrackedFiles,
+  timedOut,
   trackedFiles,
 } from "../scripts/lib/files.mjs";
 import { repoRoot } from "../scripts/lib/paths.mjs";
@@ -49,6 +51,35 @@ describe("isGone", () => {
     ["a value that is not an error", false, { code: "ENOENT" }],
   ] as const)("takes %s for gone: %s", (_what, gone, error) => {
     expect(isGone(error)).toBe(gone);
+  });
+});
+
+describe("messageOf", () => {
+  it("takes the message of an error and the text of anything else", () => {
+    expect(messageOf(failed("EPERM"))).toBe("EPERM: injected");
+    expect(messageOf("a string thrown")).toBe("a string thrown");
+    expect(messageOf(42)).toBe("42");
+  });
+});
+
+describe("timedOut", () => {
+  it.each([
+    ["stopped at its limit (ETIMEDOUT)", true, { error: failed("ETIMEDOUT") }],
+    ["that failed to start", false, { error: failed("ENOENT") }],
+    ["that overflowed its buffer", false, { error: failed("ENOBUFS") }],
+    ["that ended by itself", false, {}],
+    [
+      "stopped at its limit, the code on a value that is not an Error",
+      true,
+      { error: { code: "ETIMEDOUT" } },
+    ],
+    [
+      "with another code on a value that is not an Error",
+      false,
+      { error: { code: "ENOENT" } },
+    ],
+  ] as const)("reads a run %s: %s", (_what, stopped, run) => {
+    expect(timedOut(run)).toBe(stopped);
   });
 });
 
@@ -507,6 +538,11 @@ const SCRIPT_DISK_READS: Record<string, { problem: string; reason: string }> = {
     problem: ": imports readdirSync",
     reason:
       "compares the case of each name of a path under docs/ with the one the disk has - git lists the case of its index, and a disk that ignores case finds either",
+  },
+  "scripts/check-schema-drift.mjs": {
+    problem: ": imports readdirSync",
+    reason:
+      "lists the temporary copy of packages/db/migrations before and after drizzle-kit generate writes into it, and the copies left behind next to it - packages/db/node_modules/.cache, which git does not see, and what generate wrote is what the disk holds",
   },
 };
 
