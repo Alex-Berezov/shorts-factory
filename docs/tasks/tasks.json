@@ -1971,9 +1971,11 @@
       "E0-12I"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-20",
-    "started_at": "2026-10-22"
+    "started_at": "2026-10-22",
+    "done_at": "2026-10-22",
+    "note": "migration lock moved to migration-lock.ts; schema drift check is scripts/check-schema-drift.mjs on a copy of migrations with unit, one CI step and schema-drift gate"
   },
   {
     "id": "E0-12T",
