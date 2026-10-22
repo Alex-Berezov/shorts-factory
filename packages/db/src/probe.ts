@@ -116,6 +116,15 @@ export interface ProbeDbOptions {
    * about the destruction or the refusals.
    */
   onLimit?: (event: { limitMs: number }) => void;
+  /**
+   * Keeps the one connection for the life of the handle: postgres-js replaces
+   * a connection after 30 to 60 minutes by default, and a session-level state
+   * of it - an advisory lock a caller holds - would go with it, without a
+   * word to the holder. Off by default: a long-lived probe wants the
+   * rotation, after a node moved behind the address or a NAT dropped the
+   * socket.
+   */
+  keepConnection?: boolean;
 }
 
 /** A call of `run` that has not settled yet. */
@@ -172,7 +181,7 @@ function withoutStatementTimeout(url: string): string {
  * and every honest slow answer would cost a reconnect.
  */
 export function createProbeDb(url: string, opts: ProbeDbOptions): ProbeDb {
-  const { limitMs, statementTimeoutMs, onLimit } = opts;
+  const { limitMs, statementTimeoutMs, onLimit, keepConnection } = opts;
   assertBound("limitMs", limitMs);
   assertBound("statementTimeoutMs", statementTimeoutMs);
   if (!(statementTimeoutMs < limitMs)) {
@@ -197,6 +206,7 @@ export function createProbeDb(url: string, opts: ProbeDbOptions): ProbeDb {
         connectTimeoutSec: statementTimeoutMs / 1000,
       }),
       fetch_types: false,
+      ...(keepConnection ? { max_lifetime: null } : {}),
       connection: { statement_timeout: statementTimeoutMs },
     });
 

@@ -1,29 +1,31 @@
 # Статус проекта — где мы сейчас
 
-_Сгенерировано `node scripts/tasks.mjs render` 2026-10-21. **Не редактировать руками** — источник: `docs/tasks/tasks.json`. Спецификация задач — в документах `docs/3x_Ex_TASKS.md`; журнал — `docs/90_WORKLOG.md`._
+_Сгенерировано `node scripts/tasks.mjs render` 2026-10-22. **Не редактировать руками** — источник: `docs/tasks/tasks.json`. Спецификация задач — в документах `docs/3x_Ex_TASKS.md`; журнал — `docs/90_WORKLOG.md`._
 
 ## Сводка
 
 - **Прогресс:** `██████░░░░░░░░░░░░░░░░░░░░░░░░` 32/151 задач, 32.4 / 167.9 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** ничего — возьмите задачу из «Следующие»
+- **В работе:** [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта
 - **Заблокировано:** нет
 
 ## Сейчас в работе
 
-_Нет задач в работе._
+| Задача | Название | Оценка | Начата |
+|---|---|---|---|
+| [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) | CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта | 0.5 д | 2026-10-21 |
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
 | Задача | Название | Оценка | Эпик |
 |---|---|---|---|
-| [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) | CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта | 0.5 д | E0 |
 | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | E0 |
 | [E0-12Q](TECH_DEBT.md#e0-12q-sfruntime-api-worker-форма-модулей-после-e0-12b---стадия-redis-в-shutdownts-единая-форма-опций-redis-фабрик-стадия-db-воркера-через-stageof-один-источник-состояния-queue-stats-однопроходный-обход-cause) | @sf/runtime, api, worker: форма модулей после E0-12B - стадия Redis в shutdown.ts, единая форма опций Redis-фабрик, стадия db воркера через stageOf, один источник состояния queue-stats, однопроходный обход cause | 0.5 д | E0 |
 | [E0-12S](TECH_DEBT.md#e0-12s-sfdb-раскол-migratets-на-migration-lockts-проверка-дрейфа-схемы-ci-в-scriptscheck-schema-driftmjs-с-юнитом-и-гейтом) | @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом | 1 д | E0 |
 | [E0-12T](TECH_DEBT.md#e0-12t-harness-selftest-int-конфиги-через-vitestnode-и-testimportsts-полнота-дерева-пробы-снимок-игнорируемых-хвосты-р9-e0-12d) | harness-selftest: int-конфиги через vitest/node и test/imports.ts, полнота дерева пробы, снимок игнорируемых, хвосты Р9 E0-12D | 1 д | E0 |
+| [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s13s14-формы-s15s16-сверка-носителей-замок-zod) | rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S13/S14, формы S15/S16, сверка носителей, замок zod | 1 д | E0 |
 
-Взять в работу: `node scripts/tasks.mjs start E0-12O`
+Взять в работу: `node scripts/tasks.mjs start E0-12P`
 
 ## Прогресс по эпикам
 
@@ -83,7 +85,7 @@ _Нет задач в работе._
 | ✅ | [E0-12L](TECH_DEBT.md#e0-12l-harness-selftest-граф-turbopnpm-вместо-ручного-разбора-разрез-раздела-гейтов) | harness-selftest: граф turbo/pnpm вместо ручного разбора, разрез раздела гейтов | 1.5 д | ✅E0-13 ✅E0-12D | 2026-10-21 | 2026-10-21 |
 | ✅ | [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-when-гейтов-timeoutsec---only-с-glob-when-testintcomposetracker) | gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker | 1 д | ✅E0-13 ✅E0-12D | 2026-10-21 | 2026-10-21 |
 | ✅ | [E0-12N](TECH_DEBT.md#e0-12n-корневые-тесты-и-скрипты-repo-files-turbo-inputs-ci-config-dockerfile-probe-image-no-search-list-общий-test-support-приложений) | Корневые тесты и скрипты: repo-files, turbo-inputs, ci-config, dockerfile, probe-image, no-search-list, общий test-support приложений | 1 д | ✅E0-13 ✅E0-12F | 2026-10-21 | 2026-10-21 |
-| ⬜ | [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) | CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта | 0.5 д | ✅E0-13 ✅E0-12F |  |  |
+| 🔄 | [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) | CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта | 0.5 д | ✅E0-13 ✅E0-12F | 2026-10-21 |  |
 | ⬜ | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | ✅E0-13 ✅E0-12D |  |  |
 | ⬜ | [E0-12Q](TECH_DEBT.md#e0-12q-sfruntime-api-worker-форма-модулей-после-e0-12b---стадия-redis-в-shutdownts-единая-форма-опций-redis-фабрик-стадия-db-воркера-через-stageof-один-источник-состояния-queue-stats-однопроходный-обход-cause) | @sf/runtime, api, worker: форма модулей после E0-12B - стадия Redis в shutdown.ts, единая форма опций Redis-фабрик, стадия db воркера через stageOf, один источник состояния queue-stats, однопроходный обход cause | 0.5 д | ✅E0-13 ✅E0-12B ✅E0-12E |  |  |
 | ⬜ | [E0-12R](TECH_DEBT.md#e0-12r-sfruntime-worker-вердикт-и-закрытие-фабрики-queue-redact-глубже-уровня-smoke-cli-и-ctrlc-через-остановку-пакета) | @sf/runtime, worker: вердикт и закрытие фабрики Queue, redact глубже уровня, smoke CLI и Ctrl+C через остановку пакета | 1 д | ✅E0-13 ✅E0-12B ✅E0-12G ⬜E0-12Q |  |  |

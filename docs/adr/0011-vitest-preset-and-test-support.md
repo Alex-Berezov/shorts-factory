@@ -117,7 +117,30 @@
     `.../entry-check/migrated-stack`, `globalSetup` vitest, который `intTestConfig` ставит
     безусловно (`entryCheck: "postgres"` у `@sf/db`, `"migrated-stack"` у api и worker): один
     раз на прогон пакета, до первого файла, сначала грузит `@sf/config/vitest/setup` (то же
-    окружение, что увидят файлы), затем `assertLocalTestPostgres` или `assertMigrated()`.
+    окружение, что увидят файлы), затем страж URL (`assertLocalTestPostgres`, у `migrated-stack` - и
+    `assertLocalTestRedis`), затем два рубежа против второго прогона на той же базе (E0-12O, решение
+    техлида 22.10.2026, Р3 B). **Замок прогона** (`test-support/run-lock.ts`, `lockRun`): сессионный
+    `pg_try_advisory_lock(RUN_LOCK_KEY)` - свой ключ test-support, не `MIGRATION_LOCK_KEY` (прогон мигрирует под ним
+    и ждал бы сам себя), - держится от `setup` до `teardown` `globalSetup` пакета (`pg_advisory_unlock`, затем
+    закрытие клиента); занятый замок - отказ «another integration run holds the run lock …» с `pid`,
+    `application_name`, `backend_start` держателя (`pg_locks` ⋈ `pg_stat_activity`) и командой `pg_terminate_backend`;
+    проверка под замком, упавшая в `setup`, отпускает его сама (vitest не зовёт `teardown` после упавшего `setup`).
+    `heldAdvisoryLocks` (`test-support/advisory-locks.ts`) не считает только этот ключ: замок держит сессия
+    `globalSetup` весь прогон. Окно смены пакета одного `turbo run test:int` замок не закрывает (принято,
+    `docs/TECH_DEBT.md`, строка гейта `test:int` E0-12B). **Замеры сессий** под замком - `assertNoOtherTestSessions`
+    (`test-support/other-sessions.ts`), для клиентов без замка (psql/IDE, процесс упавшего прогона): чужая клиентская
+    сессия тестовой базы, видная в двух замерах `pg_stat_activity`, - отказ с `pid`, `application_name`,
+    `client_addr`, `state`, `backend_start` и командой `pg_terminate_backend`. Клиент обоих - `createProbeDb` из
+    `src/probe.ts` (`limitMs` 10 с, `statement_timeout` 5 с, `connect_timeout` - из его `clientOptions`, `keepConnection: true` -
+    `max_lifetime: null`, чтобы соединение с замком не ротировалось посреди прогона; пробы api эту опцию не передают) с
+    `application_name=sf-session-check` в URL: это имя, как и `pg_isready` healthcheck CI, замеры не считают -
+    замок своего прогона и проверка второго не краснят пакет первого (защита от своих проверок, не от подделки
+    имени). Отказов чтения три, у замка и у замеров одни: база недоступна - тот же отказ, что у `assertMigrated`
+    (`unreachableTestDatabase`, «cannot read the run lock / the sessions», подсказка про Compose); база молчит
+    (`ProbeLimitError` или `57014`) - «did not answer within N ms» с подсказкой про Compose
+    (`silentTestDatabase`); строка иной формы - отказ разбора как есть, без обёртки «cannot read»; у
+    `migrated-stack` замок и замеры идут до `assertMigrated()` - иначе сброс чужого прогона читался бы как «not
+    migrated» с советом прогнать `@sf/db`.
     Отказ останавливает прогон до того, как любой файл откроет соединение, - каким бы хелпером
     он ни пользовался или ни одним (живая проба 17.10.2026: «no tests» и одна строка отказа).
     Хелперы `openTestDb`/`openTestSql`/`openTestRedis` проверяют свой URL ещё раз, int-файлы api

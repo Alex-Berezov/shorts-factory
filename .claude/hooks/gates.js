@@ -163,44 +163,110 @@ function secs(ms) {
   return (s < 10 ? s.toFixed(1) : String(Math.round(s))) + 'с';
 }
 
-/**
- * Длинный вывод режем посередине, а весь собранный текст кладём в файл и говорим куда. Собранный
- * текст - не обязательно полный вывод: болтливому гейту outputBuffer срезает середину (cutBytes),
- * и подпись файла говорит об этом прямо.
- */
-function printOutput(text, logPath, cutBytes) {
+/** Строки вывода гейта без хвостовых пробелов; пустой вывод - ни одной строки. Режется один раз. */
+function outputLines(text) {
   const raw = String(text == null ? '' : text).replace(/\s+$/, '');
-  if (!raw) {
+  return raw ? raw.split(/\r?\n/) : [];
+}
+
+/**
+ * Длинный вывод режем посередине; путь файла вывода (log.path, needsLog) печатается под ним, а
+ * сбой записи файла (log.error) назван прямо - без пути, которого нет, и с тем, что без файла
+ * потеряно (срезанные на экране строки, срез памяти). Собранный текст - не
+ * обязательно полный вывод: болтливому гейту outputBuffer срезает середину (cutBytes), и
+ * подпись файла говорит об этом прямо.
+ */
+function printOutput(lines, log, cutBytes) {
+  if (!lines.length) {
     console.log('  (команда ничего не вывела)');
-    return;
+  } else if (lines.length <= FULL_LIMIT) {
+    console.log(lines.join('\n'));
+  } else {
+    const cut = lines.length - HEAD_LINES - TAIL_LINES;
+    console.log(lines.slice(0, HEAD_LINES).join('\n'));
+    console.log('... срезано ' + cut + ' строк ...');
+    console.log(lines.slice(lines.length - TAIL_LINES).join('\n'));
   }
-  const lines = raw.split(/\r?\n/);
-  if (lines.length <= FULL_LIMIT) {
-    console.log(raw);
-    return;
-  }
-  const cut = lines.length - HEAD_LINES - TAIL_LINES;
-  console.log(lines.slice(0, HEAD_LINES).join('\n'));
-  console.log('... срезано ' + cut + ' строк ...');
-  console.log(lines.slice(lines.length - TAIL_LINES).join('\n'));
-  if (!logPath) return;
-  if (cutBytes) {
+  if (!log) return;
+  if (log.error) {
+    // без файла срезанное не вернуть: экранный срез строк и срез памяти называем прямо
+    const lost = [];
+    if (lines.length > FULL_LIMIT) lost.push('срезанные на экране ' + (lines.length - HEAD_LINES - TAIL_LINES) + ' строк середины');
+    if (cutBytes) lost.push('середина (' + cutBytes + ' байт), срезанная пределом памяти gates.js');
     console.log(
-      'Вывод в файле - первые и последние байты, середина (' + cutBytes + ' байт) срезана пределом памяти gates.js: ' + logPath,
+      'Файл вывода не записан (' + log.error + '): ' +
+        (lost.length ? 'вывод выше неполон, потеряны ' + lost.join(' и ') + '.' : 'выше - весь вывод этого гейта.'),
+    );
+  } else if (cutBytes) {
+    console.log(
+      'Вывод в файле - первые и последние байты, середина (' + cutBytes + ' байт) срезана пределом памяти gates.js: ' + log.path,
     );
   } else {
-    console.log('Полный вывод: ' + logPath);
+    console.log('Полный вывод: ' + log.path);
   }
 }
 
-function saveLog(id, text) {
+/**
+ * Кому нужен файл вывода (решение техлида Р2 E0-12O от 22.10.2026, вариант A): красному гейту с
+ * выводом - всегда, каким бы коротким ни был вывод: причину прошлого красного ищут по файлу, а не по
+ * note гейта (docs/TECH_DEBT.md § E0-12O); любому гейту с выводом длиннее FULL_LIMIT - тоже: его
+ * экранный вывод срезан посередине, и без файла середина терялась бы (60_HARNESS, «Гейты»).
+ * Короткий зелёный и гейт без вывода файла не оставляют - пустой файл ничего не объясняет.
+ */
+function needsLog(code, lines) {
+  return lines.length > 0 && (code !== 0 || lines.length > FULL_LIMIT);
+}
+
+// сколько живёт файл вывода гейта: старше - удаляется при первой записи следующего прогона
+const LOG_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+// свой каталог файлов вывода в os.tmpdir(): чистка смотрит только сюда, чужих файлов TEMP не видит
+const LOG_DIR_NAME = 'sf-gates';
+// имя файла вывода, который пишет saveLog: gates-<repo>-<гейт>-<pid>.log; прочие файлы каталога не трогаем
+const LOG_NAME = /^gates-[a-zA-Z0-9._-]+-\d+\.log$/;
+// чистка - одна на прогон gates.js, при первой записи файла вывода, а не на каждый красный гейт
+let logsPruned = false;
+
+/** Удаляет файлы вывода gates.js в dir старше LOG_KEEP_MS; сбой чтения каталога или одного файла - мимо, гейт не роняет. */
+function pruneLogs(dir, now) {
+  let names = [];
   try {
-    const safe = String(id).replace(/[^a-zA-Z0-9._-]/g, '_');
-    const p = path.join(os.tmpdir(), 'gates-' + safe + '-' + process.pid + '.log');
-    fs.writeFileSync(p, text);
-    return p;
+    names = fs.readdirSync(dir);
   } catch (_) {
-    return '';
+    return;
+  }
+  for (const name of names) {
+    if (!LOG_NAME.test(name)) continue;
+    const p = path.join(dir, name);
+    try {
+      if (now - fs.statSync(p).mtimeMs > LOG_KEEP_MS) fs.unlinkSync(p);
+    } catch (_) {
+      // занят или уже удалён другим прогоном - следующий прогон попробует снова
+    }
+  }
+}
+
+/**
+ * Файл вывода гейта в своём каталоге os.tmpdir()/sf-gates (0o700), pid прогона в имени, доступ
+ * только владельцу (0o600: вывод гейта может нести пути и тексты окружения, а TEMP на Linux бывает
+ * общим). Файл с тем же именем (pid прошлого прогона достался этому) удаляется, и новый создаётся
+ * заново (flag 'wx') - иначе запись унаследовала бы права старого. Старые файлы вывода удаляются
+ * при первой записи прогона (pruneLogs). Сбой записи гейт не роняет: { error } вместо { path }.
+ */
+function saveLog(id, text) {
+  const dir = path.join(os.tmpdir(), LOG_DIR_NAME);
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (!logsPruned) {
+      logsPruned = true;
+      pruneLogs(dir, Date.now());
+    }
+    const safe = String(id).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const p = path.join(dir, 'gates-' + safe + '-' + process.pid + '.log');
+    fs.rmSync(p, { force: true });
+    fs.writeFileSync(p, text, { mode: 0o600, flag: 'wx' });
+    return { path: p };
+  } catch (e) {
+    return { error: (e && e.code) || String((e && e.message) || e) };
   }
 }
 
@@ -683,9 +749,9 @@ async function main() {
     console.log('');
     console.log('=== ' + name + ' / ' + item.gate.id + ': ' + item.gate.cmd + ' ===');
     const r = await runGate(item.gate, item.group.repo.path);
-    const logPath =
-      r.text.split(/\r?\n/).length > FULL_LIMIT ? saveLog(name + '-' + item.gate.id, r.text) : '';
-    printOutput(r.text, logPath, r.cutBytes);
+    const lines = outputLines(r.text);
+    const log = needsLog(r.code, lines) ? saveLog(name + '-' + item.gate.id, r.text) : null;
+    printOutput(lines, log, r.cutBytes);
     console.log('--- ' + name + ' / ' + item.gate.id + ': ' + verdict(r) + ', ' + secs(r.ms) + ' ---');
     results.push({ repo: name, gate: item.gate, run: r });
     if (r.code !== 0 && args.bail) stopped = true;

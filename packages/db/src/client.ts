@@ -47,6 +47,8 @@ export type OpenDbOptions = ReturnType<typeof clientOptions> & {
   connection?: { statement_timeout: number };
   /** `false` skips the `pg_type` query postgres-js sends on every connect. */
   fetch_types?: boolean;
+  /** Seconds a connection lives before the driver replaces it; `null` - never. */
+  max_lifetime?: number | null;
 };
 
 /**

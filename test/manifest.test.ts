@@ -5,6 +5,11 @@ import {
   workspaceGlobs,
 } from "../scripts/lib/manifest.mjs";
 import { gitScratch } from "./git-fixture.js";
+import {
+  parseRepoYaml,
+  readRepoYaml,
+  repoWorkspaceDirs,
+} from "./repo-files.js";
 
 /**
  * The one reading of package manifests and of the workspace for the root
@@ -195,5 +200,105 @@ describe("workspaceDirs", () => {
     // (`test/git-fixture.ts`): it refuses to list the tree.
     const root = scratch.files("no-repo", WORKSPACE);
     expect(() => workspaceDirs(root)).toThrow(/git ls-files in .* failed/);
+  });
+});
+
+/**
+ * The package directories of a lockfile: the keys of its `importers`, read
+ * from the value of `pnpm-lock.yaml` (`parseRepoYaml`, the fail-closed
+ * `readYaml`), with `.` left out - the root project is an importer of every
+ * lockfile, but no glob of `pnpm-workspace.yaml` names it and `workspaceDirs`
+ * never lists it. A lockfile with no `importers`, or one that is not a table,
+ * is refused rather than taken for an empty workspace.
+ */
+function importerDirs(lock: unknown): string[] {
+  const importers =
+    typeof lock === "object" && lock !== null
+      ? Reflect.get(lock, "importers")
+      : undefined;
+  if (
+    typeof importers !== "object" ||
+    importers === null ||
+    Array.isArray(importers)
+  ) {
+    throw new Error("pnpm-lock.yaml: importers is missing or not a table");
+  }
+  return Object.keys(importers)
+    .filter((dir) => dir !== ".")
+    .sort();
+}
+
+/**
+ * Where the package directories of the workspace (`workspaceDirs`) and the
+ * importers of the lockfile part, each by name: a package pnpm installs that
+ * the listing misses drops out of the lock of directions and of probe-image
+ * silently, and a directory the listing takes for a package that pnpm does
+ * not know has no install behind it.
+ */
+function importerGap(
+  dirs: readonly string[],
+  importers: readonly string[],
+): string[] {
+  return [
+    ...dirs
+      .filter((dir) => !importers.includes(dir))
+      .map(
+        (dir) =>
+          `${dir}: a package of the workspace, not an importer of pnpm-lock.yaml`,
+      ),
+    ...importers
+      .filter((dir) => !dirs.includes(dir))
+      .map(
+        (dir) =>
+          `${dir}: an importer of pnpm-lock.yaml, not a package of the workspace`,
+      ),
+  ];
+}
+
+describe("workspaceDirs against the importers of pnpm-lock.yaml", () => {
+  const lock = (): unknown => readRepoYaml("pnpm-lock.yaml");
+
+  it("lists exactly the importers of the lockfile, the root left out", () => {
+    const dirs = repoWorkspaceDirs();
+
+    expect(dirs.length).toBeGreaterThan(0);
+    expect(importerGap(dirs, importerDirs(lock()))).toEqual([]);
+  });
+
+  it("names a directory the listing has and the lockfile does not", () => {
+    const importers = importerDirs(lock());
+
+    expect(
+      importerGap([...repoWorkspaceDirs(), "packages/ghost"], importers),
+    ).toEqual([
+      "packages/ghost: a package of the workspace, not an importer of pnpm-lock.yaml",
+    ]);
+  });
+
+  it("names an importer the listing misses", () => {
+    const dirs = repoWorkspaceDirs();
+    const [dropped, ...kept] = dirs;
+    if (dropped === undefined) throw new Error("no package of the workspace");
+
+    expect(importerGap(kept, importerDirs(lock()))).toEqual([
+      `${dropped}: an importer of pnpm-lock.yaml, not a package of the workspace`,
+    ]);
+  });
+
+  it.each<[string, unknown]>([
+    ["no importers", { lockfileVersion: "9.0" }],
+    ["importers that are a list", { importers: ["apps/api"] }],
+    ["importers that are text", { importers: "apps/api" }],
+    ["a lockfile that is not a table", "lockfileVersion: 9.0"],
+  ])("refuses a lockfile with %s", (_what, broken) => {
+    expect(() => importerDirs(broken)).toThrow(
+      "pnpm-lock.yaml: importers is missing or not a table",
+    );
+  });
+
+  it("refuses a lockfile it cannot read cleanly, through readYaml", () => {
+    expect(() =>
+      parseRepoYaml("importers:\n  .: {}\nimporters: {}\n", "pnpm-lock.yaml"),
+    ).toThrow("pnpm-lock.yaml is not read cleanly");
   });
 });

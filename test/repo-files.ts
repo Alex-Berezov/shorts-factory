@@ -95,6 +95,7 @@ const TurboTaskSchema = z.object({
   outputs: z.array(z.string()).optional(),
   env: z.array(z.string()).optional(),
   passThroughEnv: z.array(z.string()).optional(),
+  cache: z.boolean().optional(),
 });
 
 /**

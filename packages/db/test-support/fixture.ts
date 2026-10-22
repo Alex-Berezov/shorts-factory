@@ -174,16 +174,7 @@ export async function assertMigrated(): Promise<void> {
   try {
     applied = await readAppliedMigrations(db);
   } catch (error) {
-    // The guard has passed: the address is local and holds no password.
-    const where = new URL(env.DATABASE_URL).host;
-    const reason = reasonOf(error);
-    const hint = STACK_DOWN.has(reason)
-      ? " - is the local Compose stack up (`docker compose -f infra/docker-compose.yml up -d`) and .env.test pointing at it?"
-      : "";
-    throw new Error(
-      `cannot read the migrations of the test database on ${where} (${reason})${hint}`,
-      { cause: error },
-    );
+    throw unreachableTestDatabase("the migrations", error);
   } finally {
     await closeDb(db);
   }
@@ -193,6 +184,47 @@ export async function assertMigrated(): Promise<void> {
       `the test database is not migrated to packages/db/migrations (missing: ${listOf(gap.missing)}; not in the folder: ${listOf(gap.unknown)}; edited after it was applied: ${listOf(gap.changed)}; applied more than once: ${listOf(gap.duplicated)}) - run \`pnpm db:migrate\` against .env.test or \`pnpm --filter @sf/db test:int\` first`,
     );
   }
+}
+
+/** What an entry check says about a stack that may not be up. */
+const COMPOSE_HINT =
+  "is the local Compose stack up (`docker compose -f infra/docker-compose.yml up -d`) and .env.test pointing at it?";
+
+/**
+ * The refusal of an entry check that could not read `what` of the test
+ * database: its address - the guard has passed, so it is local and holds no
+ * password - and the code of the driver; for a connection that never reached
+ * a server (`STACK_DOWN`), Compose and `.env.test` too, not a bare
+ * `ECONNREFUSED`. Both reads of an entry check end here: the migrations
+ * (`assertMigrated`) and the sessions (`assertNoOtherTestSessions`).
+ */
+export function unreachableTestDatabase(what: string, error: unknown): Error {
+  const where = new URL(env.DATABASE_URL).host;
+  const reason = reasonOf(error);
+  const hint = STACK_DOWN.has(reason) ? ` - ${COMPOSE_HINT}` : "";
+  return new Error(
+    `cannot read ${what} of the test database on ${where} (${reason})${hint}`,
+    { cause: error },
+  );
+}
+
+/**
+ * The refusal of an entry check whose read of `what` got no answer within
+ * `limitMs`: a server that took the connection and then went silent - a
+ * paused container, a half-open socket - or one too slow to be worked on.
+ * Named as a silence, with the code of the driver (`PROBE_LIMIT`, `57014`)
+ * and Compose to look at, not as an unreachable database.
+ */
+export function silentTestDatabase(
+  what: string,
+  limitMs: number,
+  error: unknown,
+): Error {
+  const where = new URL(env.DATABASE_URL).host;
+  return new Error(
+    `the test database on ${where} did not answer within ${limitMs} ms reading ${what} (${reasonOf(error)}) - ${COMPOSE_HINT} Is its container running, not paused (\`docker compose -f infra/docker-compose.yml ps\`)?`,
+    { cause: error },
+  );
 }
 
 async function readAppliedMigrations(db: Db): Promise<Migration[]> {

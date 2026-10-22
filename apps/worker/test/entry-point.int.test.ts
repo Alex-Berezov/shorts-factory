@@ -272,13 +272,14 @@ describe("worker entry point under a signal", () => {
 
   it("fails at once, with the reason, when the worker dies on its way up", async () => {
     // A config the worker refuses at import: the child exits with 1 before
-    // it can say it started.
-    const startedAt = Date.now();
+    // it can say it started. Monotonic: a step of the wall clock is no time
+    // the start took.
+    const startedAt = performance.now();
 
     await expect(
       runUnderSignal({ env: { ...process.env, LOG_LEVEL: "loud" } }),
     ).rejects.toThrow(/exited before it started \(code 1, .*LOG_LEVEL/s);
-    expect(Date.now() - startedAt).toBeLessThan(START_DEADLINE_MS / 2);
+    expect(performance.now() - startedAt).toBeLessThan(START_DEADLINE_MS / 2);
   });
 
   it("is started by `pnpm dev` exactly the way this test starts it", () => {

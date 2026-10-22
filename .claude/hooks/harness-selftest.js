@@ -643,6 +643,16 @@ function buildGateRunCases() {
     const orphan = put('bin/orphan.js', [spawnGc(", detached: process.platform === 'win32'"), 'c.unref();', exitOnGc(0)].join('\n'));
     const orphanAway = put('bin/orphan-away.js', [spawnGc(', detached: true'), 'c.unref();', exitOnGc(3)].join('\n'));
     const pass = put('bin/pass.js', "console.log('ok');\n");
+    // короткий красный: одна строка и код 3 - файл вывода пишется и ему (needsLog), не только длинному
+    const failShort = put('bin/fail-short.js', "console.log('short-red-line');\nprocess.exit(3);\n");
+    // красный без вывода: файла нет - пустой ничего не объясняет; длинный зелёный (больше
+    // FULL_LIMIT строк, меньше предела памяти) - файл есть: его середина на экране срезана
+    const failSilent = put('bin/fail-silent.js', 'process.exit(3);\n');
+    const longGreen = put('bin/long-green.js', "for (let i = 0; i < 260; i++) console.log('long-green-line-' + i);\n");
+    // граница FULL_LIMIT (200): ровно 200 строк - целиком на экране и без файла, 201 - срез и файл
+    const linesGreen = (n) => put('bin/green-' + n + '.js', 'for (let i = 0; i < ' + n + "; i++) console.log('edge-line-' + i);\n");
+    const green200 = linesGreen(200);
+    const green201 = linesGreen(201);
     // читает stdin до конца и выходит 0: без stdin (ignore) конец ввода приходит сразу, с открытым
     // пайпом gates.js (inherit) или своим пайпом (pipe) - никогда, гейт висел бы до предела
     const stdinRead = put('bin/stdin-read.js', "process.stdin.resume();\nprocess.stdin.on('end', () => { console.log('stdin-end'); process.exit(0); });\n");
@@ -699,6 +709,11 @@ function buildGateRunCases() {
         { id: 'p-noop', cmd: cmd(gc, watch.noop.pid, watch.noop.hb), when: 'never', timeoutSec: 1 },
         { id: 'p-stdin', cmd: cmd(stdinRead), when: 'never', timeoutSec: 3 },
         { id: 'p-both', cmd: cmd(pass), when: 'never', timeoutSec: 30 },
+        { id: 'p-fail-short', cmd: cmd(failShort), when: 'never', timeoutSec: 30 },
+        { id: 'p-fail-silent', cmd: cmd(failSilent), when: 'never', timeoutSec: 30 },
+        { id: 'p-long-green', cmd: cmd(longGreen), when: 'never', timeoutSec: 30 },
+        { id: 'p-green-200', cmd: cmd(green200), when: 'never', timeoutSec: 30 },
+        { id: 'p-green-201', cmd: cmd(green201), when: 'never', timeoutSec: 30 },
       ].concat(PROBE_SIGNALS.map(([s]) => ({ id: 'p-tree-' + s, cmd: withGc(tree, s), when: 'never', timeoutSec: 30 }))),
     }));
     const init = run('git', ['init', '-q', '--template='], { cwd: dir });
@@ -709,7 +724,7 @@ function buildGateRunCases() {
       'const L = require(' + JSON.stringify(path.join(hooks, 'lib.js')) + ');',
       "const one = process.env.SF_PROBE_CHANGED === 'one';",
       "L.allChanged = () => { if (!one) return []; const repo = L.knownRepos()[0]; return [{ repo, rules: L.rulesFor(repo), files: ['b.txt'] }]; };",
-      'const spy = { groupKills: 0, taskkills: 0 };',
+      'const spy = { groupKills: 0, taskkills: 0, logWrites: [], logDirReads: 0, logUnlinks: 0 };',
       'const spyFile = process.env.SF_PROBE_SPY;',
       "if (spyFile) process.on('exit', () => fs.writeFileSync(spyFile, JSON.stringify(spy)));",
       "const failKill = process.env.SF_PROBE_KILL_FAIL === '1';",
@@ -733,6 +748,43 @@ function buildGateRunCases() {
       '  }',
       '  return spawnSync.apply(cp, arguments);',
       '};',
+      // SF_PROBE_LOG_EXISTING: файл вывода с именем, которое запишет этот прогон (тот же pid), уже
+      // лежит - от прошлого прогона, доставшегося pid; saveLog обязан записать свой поверх, а не отказать
+      "if (process.env.SF_PROBE_LOG_EXISTING === '1') {",
+      "  const d = require('path').join(require('os').tmpdir(), 'sf-gates');",
+      '  fs.mkdirSync(d, { recursive: true });',
+      "  fs.writeFileSync(require('path').join(d, 'gates-sf-p-fail-short-' + process.pid + '.log'), 'stale-log-of-another-run', { mode: 0o644 });",
+      '}',
+      // запись файла вывода гейта (saveLog): режим и флаг файла - в шпиона; SF_PROBE_LOG_FAIL - сбой записи
+      "const failLog = process.env.SF_PROBE_LOG_FAIL === '1';",
+      'const writeFileSync = fs.writeFileSync;',
+      'fs.writeFileSync = function (file, data, options) {',
+      '  if (/[\\\\/]gates-[^\\\\/]*\\.log$/.test(String(file))) {',
+      "    const o = options && typeof options === 'object' ? options : {};",
+      "    spy.logWrites.push({ name: require('path').basename(String(file)), mode: o.mode === undefined ? null : o.mode, flag: o.flag === undefined ? null : o.flag });",
+      "    if (failLog) throw Object.assign(new Error('EACCES (проба)'), { code: 'EACCES' });",
+      '  }',
+      '  return writeFileSync.apply(fs, arguments);',
+      '};',
+      // чистка файлов вывода (pruneLogs): чтения каталога sf-gates и удаления - в шпиона;
+      // SF_PROBE_PRUNE_FAIL=readdir|unlink - сбой чтения каталога или удаления старого файла
+      'const pruneFail = process.env.SF_PROBE_PRUNE_FAIL;',
+      'const readdirSync = fs.readdirSync;',
+      'fs.readdirSync = function (dir) {',
+      "  if (/[\\\\/]sf-gates[\\\\/]?$/.test(String(dir))) {",
+      '    spy.logDirReads++;',
+      "    if (pruneFail === 'readdir') throw Object.assign(new Error('EACCES (проба)'), { code: 'EACCES' });",
+      '  }',
+      '  return readdirSync.apply(fs, arguments);',
+      '};',
+      'const unlinkSync = fs.unlinkSync;',
+      'fs.unlinkSync = function (file) {',
+      "  if (/[\\\\/]sf-gates[\\\\/]gates-[^\\\\/]*\\.log$/.test(String(file))) {",
+      '    spy.logUnlinks++;',
+      "    if (pruneFail === 'unlink') throw Object.assign(new Error('EBUSY (проба)'), { code: 'EBUSY' });",
+      '  }',
+      '  return unlinkSync.apply(fs, arguments);',
+      '};',
       'const pidFile = process.env.SF_PROBE_SIGNAL_ON;',
       'if (pidFile) {',
       '  const t = setInterval(() => {',
@@ -746,9 +798,28 @@ function buildGateRunCases() {
     const state = {};
     const spies = {};
     const cli = {};
-    // TEMP/TMP/TMPDIR - в дерево пробы: файл вывода болтливого гейта (saveLog) уходит вместе с ним
+    // TEMP/TMP/TMPDIR - в дерево пробы: файлы вывода гейтов (saveLog, каталог sf-gates) уходят вместе с ним
     const tmp = path.join(dir, 'tmp');
-    fs.mkdirSync(tmp, { recursive: true });
+    const logDir = path.join(tmp, 'sf-gates');
+    fs.mkdirSync(logDir, { recursive: true });
+    // старые файлы вывода: gates.js удаляет свои старше недели в своём каталоге при первой записи
+    // прогона, а свежий свой, чужой файл каталога и файл TEMP с именем, как у файла вывода, не трогает
+    const aged = (where, name, days) => {
+      const p = path.join(where, name);
+      fs.writeFileSync(p, 'old');
+      const t = (Date.now() - days * 24 * 3600 * 1000) / 1000;
+      fs.utimesSync(p, t, t);
+    };
+    aged(logDir, 'gates-sf-p-old-1.log', 8);
+    aged(logDir, 'gates-sf-p-recent-1.log', 1);
+    aged(logDir, 'gates-notes.txt', 8);
+    aged(tmp, 'gates-other-tool-1.log', 8);
+    // свои TEMP у проб сбоя чистки: сбой чтения каталога и сбой удаления старого файла
+    const tmpPrune = { readdir: path.join(dir, 'tmp-readdir'), unlink: path.join(dir, 'tmp-unlink') };
+    for (const k of Object.keys(tmpPrune)) fs.mkdirSync(path.join(tmpPrune[k], 'sf-gates'), { recursive: true });
+    aged(path.join(tmpPrune.unlink, 'sf-gates'), 'gates-sf-p-old-2.log', 8);
+    // свой TEMP у пробы файла, оставшегося с тем же pid: его файл вывода не смешивается с общими
+    const tmpExisting = path.join(dir, 'tmp-existing');
     const cliCase = (k, args, env, stdinOpen) => {
       state[k] = fs.mkdtempSync(path.join(dir, 'state-' + k + '-'));
       spies[k] = path.join(dir, 'spy-' + k + '.json');
@@ -765,6 +836,20 @@ function buildGateRunCases() {
     cliCase('onlyCleanBoth', ['--only=p-both'], { SF_PROBE_CHANGED: 'none' });
     cliCase('onlyCleanMixed', ['--only=p-pass,o-only'], { SF_PROBE_CHANGED: 'none' });
     cliCase('stdin', ['--only=p-stdin'], { SF_PROBE_CHANGED: 'none' }, true);
+    cliCase('failShort', ['--only=p-fail-short'], { SF_PROBE_CHANGED: 'none' });
+    cliCase('failShortNoLog', ['--only=p-fail-short'], { SF_PROBE_CHANGED: 'none', SF_PROBE_LOG_FAIL: '1' });
+    cliCase('failSilent', ['--only=p-fail-silent'], { SF_PROBE_CHANGED: 'none' });
+    cliCase('longGreen', ['--only=p-long-green'], { SF_PROBE_CHANGED: 'none' });
+    cliCase('green200', ['--only=p-green-200'], { SF_PROBE_CHANGED: 'none' });
+    cliCase('green201', ['--only=p-green-201'], { SF_PROBE_CHANGED: 'none' });
+    // сбой записи файла у срезанного вывода: на экране срез строк; у болтливого - ещё и срез памяти
+    cliCase('longGreenNoLog', ['--only=p-long-green'], { SF_PROBE_CHANGED: 'none', SF_PROBE_LOG_FAIL: '1' });
+    cliCase('floodNoLog', ['--only=p-flood'], { SF_PROBE_CHANGED: 'none', SF_PROBE_LOG_FAIL: '1' });
+    cliCase('existingLog', ['--only=p-fail-short'], { SF_PROBE_CHANGED: 'none', SF_PROBE_LOG_EXISTING: '1', TEMP: tmpExisting, TMP: tmpExisting, TMPDIR: tmpExisting });
+    for (const k of Object.keys(tmpPrune)) {
+      const t = tmpPrune[k];
+      cliCase('prune-' + k, ['--only=p-fail-short'], { SF_PROBE_CHANGED: 'none', SF_PROBE_PRUNE_FAIL: k, TEMP: t, TMP: t, TMPDIR: t });
+    }
     for (const [s] of PROBE_SIGNALS) {
       cliCase(s, ['--only=p-tree-' + s], { SF_PROBE_CHANGED: 'none', SF_PROBE_SIGNAL_ON: watch[s].pid, SF_PROBE_SIGNAL: s });
     }
@@ -789,6 +874,15 @@ function buildGateRunCases() {
       res.spy[k] = fs.existsSync(spies[k]) ? JSON.parse(fs.readFileSync(spies[k], 'utf8')) : null;
     }
     res.grace = grace;
+    // файлы вывода гейтов (saveLog) в каталоге sf-gates TEMP дерева пробы - до его удаления
+    res.logs = fs.readdirSync(logDir).filter((f) => /^gates-/.test(f)).map((f) => ({ name: f, text: fs.readFileSync(path.join(logDir, f), 'utf8') }));
+    res.tmpNames = fs.readdirSync(tmp);
+    res.logDirNames = fs.readdirSync(logDir);
+    res.logStats = res.logs.map((l) => ({ name: l.name, mode: fs.statSync(path.join(logDir, l.name)).mode }));
+    res.pruneLogNames = {};
+    for (const k of Object.keys(tmpPrune)) res.pruneLogNames[k] = fs.readdirSync(path.join(tmpPrune[k], 'sf-gates'));
+    const existingDir = path.join(tmpExisting, 'sf-gates');
+    res.existingLogs = fs.existsSync(existingDir) ? fs.readdirSync(existingDir).map((f) => ({ name: f, text: fs.readFileSync(path.join(existingDir, f), 'utf8') })) : [];
     return res;
   } finally {
     try {
@@ -960,13 +1054,192 @@ check('gates.js из командной строки: снятый по пред
   if (all.lastGates.full !== 1) why.push('lastGates полного прогона - ' + all.lastGates.full + ', ждали 1');
   return why.length ? why.join('; ') : true;
 });
+/** Вывод одного гейта прогона: от «=== repo / id:» до конца строки «--- repo / id:», '' - если гейта нет. */
+function gateSection(out, repo, id) {
+  const start = out.indexOf('=== ' + repo + ' / ' + id + ': ');
+  if (start < 0) return '';
+  const end = out.indexOf('--- ' + repo + ' / ' + id + ': ', start);
+  if (end < 0) return out.slice(start);
+  const eol = out.indexOf('\n', end);
+  return eol < 0 ? out.slice(start) : out.slice(start, eol);
+}
 check('gates.js из командной строки: файл вывода болтливого гейта подписан как срезанный, не «Полный вывод»', () => {
   const x = gateRunCases().cli.full;
   if (x.hung) return cliSeen(x);
+  // красный p-hang того же прогона подписан «Полный вывод» по праву - смотрим только p-flood
+  const flood = gateSection(x.out, 'sf', 'p-flood');
   const why = [];
-  if (/Полный вывод: /.test(x.out)) why.push('срезанный вывод подписан «Полный вывод»');
-  if (!/Вывод в файле - первые и последние байты, середина \(\d+ байт\) срезана пределом памяти gates\.js: /.test(x.out)) why.push('нет подписи о срезе');
+  if (!flood) why.push('нет вывода гейта p-flood');
+  if (/Полный вывод: /.test(flood)) why.push('срезанный вывод подписан «Полный вывод»');
+  if (!/Вывод в файле - первые и последние байты, середина \(\d+ байт\) срезана пределом памяти gates\.js: /.test(flood)) why.push('нет подписи о срезе');
   return why.length ? why.join('; ') + '; ' + cliSeen(x) : true;
+});
+check('gates.js из командной строки: короткий красный гейт - полный вывод в файле, путь напечатан под выводом', () => {
+  const all = gateRunCases();
+  const x = all.cli.failShort;
+  const why = [];
+  if (x.hung || x.code !== 1) why.push(cliSeen(x));
+  const printed = /Полный вывод: (.+)/.exec(gateSection(x.out, 'sf', 'p-fail-short'));
+  const log = all.logs.find((l) => /^gates-sf-p-fail-short-\d+\.log$/.test(l.name));
+  if (!log) why.push('файла gates-sf-p-fail-short-<pid>.log нет; файлы: ' + JSON.stringify(all.logs.map((l) => l.name)));
+  else if (!/short-red-line/.test(log.text)) why.push('в файле нет вывода гейта: ' + JSON.stringify(log.text.slice(0, 120)));
+  if (!printed) why.push('путь файла не напечатан под выводом гейта');
+  else if (log && path.basename(printed[1].trim()) !== log.name) why.push('напечатан не тот путь: ' + printed[1].trim());
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: короткий зелёный гейт файла вывода не оставляет и пути не печатает', () => {
+  const all = gateRunCases();
+  const x = all.cli.onlyClean;
+  const glob = gateSection(x.out, 'sf', 'p-glob');
+  const why = [];
+  if (x.hung || x.code !== 0) why.push(cliSeen(x));
+  if (!glob) why.push('гейт p-glob не прогнан');
+  if (/Полный вывод: /.test(glob)) why.push('у зелёного гейта напечатан путь файла');
+  const left = all.logs.filter((l) => /^gates-sf-p-glob-/.test(l.name)).map((l) => l.name);
+  if (left.length) why.push('зелёный гейт оставил файл: ' + JSON.stringify(left));
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: длинный зелёный гейт - файл вывода есть и путь напечатан (исключение из «зелёный лог не пишет»: экранный вывод срезан)', () => {
+  const all = gateRunCases();
+  const x = all.cli.longGreen;
+  const section = gateSection(x.out, 'sf', 'p-long-green');
+  const why = [];
+  if (x.hung || x.code !== 0) why.push(cliSeen(x));
+  if (!/\.\.\. срезано \d+ строк \.\.\./.test(section)) why.push('экранный вывод не срезан - проба не о длинном гейте');
+  const printed = /Полный вывод: (.+)/.exec(section);
+  const log = all.logs.find((l) => /^gates-sf-p-long-green-\d+\.log$/.test(l.name));
+  if (!log) why.push('файла gates-sf-p-long-green-<pid>.log нет');
+  else if (!/long-green-line-130/.test(log.text)) why.push('в файле нет середины вывода');
+  if (!printed) why.push('путь файла не напечатан');
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: граница FULL_LIMIT - 200 строк зелёного гейта целиком и без файла, 201 - срез и файл вывода', () => {
+  const all = gateRunCases();
+  const why = [];
+  const at = gateSection(all.cli.green200.out, 'sf', 'p-green-200');
+  const past = gateSection(all.cli.green201.out, 'sf', 'p-green-201');
+  if (all.cli.green200.hung || all.cli.green200.code !== 0) why.push('200: ' + cliSeen(all.cli.green200));
+  if (all.cli.green201.hung || all.cli.green201.code !== 0) why.push('201: ' + cliSeen(all.cli.green201));
+  if (/\.\.\. срезано /.test(at) || !/edge-line-100\b/.test(at)) why.push('200 строк срезаны на экране');
+  if (/Полный вывод: |Вывод в файле/.test(at)) why.push('у 200 строк напечатан путь файла');
+  const left = all.logs.filter((l) => /^gates-sf-p-green-200-/.test(l.name)).map((l) => l.name);
+  if (left.length) why.push('200 строк оставили файл: ' + JSON.stringify(left));
+  if (!/\.\.\. срезано 101 строк \.\.\./.test(past)) why.push('201 строка не срезана на экране до 40 + 60');
+  if (!/Полный вывод: /.test(past)) why.push('у 201 строки не напечатан путь файла');
+  if (!all.logs.some((l) => /^gates-sf-p-green-201-\d+\.log$/.test(l.name) && /edge-line-100\b/.test(l.text))) why.push('у 201 строки нет файла с серединой');
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: файл вывода с тем же pid от прошлого прогона заменён файлом этого прогона', () => {
+  const all = gateRunCases();
+  const x = all.cli.existingLog;
+  const section = gateSection(x.out, 'sf', 'p-fail-short');
+  const why = [];
+  if (x.hung || x.code !== 1) why.push(cliSeen(x));
+  const logs = all.existingLogs || [];
+  if (!logs.length) why.push('файла вывода нет - проба не о файле с тем же pid');
+  for (const l of logs) {
+    if (/stale-log-of-another-run/.test(l.text)) why.push('в файле ' + l.name + ' остался вывод прошлого прогона');
+    else if (!/short-red-line/.test(l.text)) why.push('в файле ' + l.name + ' нет вывода гейта');
+  }
+  if (/Файл вывода не записан/.test(section)) why.push('запись отказана: ' + (/Файл вывода не записан[^\n]*/.exec(section) || [''])[0]);
+  if (!/Полный вывод: /.test(section)) why.push('путь файла не напечатан');
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: сбой записи файла у срезанного вывода говорит, что потеряно, а не «выше - всё»', () => {
+  const all = gateRunCases();
+  const why = [];
+  const long = gateSection(all.cli.longGreenNoLog.out, 'sf', 'p-long-green');
+  const flood = gateSection(all.cli.floodNoLog.out, 'sf', 'p-flood');
+  if (all.cli.longGreenNoLog.hung || all.cli.longGreenNoLog.code !== 0) why.push('длинный: ' + cliSeen(all.cli.longGreenNoLog));
+  if (all.cli.floodNoLog.hung || all.cli.floodNoLog.code !== 0) why.push('болтливый: ' + cliSeen(all.cli.floodNoLog));
+  if (!/Файл вывода не записан \(EACCES\): вывод выше неполон, потеряны срезанные на экране 160 строк середины\./.test(long)) {
+    why.push('длинный: потеря среза экрана не названа: ' + JSON.stringify((/Файл вывода[^\n]*/.exec(long) || [''])[0]));
+  }
+  if (!/Файл вывода не записан \(EACCES\): вывод выше неполон, потеряны срезанные на экране \d+ строк середины и середина \(\d+ байт\), срезанная пределом памяти gates\.js\./.test(flood)) {
+    why.push('болтливый: потеря среза памяти не названа: ' + JSON.stringify((/Файл вывода[^\n]*/.exec(flood) || [''])[0]));
+  }
+  if (/всё, что есть|весь вывод/.test(long + flood)) why.push('срезанный вывод назван полным');
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: красный гейт без вывода файла не оставляет и пути не печатает', () => {
+  const all = gateRunCases();
+  const x = all.cli.failSilent;
+  const section = gateSection(x.out, 'sf', 'p-fail-silent');
+  const why = [];
+  if (x.hung || x.code !== 1) why.push(cliSeen(x));
+  if (!/\(команда ничего не вывела\)/.test(section)) why.push('нет строки «команда ничего не вывела»');
+  if (/Полный вывод: |Вывод в файле/.test(section)) why.push('напечатан путь файла пустого вывода');
+  const left = all.logs.filter((l) => /^gates-sf-p-fail-silent-/.test(l.name)).map((l) => l.name);
+  if (left.length) why.push('оставлен файл пустого вывода: ' + JSON.stringify(left));
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: сбой записи файла вывода назван, пути нет, вердикт гейта прежний', () => {
+  const all = gateRunCases();
+  const x = all.cli.failShortNoLog;
+  const section = gateSection(x.out, 'sf', 'p-fail-short');
+  const spy = all.spy.failShortNoLog;
+  const why = [];
+  if (x.hung || x.code !== 1) why.push(cliSeen(x));
+  if (!spy || !spy.logWrites.length) why.push('запись файла вывода не пробовалась - проба не о сбое записи');
+  if (!/Файл вывода не записан \(EACCES\): выше - весь вывод этого гейта\./.test(section)) why.push('сбой записи не назван или не сказано, что вывод выше целый');
+  if (/Полный вывод: |Вывод в файле/.test(section)) why.push('напечатан путь файла, которого нет');
+  if (!/short-red-line/.test(section)) why.push('вывод гейта не напечатан');
+  if (!/ПАДАЕТ/.test(section)) why.push('вердикт гейта не «ПАДАЕТ»');
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: файл вывода пишется только владельцу (mode 0o600) и создаётся заново (flag wx)', () => {
+  const all = gateRunCases();
+  const spy = all.spy.failShort;
+  const writes = spy ? spy.logWrites : [];
+  const why = [];
+  if (!writes.length) why.push('запись файла вывода не замечена');
+  const loose = writes.filter((w) => w.mode !== 0o600);
+  if (loose.length) why.push('режим файла не 0o600: ' + JSON.stringify(loose));
+  // без wx запись в файл, оставшийся от прошлого прогона с тем же pid, сохранила бы его права
+  const reused = writes.filter((w) => w.flag !== 'wx');
+  if (reused.length) why.push('файл не создаётся заново (flag не wx): ' + JSON.stringify(reused));
+  if (process.platform !== 'win32') {
+    const log = all.logStats && all.logStats.find((l) => /^gates-sf-p-fail-short-\d+\.log$/.test(l.name));
+    if (log && (log.mode & 0o077) !== 0) why.push('файл на диске доступен не только владельцу: ' + log.mode.toString(8));
+  }
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: файлы вывода старше недели удалены, свежий, чужой файл каталога и файл TEMP с тем же именем на месте', () => {
+  const all = gateRunCases();
+  const names = all.logDirNames || [];
+  const why = [];
+  if (names.includes('gates-sf-p-old-1.log')) why.push('файл вывода старше недели не удалён');
+  if (!names.includes('gates-sf-p-recent-1.log')) why.push('удалён файл вывода моложе недели');
+  if (!names.includes('gates-notes.txt')) why.push('удалён чужой файл каталога sf-gates');
+  if (!(all.tmpNames || []).includes('gates-other-tool-1.log')) why.push('удалён чужой файл TEMP вне каталога sf-gates');
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: каталог файлов вывода читается для чистки один раз за прогон, не на каждый файл', () => {
+  const all = gateRunCases();
+  const spy = all.spy.full;
+  const why = [];
+  const written = spy ? spy.logWrites.length : 0;
+  if (written < 2) why.push('полный прогон записал ' + written + ' файл(а) вывода - проба не о нескольких записях');
+  if (!spy || spy.logDirReads !== 1) why.push('чтений каталога sf-gates: ' + (spy ? spy.logDirReads : 'нет шпиона'));
+  return why.length ? why.join('; ') : true;
+});
+check('gates.js из командной строки: сбой чистки (чтение каталога, удаление старого файла) гейт не роняет - вердикт прежний, файл вывода записан', () => {
+  const all = gateRunCases();
+  const why = [];
+  for (const k of ['readdir', 'unlink']) {
+    const x = all.cli['prune-' + k];
+    const spy = all.spy['prune-' + k];
+    const section = gateSection(x.out, 'sf', 'p-fail-short');
+    const names = (all.pruneLogNames && all.pruneLogNames[k]) || [];
+    if (x.hung || x.code !== 1) why.push(k + ': ' + cliSeen(x));
+    if (k === 'readdir' && !(spy && spy.logDirReads > 0)) why.push('readdir: чтение каталога не пробовалось - проба не о сбое');
+    if (k === 'unlink' && !(spy && spy.logUnlinks > 0)) why.push('unlink: удаление старого файла не пробовалось - проба не о сбое');
+    if (!/ПАДАЕТ/.test(section)) why.push(k + ': вердикт гейта не «ПАДАЕТ»');
+    if (!/Полный вывод: /.test(section)) why.push(k + ': путь файла вывода не напечатан');
+    if (!names.some((n) => /^gates-sf-p-fail-short-\d+\.log$/.test(n))) why.push(k + ': файла вывода нет: ' + JSON.stringify(names));
+    if (k === 'unlink' && !names.includes('gates-sf-p-old-2.log')) why.push('unlink: старый файл пропал, хотя удаление отказало');
+  }
+  return why.length ? why.join('; ') : true;
 });
 check('gates.js из командной строки: гейт без предела - «ПАДАЕТ, нет предела timeoutSec» в сводке, код 1, команда не запускалась', () => {
   const all = gateRunCases();

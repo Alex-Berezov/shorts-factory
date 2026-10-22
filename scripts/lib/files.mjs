@@ -56,6 +56,44 @@ export function isNotFile(error) {
 }
 
 /**
+ * Whether a look at a path of the listing (`trackedFiles`, `readTrackedFiles`)
+ * found no file there: `isNotFile`, or a directory in its place (`EISDIR` of
+ * a read - a `stat` answers a directory with `isFile() === false` instead).
+ * The one rule of "no file there" for a listed path, whether it is looked at
+ * by its `stat` or by its read; `readIfFile` answers stricter on purpose - a
+ * path through a file (`ENOTDIR`) to a file a gate must read is a fault of
+ * the checkout, not an absent file.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+export function isNoListedFile(error) {
+  return isNotFile(error) || codeOf(error) === "EISDIR";
+}
+
+/**
+ * A file of the listing that could not be read for another reason than
+ * `isNoListedFile` (`EPERM`, `EBUSY`, `EACCES`): the message and `code` of
+ * the read, and `path`, the file it was made on - so a caller names the file
+ * by the kind of the error, not by a `path` any error may carry (a failed
+ * spawn names its command there).
+ */
+export class UnreadableFileError extends Error {
+  /**
+   * @param {string} message
+   * @param {{ cause: unknown, code: string | undefined, path: string }} details
+   */
+  constructor(message, { cause, code, path }) {
+    super(message, { cause });
+    this.name = "UnreadableFileError";
+    /** @type {string | undefined} */
+    this.code = code;
+    /** @type {string} */
+    this.path = path;
+  }
+}
+
+/**
  * Contents of a file, null if there is no file at `path` (nothing there, or a
  * directory); any other failure to read is thrown, a path with a file where a
  * directory should be (ENOTDIR) included: a broken path to a file the gate
@@ -132,19 +170,89 @@ export function trackedFiles(
   root,
   { keep = () => true, spawn = spawnSync } = {},
 ) {
-  const listed = spawn(
-    "git",
-    [
-      "-c",
-      "core.fsmonitor=false",
-      "ls-files",
-      "-z",
-      "--cached",
-      "--others",
-      "--exclude-standard",
-    ],
-    { cwd: root, encoding: "utf8", maxBuffer: LISTING_MAX_BUFFER },
+  return listedPaths(root, spawn).filter(
+    (path) => keep(path) && isListedFile(join(root, path)),
   );
+}
+
+/**
+ * The files of the listing of `trackedFiles` that `keep` takes, each with its
+ * text - for a gate that reads every file it lists (check-no-search-list).
+ * Each path is touched once, by its `readFileSync`, not by a `stat` first and
+ * a read after: one call less per file, and no window between the two in
+ * which a file an editor rewrites or a scanner holds answers otherwise. The
+ * read decides: no file there (`isNotFile`: deleted from the disk, or under a
+ * directory a file now stands in place of) and a directory (`EISDIR`, on
+ * Linux and Windows alike) are left out, as `trackedFiles` leaves them; any
+ * other failure (`EPERM`, `EBUSY`, `EACCES`) is thrown - a file that cannot be
+ * read is not taken for an absent one.
+ *
+ * The tree is listed at the call; each file is read only when the caller
+ * takes it from the iterator, so a scan holds one text at a time, not the
+ * whole tree - and a file is judged by the disk at the moment it is read.
+ *
+ * @param {string} root the top of a git work tree
+ * @param {TrackedOptions} [options]
+ * @returns {Generator<{ path: string, text: string }, void, undefined>} in
+ *   the order git gives them
+ * @throws {Error} as `trackedFiles` when git cannot list the tree - at the
+ *   call; for a file that cannot be read, an `UnreadableFileError` - as the
+ *   iteration reaches it
+ */
+export function readTrackedFiles(
+  root,
+  { keep = () => true, spawn = spawnSync } = {},
+) {
+  return readEach(root, listedPaths(root, spawn).filter(keep));
+}
+
+/**
+ * The texts of `paths` under `root`, one read per path as the caller takes
+ * it, the paths with no file there left out (`readListedFile`).
+ *
+ * @param {string} root
+ * @param {string[]} paths
+ * @returns {Generator<{ path: string, text: string }, void, undefined>}
+ */
+function* readEach(root, paths) {
+  for (const path of paths) {
+    const text = readListedFile(join(root, path));
+    if (text !== null) yield { path, text };
+  }
+}
+
+/**
+ * The paths of the listing of `trackedFiles`, once each, not yet looked at on
+ * the disk.
+ *
+ * @param {string} root
+ * @param {SpawnGit} spawn
+ * @returns {string[]}
+ */
+function listedPaths(root, spawn) {
+  let listed;
+  try {
+    listed = spawn(
+      "git",
+      [
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+      ],
+      { cwd: root, encoding: "utf8", maxBuffer: LISTING_MAX_BUFFER },
+    );
+  } catch (error) {
+    // A spawn that throws instead of returning its error is the same failure
+    // to list the tree, named by the root - not by the command it carries.
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`git ls-files in ${root} failed: ${message}`, {
+      cause: error,
+    });
+  }
   if (listed.error !== undefined) {
     throw new Error(`git ls-files in ${root} failed: ${listed.error.message}`, {
       cause: listed.error,
@@ -156,15 +264,35 @@ export function trackedFiles(
     );
   }
   // `--cached --others` lists a file with a conflict once per stage.
-  const paths = [...new Set(listed.stdout.split("\0"))];
-  return paths.filter(
-    (path) => path !== "" && keep(path) && isListedFile(join(root, path)),
-  );
+  return [...new Set(listed.stdout.split("\0"))].filter((path) => path !== "");
+}
+
+/**
+ * The text of a path of the listing, null when there is no file to read
+ * (`isNoListedFile`). Any other failure is an `UnreadableFileError`, so the
+ * caller names the file whatever the error says itself.
+ *
+ * @param {string} path
+ * @returns {string | null}
+ */
+function readListedFile(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if (isNoListedFile(error)) return null;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new UnreadableFileError(message, {
+      cause: error,
+      code: codeOf(error),
+      path,
+    });
+  }
 }
 
 /**
  * Whether a path of the listing is a file on the disk: no file there is
- * `isNotFile` only, any other failure is thrown.
+ * `isNoListedFile` (a directory is `isFile() === false`), any other failure
+ * is thrown.
  *
  * @param {string} path
  * @returns {boolean}
@@ -173,7 +301,7 @@ function isListedFile(path) {
   try {
     return statSync(path).isFile();
   } catch (error) {
-    if (isNotFile(error)) return false;
+    if (isNoListedFile(error)) return false;
     throw error;
   }
 }

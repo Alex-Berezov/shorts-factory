@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { repoRoot } from "../scripts/lib/paths.mjs";
 import {
@@ -9,6 +8,7 @@ import {
   breaksRule,
   isSource,
 } from "../scripts/lib/search-list.mjs";
+import { type Injected, failingCall } from "./failing-call.js";
 import { gitScratch } from "./git-fixture.js";
 
 /**
@@ -49,50 +49,18 @@ function gate(
   });
 }
 
-/** How the injected failure looks to the gate, beyond its code. */
-interface Injected {
-  /** The path is removed before the error is thrown, as a deleted file is. */
-  remove?: boolean;
-  /** `process.platform` the child sees. */
-  platform?: NodeJS.Platform;
-}
-
 /**
- * Node flags that make `fs.readFileSync` throw an error with `code` for the
- * one file whose path ends in `file`; everything else is read as it is.
+ * Node flags that make `fs.readFileSync` (or `call`) throw an error with
+ * `code` for the one file whose path ends in `file`; everything else is
+ * read as it is (`failingCall`, `test/failing-call.ts`).
  */
 function failing(
   name: string,
   code: string,
   file: string,
-  { remove = false, platform }: Injected = {},
+  injected: Injected = {},
 ): string[] {
-  const module = join(scratch, `${name}.preload.mjs`);
-  writeFileSync(
-    module,
-    [
-      'import fs from "node:fs";',
-      'import { syncBuiltinESMExports } from "node:module";',
-      platform === undefined
-        ? ""
-        : `Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });`,
-      "const real = fs.readFileSync;",
-      // rmSync lists a directory through fs itself: no failure while it runs.
-      "let removing = false;",
-      "fs.readFileSync = (path, ...rest) => {",
-      `  if (!removing && String(path).endsWith(${JSON.stringify(file)})) {`,
-      remove
-        ? "    removing = true; fs.rmSync(path, { recursive: true, force: true }); removing = false;"
-        : "",
-      `    throw Object.assign(new Error(\`${code}: injected, \${path}\`), { code: ${JSON.stringify(code)} });`,
-      "  }",
-      "  return real(path, ...rest);",
-      "};",
-      "syncBuiltinESMExports();",
-      "",
-    ].join("\n"),
-  );
-  return ["--import", pathToFileURL(module).href];
+  return failingCall(scratch, name, code, file, injected);
 }
 
 const CLEAN = {
@@ -433,8 +401,24 @@ describe("check-no-search-list", () => {
     expect(result.stderr).toContain("EACCES");
   });
 
+  it("names the root, not git, when the spawn of git throws with a path of its own", () => {
+    // An error of node carries its argument as `path` - for a spawn, the
+    // command: the gate must not take it for the file it could not read.
+    const root = tree("spawn-throws", CLEAN);
+
+    const result = gate(
+      root,
+      failing("spawn-throws", "EPERM", "git", { call: "spawnSync" }),
+    );
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain(`no-search-list: cannot scan ${root}: `);
+    expect(result.stderr).not.toContain("cannot scan git");
+  });
+
   it("skips a file that is gone before readFileSync", () => {
-    const root = tree("gone", CLEAN);
+    // A second source keeps test/ from being empty once the first is gone.
+    const root = tree("gone", { ...CLEAN, "test/e.test.ts": "" });
 
     const result = gate(
       root,
@@ -442,10 +426,22 @@ describe("check-no-search-list", () => {
     );
 
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe("no-search-list: clean (3 files)");
+    expect(result.stdout.trim()).toBe("no-search-list: clean (4 files)");
   });
 
-  it("refuses a tree whose every listed file was gone before it was read", () => {
+  it("refuses a tree whose only source of a directory is gone when it is read", () => {
+    const root = tree("gone-only", CLEAN);
+
+    const result = gate(
+      root,
+      failing("gone-only", "ENOENT", join("test", "d.test.ts")),
+    );
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("no source file under test of");
+  });
+
+  it("refuses a tree whose every listed file was gone when it was read", () => {
     const root = tree("all-gone", {
       "apps/a/src/index.ts": "",
       "packages/b/src/index.ts": "",
@@ -456,7 +452,39 @@ describe("check-no-search-list", () => {
     const result = gate(root, failing("all-gone", "ENOENT", ".ts"));
 
     expect(result.status).toBe(2);
-    expect(result.stderr).toContain("every listed file");
+    expect(result.stderr).toContain(
+      "no source file under apps, packages, scripts, test",
+    );
+  });
+
+  it("skips a directory where git lists a file, and scans the rest", () => {
+    const root = tree("directory-in-place", {
+      ...CLEAN,
+      "packages/b/src/x.ts": "",
+    });
+    fixture.git(root, ["add", "."]);
+    rmSync(join(root, "packages", "b", "src", "x.ts"));
+    mkdirSync(join(root, "packages", "b", "src", "x.ts"));
+
+    const result = gate(root);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("no-search-list: clean (4 files)");
+  });
+
+  it("reads each listed source once, with no stat before: an EPERM of stat alone does not fail it", () => {
+    // A stat-then-read gate refuses here; a single read sees the file.
+    const root = tree("stat-eperm", CLEAN);
+    const file = join("test", "d.test.ts");
+
+    const result = gate(
+      root,
+      failing("stat-eperm", "EPERM", file, { call: "statSync" }),
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("no-search-list: clean (4 files)");
   });
 
   it.each(["EPERM", "EBUSY"])(

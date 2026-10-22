@@ -4,13 +4,17 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  UnreadableFileError,
   isGone,
+  isNoListedFile,
   isNotFile,
   readIfFile,
+  readTrackedFiles,
   trackedFiles,
 } from "../scripts/lib/files.mjs";
 import { repoRoot } from "../scripts/lib/paths.mjs";
 import { LOOKUP, enumerationViolations } from "./enumeration.js";
+import { failingCall } from "./failing-call.js";
 import { gitScratch } from "./git-fixture.js";
 import { readRepoFile, repoFilesUnder } from "./repo-files.js";
 
@@ -24,6 +28,13 @@ const FILES_MODULE = join(repoRoot, "scripts", "lib", "files.mjs");
 
 const fixture = gitScratch("sf-files-");
 const scratch = fixture.dir;
+
+/** A name for the program of one injection (`failingCall`), new for each. */
+let injections = 0;
+const injection = (what: string): string => {
+  injections += 1;
+  return `${what}-${injections}`;
+};
 
 const failed = (code: string): Error =>
   Object.assign(new Error(`${code}: injected`), { code });
@@ -51,6 +62,20 @@ describe("isNotFile", () => {
     ["a value that is not an error", false, { code: "ENOTDIR" }],
   ] as const)("takes %s for no file: %s", (_what, notFile, error) => {
     expect(isNotFile(error)).toBe(notFile);
+  });
+});
+
+describe("isNoListedFile", () => {
+  it.each([
+    ["ENOENT", true, failed("ENOENT")],
+    ["ENOTDIR", true, failed("ENOTDIR")],
+    ["EISDIR", true, failed("EISDIR")],
+    ["EPERM", false, failed("EPERM")],
+    ["EACCES", false, failed("EACCES")],
+    ["EBUSY", false, failed("EBUSY")],
+    ["a value that is not an error", false, { code: "EISDIR" }],
+  ] as const)("takes %s for no listed file: %s", (_what, none, error) => {
+    expect(isNoListedFile(error)).toBe(none);
   });
 });
 
@@ -180,16 +205,6 @@ describe("trackedFiles", () => {
   ): string {
     const options = keep === undefined ? "" : `, { keep: ${keep} }`;
     const program = [
-      'import fs from "node:fs";',
-      'import { syncBuiltinESMExports } from "node:module";',
-      "const real = fs.statSync;",
-      "fs.statSync = (path, ...rest) => {",
-      `  if (String(path).endsWith(${JSON.stringify(file)})) {`,
-      `    throw Object.assign(new Error("${code}: injected"), { code: "${code}" });`,
-      "  }",
-      "  return real(path, ...rest);",
-      "};",
-      "syncBuiltinESMExports();",
       `const { trackedFiles } = await import(${JSON.stringify(pathToFileURL(FILES_MODULE).href)});`,
       "try {",
       `  console.log(\`listed: \${JSON.stringify(trackedFiles(${JSON.stringify(root)}${options}))}\`);`,
@@ -200,7 +215,14 @@ describe("trackedFiles", () => {
 
     const child = spawnSync(
       process.execPath,
-      ["--input-type=module", "--eval", program],
+      [
+        ...failingCall(scratch, injection("listed"), code, file, {
+          call: "statSync",
+        }),
+        "--input-type=module",
+        "--eval",
+        program,
+      ],
       { encoding: "utf8", timeout: 20_000, env: fixture.env },
     );
 
@@ -283,6 +305,192 @@ describe("trackedFiles", () => {
     expect(trackedFiles(scratch, { spawn })).toEqual([]);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.slice(0, 2)).toEqual(["-c", "core.fsmonitor=false"]);
+  });
+});
+
+describe("readTrackedFiles", () => {
+  const workTree = fixture.tree;
+  const git = fixture.git;
+  const byPath = (
+    files: Iterable<{ path: string; text: string }>,
+  ): { path: string; text: string }[] =>
+    [...files].sort((x, y) => x.path.localeCompare(y.path));
+
+  it("gives the text of each listed file keep takes", () => {
+    const root = workTree("read", {
+      "a.ts": "A\n",
+      "b.md": "B\n",
+      "c/d.ts": "D\n",
+    });
+
+    expect(
+      byPath(readTrackedFiles(root, { keep: (path) => path.endsWith(".ts") })),
+    ).toEqual([
+      { path: "a.ts", text: "A\n" },
+      { path: "c/d.ts", text: "D\n" },
+    ]);
+  });
+
+  it("leaves out a tracked file deleted from the disk", () => {
+    const root = workTree("read-deleted", { "a.ts": "", "b.ts": "b" });
+    git(root, ["add", "."]);
+    rmSync(join(root, "a.ts"));
+
+    expect([...readTrackedFiles(root)]).toEqual([{ path: "b.ts", text: "b" }]);
+  });
+
+  it("leaves out a tracked file a directory took the place of, and reads the files in it", () => {
+    const root = workTree("read-replaced", { "a.ts": "", "c.ts": "c" });
+    git(root, ["add", "."]);
+    rmSync(join(root, "a.ts"));
+    mkdirSync(join(root, "a.ts"));
+    writeFileSync(join(root, "a.ts", "d.ts"), "d");
+
+    expect(byPath(readTrackedFiles(root))).toEqual([
+      { path: "a.ts/d.ts", text: "d" },
+      { path: "c.ts", text: "c" },
+    ]);
+  });
+
+  it("leaves out a tracked file under a directory a file now stands in place of", () => {
+    const root = workTree("read-enotdir", { "a/b.ts": "", "c.ts": "c" });
+    git(root, ["add", "."]);
+    rmSync(join(root, "a"), { recursive: true });
+    writeFileSync(join(root, "a"), "a");
+
+    expect(byPath(readTrackedFiles(root))).toEqual([
+      { path: "a", text: "a" },
+      { path: "c.ts", text: "c" },
+    ]);
+  });
+
+  /**
+   * What `readTrackedFiles` of a child gives for `root` - `read: [paths]`, or
+   * `threw: <code> <whether its path is the file>` - when `fs.<call>` of the
+   * child answers `code` for the one path that ends in `file`, replaced
+   * before `files.mjs` is imported.
+   */
+  function readInChild(
+    root: string,
+    file: string,
+    code: string,
+    call: "readFileSync" | "statSync",
+  ): string {
+    const program = [
+      `const { readTrackedFiles } = await import(${JSON.stringify(pathToFileURL(FILES_MODULE).href)});`,
+      "try {",
+      `  const read = [...readTrackedFiles(${JSON.stringify(root)})].map(({ path }) => path).sort();`,
+      "  console.log(`read: ${JSON.stringify(read)}`);",
+      "} catch (error) {",
+      `  console.log(\`threw: \${error.code} \${String(error.path).endsWith(${JSON.stringify(file)})}\`);`,
+      "}",
+    ].join("\n");
+
+    const child = spawnSync(
+      process.execPath,
+      [
+        ...failingCall(scratch, injection("read"), code, file, { call }),
+        "--input-type=module",
+        "--eval",
+        program,
+      ],
+      { encoding: "utf8", timeout: 20_000, env: fixture.env },
+    );
+
+    expect(child.stderr).toBe("");
+    return child.stdout.trim();
+  }
+
+  it.each(["EPERM", "EACCES", "EBUSY"])(
+    "throws %s of the read, naming the file, rather than leaving it out",
+    (code) => {
+      const root = workTree(`read-locked-${code}`, {
+        "a.ts": "",
+        "locked.ts": "",
+      });
+
+      expect(readInChild(root, "locked.ts", code, "readFileSync")).toBe(
+        `threw: ${code} true`,
+      );
+    },
+  );
+
+  it("touches a file once, by its read: an EPERM of stat alone does not fail it", () => {
+    // A stat before the read - the way of trackedFiles - throws here.
+    const root = workTree("read-stat-eperm", { "a.ts": "", "locked.ts": "" });
+
+    expect(readInChild(root, "locked.ts", "EPERM", "statSync")).toBe(
+      'read: ["a.ts","locked.ts"]',
+    );
+  });
+
+  it("throws an UnreadableFileError for a file it cannot read, with the code and the file", () => {
+    const root = workTree("read-unreadable", { "a.ts": "", "b.ts": "" });
+    const program = [
+      `const { readTrackedFiles, UnreadableFileError } = await import(${JSON.stringify(pathToFileURL(FILES_MODULE).href)});`,
+      "try {",
+      `  [...readTrackedFiles(${JSON.stringify(root)})];`,
+      '  console.log("read");',
+      "} catch (error) {",
+      '  console.log(`${error instanceof UnreadableFileError} ${error.code} ${error.path.endsWith("b.ts")}`);',
+      "}",
+    ].join("\n");
+    const child = spawnSync(
+      process.execPath,
+      [
+        ...failingCall(scratch, injection("unreadable"), "EBUSY", "b.ts"),
+        "--input-type=module",
+        "--eval",
+        program,
+      ],
+      { encoding: "utf8", timeout: 20_000, env: fixture.env },
+    );
+
+    expect(child.stderr).toBe("");
+    expect(child.stdout.trim()).toBe("true EBUSY true");
+  });
+
+  it("names the root, not the command, when the spawn of git throws: no UnreadableFileError", () => {
+    // An error of node may carry a `path` of its own - for a spawn, the command.
+    const spawn = (): never => {
+      throw Object.assign(new Error("spawnSync git EPERM"), {
+        code: "EPERM",
+        path: "git",
+      });
+    };
+    let thrown: unknown;
+    try {
+      readTrackedFiles(scratch, { spawn });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).not.toBeInstanceOf(UnreadableFileError);
+    expect(String(thrown)).toContain(
+      `git ls-files in ${scratch} failed: spawnSync git EPERM`,
+    );
+  });
+
+  it("reads a file when the iteration reaches it, not at the call: one text at a time, judged by the disk of that moment", () => {
+    const root = workTree("read-lazy", { "a.ts": "a", "b.ts": "b" });
+    git(root, ["add", "."]);
+    const files = readTrackedFiles(root);
+
+    const first = files.next();
+    // Deleted after the first file was taken: the second is read only now.
+    rmSync(join(root, "b.ts"));
+
+    expect(first.value).toEqual({ path: "a.ts", text: "a" });
+    expect([...files]).toEqual([]);
+  });
+
+  it("throws, with what git said, on a directory that is no work tree", () => {
+    const root = join(scratch, "read-no-repo");
+    mkdirSync(root);
+
+    expect(() => readTrackedFiles(root)).toThrow(
+      /git ls-files in .*read-no-repo failed \(exit \d+\): .*not a git repository/i,
+    );
   });
 });
 

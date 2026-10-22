@@ -1,5 +1,5 @@
 import { type ChildProcess, fork } from "node:child_process";
-import { createServer } from "node:net";
+import { type Socket, connect, createServer } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { env } from "@sf/config";
@@ -69,15 +69,144 @@ async function statusOf(port: number): Promise<unknown> {
   }
 }
 
-/** `id` and `db` of each client `CLIENT LIST` names. */
-function clientsOf(list: string): { id: number; db: string }[] {
+/** A client of `CLIENT LIST`, by the fields the cases read. */
+interface ListedClient {
+  id: number;
+  db: string;
+  /** What the client said it is (`CLIENT SETINFO LIB-NAME`); "" when it said nothing. */
+  lib: string;
+}
+
+/**
+ * `id`, `db` and `lib-name` of each client `CLIENT LIST` names. A line
+ * without an `id` or a `db` it can read is thrown with the line: a client
+ * that became `NaN` would fall out of every window of ids without a word
+ * (L-028).
+ */
+function clientsOf(list: string): ListedClient[] {
   return list
     .split("\n")
     .filter((line) => line.trim() !== "")
-    .map((line) => ({
-      id: Number(/\bid=(\d+)/.exec(line)?.[1] ?? Number.NaN),
-      db: /\bdb=(\d+)/.exec(line)?.[1] ?? "",
-    }));
+    .map((line) => {
+      const id = /(?:^|\s)id=(\d+)(?=\s|$)/.exec(line)?.[1];
+      const db = /(?:^|\s)db=(\d+)(?=\s|$)/.exec(line)?.[1];
+      if (id === undefined || db === undefined) {
+        throw new Error(
+          `CLIENT LIST gave a line without an id or a db to read: ${JSON.stringify(line)}`,
+        );
+      }
+      return {
+        id: Number(id),
+        db,
+        lib: /(?:^|\s)lib-name=(\S*)/.exec(line)?.[1] ?? "",
+      };
+    });
+}
+
+/** The library name ioredis gives its connections: `ioredis`, or `ioredis(<tag>)`. */
+const IOREDIS_LIB = /^ioredis(?:\(.*\))?$/;
+
+/**
+ * The clients of a fork among `listed`: those of the window of ids
+ * `[from, before)` - opened after the fork started and before the reading
+ * client - that ioredis named (`CLIENT SETINFO LIB-NAME`). Throws, naming
+ * them, while the window holds a client that has named no library and is not
+ * one of `known`: an unnamed connection of the fork, before its `SETINFO`,
+ * looks just like the `redis-cli ping` of a healthcheck, and a reading taken
+ * then would leave one of the fork's connections out unseen. Both pass within
+ * milliseconds and the caller reads again (`vi.waitFor`); one that stays -
+ * a Redis older than 7.2, which has no `SETINFO`, a `MONITOR`, an IDE on the
+ * stack - is the reason its wait ends with, not a bare timeout.
+ */
+function forkClientsOf(
+  listed: readonly ListedClient[],
+  window: { from: number; before: number; known: ReadonlySet<number> },
+): ListedClient[] {
+  const inWindow = listed.filter(
+    (client) => client.id >= window.from && client.id < window.before,
+  );
+  const unnamed = inWindow.filter(
+    (client) => !IOREDIS_LIB.test(client.lib) && !window.known.has(client.id),
+  );
+  if (unnamed.length > 0) {
+    const named = unnamed.map(({ id, db }) => `id=${id} db=${db}`).join(", ");
+    throw new Error(
+      `${unnamed.length} client(s) of the window [${window.from}, ${window.before}) named no library: ${named} - a connection of the fork before its CLIENT SETINFO, or a client that never names one (a Redis older than 7.2, a MONITOR, an IDE or redis-cli on the stack)`,
+    );
+  }
+  return inWindow.filter((client) => IOREDIS_LIB.test(client.lib));
+}
+
+/** A bare client and the id the server gave it. */
+interface BareClient {
+  readonly id: number;
+  readonly socket: Socket;
+}
+
+/**
+ * A client the way `redis-cli ping` of the healthcheck of Compose and CI
+ * (`infra/docker-compose.yml`, `.github/workflows/ci.yml`) is one: a bare
+ * socket to the Redis of `redisUrl` in database 0 that never sends
+ * `CLIENT SETINFO`. It asks `CLIENT ID` instead of `PING`, so the caller
+ * knows which client of the list it is. Resolves once the server has
+ * answered, so the server lists it; a socket that fails or closes before an
+ * answer is a rejection that says so, and an error after it - the server
+ * dropping the socket - is the end of the socket, not an uncaught exception
+ * of the vitest worker. An answer that is no id is a rejection with the
+ * answer, the socket destroyed; otherwise the caller destroys it.
+ */
+async function openBareClient(redisUrl: string): Promise<BareClient> {
+  const { hostname, port } = new URL(redisUrl);
+  if (port === "") {
+    throw new Error(
+      "the URL of the bare client names no port: it would dial port 0",
+    );
+  }
+  const socket = connect({ host: hostname, port: Number(port) });
+  const id = await new Promise<number>((resolve, reject) => {
+    let reply = "";
+    const settle = (): void => {
+      socket.off("error", onError);
+      socket.off("close", onClose);
+      socket.off("data", onData);
+    };
+    const onError = (error: Error): void => {
+      settle();
+      reject(error);
+    };
+    const onClose = (): void => {
+      settle();
+      reject(new Error("the server closed the bare client before it answered"));
+    };
+    const onData = (chunk: Buffer): void => {
+      reply += chunk.toString();
+      if (!reply.includes("\r\n")) {
+        return;
+      }
+      settle();
+      const answered = /^:(\d+)\r\n/.exec(reply)?.[1];
+      if (answered === undefined) {
+        // Nobody reads this socket any more: an error of it would be uncaught.
+        socket.destroy();
+        reject(
+          new Error(
+            `the server answered CLIENT ID of the bare client with ${JSON.stringify(reply)}`,
+          ),
+        );
+        return;
+      }
+      resolve(Number(answered));
+    };
+    socket.on("error", onError);
+    socket.on("close", onClose);
+    socket.on("data", onData);
+    socket.once("connect", () => {
+      socket.write("CLIENT ID\r\n");
+    });
+  });
+  // From here on an error only ends the socket; the case reads the list.
+  socket.on("error", () => undefined);
+  return { id, socket };
 }
 
 /** The id the server gives the next client: one past the newest so far. */
@@ -94,6 +223,22 @@ async function nextClientId(): Promise<number> {
 /** How long the server may take to drop the connections of a dead process. */
 const CONNECTIONS_GONE_DEADLINE_MS = 5_000;
 
+/**
+ * The bound of the case of the Redis databases: every wait in it ends by its
+ * own deadline, with its own reason, before the bound of the case would cut
+ * it short with none - the page (`START_DEADLINE_MS`), the named clients of
+ * the fork (`START_DEADLINE_MS`, `forkClientsOf`), the stop of the process
+ * (`SHUTDOWN_TIMEOUT_MS`, and a second for its exit), the connections
+ * leaving with it (`CONNECTIONS_GONE_DEADLINE_MS`) - and five seconds of
+ * room. The test timeout of the suite (15 s) is below their sum.
+ */
+const REDIS_DATABASES_CASE_MS =
+  2 * START_DEADLINE_MS +
+  SHUTDOWN_TIMEOUT_MS +
+  1_000 +
+  CONNECTIONS_GONE_DEADLINE_MS +
+  5_000;
+
 /** Stops a child and waits for its end; a child already ended is left be. */
 async function stopped(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) {
@@ -108,56 +253,73 @@ async function stopped(child: ChildProcess): Promise<void> {
   await exited;
 }
 
-describe("api entry point", () => {
-  let child: ChildProcess;
-  let output = "";
-  let port: number;
+/** A forked entry point, and what the cases read of it. */
+interface RunningApi {
+  child: ChildProcess;
+  port: number;
   /**
-   * Client ids are handed out in order: every client from here on is the
-   * fork's or one of this file's, and a client left by another run - a
-   * worker fork of a crashed run, in its own database - is older.
+   * The id the server gave the next client just before the fork: client ids
+   * are handed out in order, so every client from here on is the fork's or
+   * one opened after it, and a client left by another run - a worker fork of
+   * a crashed run, in its own database - is older.
    */
-  let firstForkClientId: number;
+  firstClientId: number;
+  /** What the process wrote so far, stdout and stderr together. */
+  output(): string;
+}
+
+/**
+ * The entry point started with the command `pnpm dev` runs, with the config
+ * of the test run (`.env.test`, loaded by the vitest setup), the two labels
+ * and a free port on top, and the Redis database of the api suite instead of
+ * the one the worker suite uses. The caller stops it (`stopped`).
+ */
+async function startApi(): Promise<RunningApi> {
+  const firstClientId = await nextClientId();
+  const port = await freePort();
+  const { execArgv, script } = devCommandParts();
+  const child = fork(join(APP_DIR, script), [], {
+    cwd: APP_DIR,
+    execArgv,
+    env: {
+      ...process.env,
+      REDIS_URL: suiteRedisUrl(env.REDIS_URL, "api"),
+      API_PORT: String(port),
+      APP_VERSION: VERSION,
+      GIT_COMMIT: REJECTED_COMMIT,
+    },
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+  });
+  let output = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    output += chunk.toString();
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    output += chunk.toString();
+  });
+  return { child, port, firstClientId, output: () => output };
+}
+
+describe("api entry point", () => {
+  let api: RunningApi;
 
   beforeAll(async () => {
-    firstForkClientId = await nextClientId();
-    port = await freePort();
-    const { execArgv, script } = devCommandParts();
-    child = fork(join(APP_DIR, script), [], {
-      cwd: APP_DIR,
-      execArgv,
-      // The config of the test run (`.env.test`, loaded by the vitest setup)
-      // with the two labels and the port of this case on top, and the Redis
-      // database of the api suite instead of the one the worker suite uses.
-      env: {
-        ...process.env,
-        REDIS_URL: suiteRedisUrl(env.REDIS_URL, "api"),
-        API_PORT: String(port),
-        APP_VERSION: VERSION,
-        GIT_COMMIT: REJECTED_COMMIT,
-      },
-      stdio: ["ignore", "pipe", "pipe", "ipc"],
-    });
-    child.stdout?.on("data", (chunk: Buffer) => {
-      output += chunk.toString();
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      output += chunk.toString();
-    });
+    api = await startApi();
   });
 
   afterAll(async () => {
-    await stopped(child);
+    await stopped(api.child);
   });
 
   it("reports the label it was given and null for the one it dropped", async () => {
-    const status = SystemStatusResponseSchema.parse(await statusOf(port));
+    const status = SystemStatusResponseSchema.parse(await statusOf(api.port));
 
     expect(status.build).toEqual({ version: VERSION, commit: null });
   });
 
   it("names the dropped label in its log, without the value", async () => {
-    await statusOf(port);
+    await statusOf(api.port);
+    const output = api.output();
     const warnings = output
       .split("\n")
       .filter((line) => line.includes("build label ignored"))
@@ -168,44 +330,84 @@ describe("api entry point", () => {
     ]);
     expect(output).not.toContain(REJECTED_COMMIT);
   });
+});
 
-  it("keeps its Redis connections out of the database of the worker suite", async () => {
-    await statusOf(port);
-    const redis = openTestRedis();
-    try {
-      // No offline queue: a command before the socket is up is refused.
-      await whenReady(redis);
-      // Every client between the fork's start and this one is a connection
-      // the fork opened - this file opens none in between.
-      const own = Number(await redis.client("ID"));
-      const forked = clientsOf(String(await redis.client("LIST"))).filter(
-        (client) => client.id >= firstForkClientId && client.id < own,
-      );
+/**
+ * The case stops the process it reads - its connections must leave with it -
+ * so it has a process of its own: one shared with other cases would leave
+ * them without one, whatever order they run in.
+ */
+describe("api entry point and the Redis databases", () => {
+  let api: RunningApi;
 
-      // The fork has a connection open by now (it answered the page), and
-      // every one of them sits in the api's database.
-      expect(forked.length).toBeGreaterThan(0);
-      expect(forked.map((client) => client.db)).toEqual(
-        forked.map(() => TEST_REDIS_DATABASE_OF.api),
-      );
-
-      // And they are the fork's, not some other client's of the window: they
-      // leave with it.
-      await stopped(child);
-      const forkedIds = new Set(forked.map((client) => client.id));
-      await vi.waitFor(
-        async () => {
-          const left = clientsOf(String(await redis.client("LIST"))).filter(
-            (client) => forkedIds.has(client.id),
-          );
-          expect(left).toEqual([]);
-        },
-        { timeout: CONNECTIONS_GONE_DEADLINE_MS, interval: 50 },
-      );
-    } finally {
-      redis.disconnect();
-    }
+  beforeAll(async () => {
+    api = await startApi();
   });
+
+  afterAll(async () => {
+    await stopped(api.child);
+  });
+
+  it(
+    "keeps its Redis connections out of the database of the worker suite",
+    async () => {
+      await statusOf(api.port);
+      // A client of the window that is not the fork's: `redis-cli ping` of the
+      // healthcheck of Compose and CI comes in like this one, in database 0.
+      const bare = await openBareClient(env.REDIS_URL);
+      const redis = openTestRedis();
+      try {
+        // No offline queue: a command before the socket is up is refused.
+        await whenReady(redis);
+        // Every client between the fork's start and this one is the fork's or
+        // one that came from outside the file, as `bare` did. The fork's are
+        // the ones ioredis named (`CLIENT SETINFO LIB-NAME`, sent right after
+        // the connect - waited for, not assumed): the list is read again until
+        // no client of the window is unnamed but `bare`, and a wait that runs
+        // out ends with the clients that stayed unnamed.
+        const own = Number(await redis.client("ID"));
+        const forked = await vi.waitFor(
+          async () => {
+            const found = forkClientsOf(
+              clientsOf(String(await redis.client("LIST"))),
+              {
+                from: api.firstClientId,
+                before: own,
+                known: new Set([bare.id]),
+              },
+            );
+            // The fork has a connection open by now (it answered the page).
+            expect(found.length).toBeGreaterThan(0);
+            return found;
+          },
+          { timeout: START_DEADLINE_MS, interval: 50 },
+        );
+
+        // Every one of them sits in the api's database.
+        expect(forked.map((client) => client.db)).toEqual(
+          forked.map(() => TEST_REDIS_DATABASE_OF.api),
+        );
+
+        // And they are the fork's, not some other client's of the window: they
+        // leave with it.
+        await stopped(api.child);
+        const forkedIds = new Set(forked.map((client) => client.id));
+        await vi.waitFor(
+          async () => {
+            const left = clientsOf(String(await redis.client("LIST"))).filter(
+              (client) => forkedIds.has(client.id),
+            );
+            expect(left).toEqual([]);
+          },
+          { timeout: CONNECTIONS_GONE_DEADLINE_MS, interval: 50 },
+        );
+      } finally {
+        bare.socket.destroy();
+        redis.disconnect();
+      }
+    },
+    REDIS_DATABASES_CASE_MS,
+  );
 });
 
 /**
@@ -399,4 +601,168 @@ describe("api stop under a silent Postgres", () => {
     },
     SHUTDOWN_TIMEOUT_MS + 10_000,
   );
+});
+
+describe("clientsOf", () => {
+  it("reads the id, the database and the library of each client", () => {
+    expect(
+      clientsOf(
+        "id=7 addr=127.0.0.1:1 db=2 lib-name=ioredis lib-ver=5.11.1\nid=8 addr=127.0.0.1:2 db=0 lib-name= lib-ver=\n",
+      ),
+    ).toEqual([
+      { id: 7, db: "2", lib: "ioredis" },
+      { id: 8, db: "0", lib: "" },
+    ]);
+  });
+
+  it.each([
+    ["without an id", "addr=127.0.0.1:1 db=2 lib-name=ioredis"],
+    ["with an id that is no number", "id=x addr=127.0.0.1:1 db=2"],
+    ["without a db", "id=7 addr=127.0.0.1:1 lib-name=ioredis"],
+  ])("throws, with the line, on a line %s", (_what, line) => {
+    expect(() => clientsOf(`${line}\n`)).toThrow(JSON.stringify(line));
+  });
+});
+
+describe("forkClientsOf", () => {
+  const window = { from: 10, before: 20, known: new Set([12]) };
+
+  it("takes the named clients of the window, past the known bare one and the clients outside it", () => {
+    expect(
+      forkClientsOf(
+        clientsOf(
+          "id=9 db=0 lib-name=ioredis\nid=11 db=2 lib-name=ioredis\nid=12 db=0 lib-name=\nid=13 db=2 lib-name=ioredis(api)\nid=20 db=2 lib-name=ioredis\nid=21 db=0 lib-name=\n",
+        ),
+        window,
+      ),
+    ).toEqual([
+      { id: 11, db: "2", lib: "ioredis" },
+      { id: 13, db: "2", lib: "ioredis(api)" },
+    ]);
+  });
+
+  it("takes a client with the first id of the window: the fork's first connection is the id read before the fork", () => {
+    expect(
+      forkClientsOf(clientsOf("id=10 db=2 lib-name=ioredis\n"), window),
+    ).toEqual([{ id: 10, db: "2", lib: "ioredis" }]);
+  });
+
+  it("throws, naming it, while a client of the window is unnamed and not known: a connection of the fork before its SETINFO, or one that never names itself", () => {
+    expect(() =>
+      forkClientsOf(
+        clientsOf("id=11 db=2 lib-name=ioredis\nid=14 db=0 lib-name=\n"),
+        window,
+      ),
+    ).toThrow(
+      "1 client(s) of the window [10, 20) named no library: id=14 db=0 - a connection of the fork before its CLIENT SETINFO, or a client that never names one (a Redis older than 7.2",
+    );
+  });
+});
+
+describe("openBareClient", () => {
+  /** A server on a free port that does `onSocket` with each connection. */
+  async function serverThat(
+    onSocket: (socket: Socket) => void,
+  ): Promise<{ url: string; close(): Promise<void> }> {
+    const server = createServer(onSocket);
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("the stand-in server is not listening on a tcp port");
+    }
+    return {
+      url: `redis://127.0.0.1:${address.port}`,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.close(() => {
+            resolve();
+          });
+        }),
+    };
+  }
+
+  it("is refused, saying so, by a server that closes it before an answer", async () => {
+    const server = await serverThat((socket) => {
+      // Read what the client sends, so the server side reaches its end too.
+      socket.resume();
+      socket.end();
+    });
+    try {
+      await expect(openBareClient(server.url)).rejects.toThrow(
+        "the server closed the bare client before it answered",
+      );
+    } finally {
+      await server.close();
+    }
+  }, 3_000);
+
+  it("survives a reset of the socket after the answer: the end of it, not an uncaught error", async () => {
+    const server = await serverThat((socket) => {
+      socket.once("data", () => {
+        socket.write(":7\r\n", () => {
+          setTimeout(() => {
+            socket.resetAndDestroy();
+          }, 20);
+        });
+      });
+    });
+    try {
+      const bare = await openBareClient(server.url);
+      expect(bare.id).toBe(7);
+      await new Promise<void>((resolve) => {
+        bare.socket.once("close", () => {
+          resolve();
+        });
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("is refused with the error of the socket when it cannot connect", async () => {
+    // Nothing listens there: the error comes before any answer.
+    const port = await freePort();
+
+    await expect(openBareClient(`redis://127.0.0.1:${port}`)).rejects.toThrow(
+      /ECONNREFUSED/,
+    );
+  });
+
+  it("is refused, with the answer, by a server that answers CLIENT ID with no id, and leaves no socket to reset", async () => {
+    let serverSide: Promise<void> | undefined;
+    const server = await serverThat((socket) => {
+      serverSide = new Promise<void>((resolve) => {
+        socket.on("error", () => undefined);
+        socket.on("close", () => {
+          resolve();
+        });
+      });
+      socket.once("data", () => {
+        socket.write("-ERR unknown command 'CLIENT'\r\n", () => {
+          // A socket of the client still open meets the reset uncaught.
+          setTimeout(() => {
+            socket.resetAndDestroy();
+          }, 20);
+        });
+      });
+    });
+    try {
+      await expect(openBareClient(server.url)).rejects.toThrow(
+        `the server answered CLIENT ID of the bare client with "-ERR unknown command 'CLIENT'\\r\\n"`,
+      );
+      await serverSide;
+      // Room for an error of the reset to reach the client side, if it is open.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("refuses a URL without a port instead of dialing port 0", async () => {
+    await expect(openBareClient("redis://127.0.0.1/0")).rejects.toThrow(
+      "names no port",
+    );
+  });
 });

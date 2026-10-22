@@ -146,6 +146,20 @@ describe("createProbeDb", () => {
   });
 
   /**
+   * postgres-js replaces a connection after 30 to 60 minutes by default: the
+   * probes of the api want that rotation, a lock held on the session of the
+   * one connection (the run lock) wants none, and says so.
+   */
+  it("keeps the rotation of the connection unless asked not to", () => {
+    createProbeDb(URL, OPTIONS);
+    createProbeDb(URL, { ...OPTIONS, keepConnection: true });
+
+    expect(driver.clients).toHaveLength(2);
+    expect(driver.clients[0]?.args[1]).not.toHaveProperty("max_lifetime");
+    expect(driver.clients[1]?.args[1]).toMatchObject({ max_lifetime: null });
+  });
+
+  /**
    * postgres-js lays the query parameters of a DSN over `connection`: a
    * `statement_timeout` left in the url would replace the bound of the probe.
    */

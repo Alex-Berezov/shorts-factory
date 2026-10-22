@@ -5,7 +5,7 @@
  * per call, banned project-wide.
  * Scans every source file of the repository (`isSource` of
  * `scripts/lib/search-list.mjs`), in whatever directory, for any of its
- * forms. The files are the ones git lists (`trackedFiles` of
+ * forms. The files are the ones git lists (`readTrackedFiles` of
  * `scripts/lib/files.mjs`: tracked, or untracked and not ignored), the set
  * the hash of turbo covers; build output, `node_modules` and the bundles
  * vite writes next to a config are ignored files and not among them.
@@ -21,15 +21,15 @@
  * Exit 1 with file:line of every hit; exit 2 when the scan itself failed -
  * git could not list the tree (not started, not a repository), one of
  * apps/, packages/, scripts/ and test/ has no source file, or a listed file
- * cannot be read: a gate that saw nothing has proven nothing. A file gone
- * between the listing and its reading (`ENOENT`, `isGone` of
- * `scripts/lib/files.mjs`) is no longer in the tree and is not scanned; any
- * other failure to read is exit 2. Exit 0 when clean, with the number of
- * files scanned.
+ * cannot be read: a gate that saw nothing has proven nothing. Each listed
+ * source is touched once, by its read, and scanned before the next one is
+ * read - only one text is held at a time: what is no file of the tree any
+ * more (`isNoListedFile` of `scripts/lib/files.mjs` - the one rule of it) is
+ * not scanned; any other failure to read (`EPERM`, `EBUSY`) is exit 2. Exit
+ * 0 when clean, with the number of files scanned.
  */
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { isGone, trackedFiles } from "./lib/files.mjs";
+import { resolve } from "node:path";
+import { UnreadableFileError, readTrackedFiles } from "./lib/files.mjs";
 import { repoRoot } from "./lib/paths.mjs";
 import { breaksRule, isSource } from "./lib/search-list.mjs";
 
@@ -52,42 +52,35 @@ function scanFailed(what, error) {
 }
 
 /** @type {string[]} */
-let files;
+const hits = [];
+/** The directories of `REQUIRED` a scanned source was found under. */
+const found = new Set();
+let scanned = 0;
 try {
-  // Only the sources are looked at on the disk (`keep`).
-  files = trackedFiles(ROOT, { keep: isSource });
+  // Only the sources are read (`keep`), each once, as the scan reaches it.
+  for (const { path, text } of readTrackedFiles(ROOT, { keep: isSource })) {
+    scanned += 1;
+    for (const dir of REQUIRED) {
+      if (path.startsWith(`${dir}/`)) found.add(dir);
+    }
+    text.split(/\r?\n/).forEach((line, i) => {
+      if (breaksRule(line)) {
+        hits.push(`${path}:${i + 1}: ${line.trim()}`);
+      }
+    });
+  }
 } catch (error) {
-  scanFailed(ROOT, error);
+  // A file that cannot be read is named by its path, anything else - a tree
+  // git cannot list, a spawn that failed - by the root.
+  scanFailed(error instanceof UnreadableFileError ? error.path : ROOT, error);
 }
 
-const empty = REQUIRED.filter(
-  (dir) => !files.some((path) => path.startsWith(`${dir}/`)),
-);
+const empty = REQUIRED.filter((dir) => !found.has(dir));
 if (empty.length > 0) {
   console.error(
     `no-search-list: no source file under ${empty.join(", ")} of ${ROOT}`,
   );
   process.exit(2);
-}
-
-/** @type {string[]} */
-const hits = [];
-let scanned = 0;
-for (const path of files) {
-  const file = join(ROOT, path);
-  let text;
-  try {
-    text = readFileSync(file, "utf8");
-  } catch (error) {
-    if (isGone(error)) continue;
-    scanFailed(file, error);
-  }
-  scanned += 1;
-  text.split(/\r?\n/).forEach((line, i) => {
-    if (breaksRule(line)) {
-      hits.push(`${path}:${i + 1}: ${line.trim()}`);
-    }
-  });
 }
 
 if (hits.length) {
@@ -96,9 +89,5 @@ if (hits.length) {
   );
   for (const h of hits) console.error(`  ${h}`);
   process.exit(1);
-}
-if (scanned === 0) {
-  console.error(`no-search-list: every listed file of ${ROOT} was gone`);
-  process.exit(2);
 }
 console.log(`no-search-list: clean (${scanned} files)`);

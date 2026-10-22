@@ -32,6 +32,7 @@ import {
   testDatabaseUrl,
 } from "../test-support/fixture.js";
 import { openRelay } from "../test-support/relay.js";
+import { RUN_LOCK_KEY } from "../test-support/run-lock.js";
 import { captureProcessOutput } from "./capture-output.js";
 import { failStep, stepOf } from "./migrate-steps.js";
 
@@ -1012,6 +1013,37 @@ describe("the migrate-and-seed entry point", () => {
 });
 
 describe("the advisory lock helpers of the test support", () => {
+  /**
+   * The entry check of this run holds the run lock on a session of its own
+   * through every file; the cases that read "no lock left" mean the locks
+   * of the migration runner. Left out is that key only, not every lock of
+   * another session.
+   */
+  it("leaves out the run lock another session holds, and that key only", async () => {
+    const runLocks = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM pg_locks
+      WHERE locktype = 'advisory' AND granted AND objsubid = 1
+        AND ((classid::bigint << 32) | objid::bigint) = ${RUN_LOCK_KEY}::bigint
+        AND pid <> pg_backend_pid()
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
+    expect(runLocks[0]?.n).toBe(1);
+
+    expect(await heldAdvisoryLocks(sql)).toBe(0);
+
+    const other = openTestSql();
+    try {
+      await other`SELECT pg_advisory_lock(${RUN_LOCK_KEY + 1}::bigint)`;
+      expect(await heldAdvisoryLocks(sql)).toBe(1);
+    } finally {
+      await other.end();
+      // The server ends the closed session on its own time; the next case
+      // reads no lock at all.
+      await vi.waitFor(async () => {
+        expect(await heldAdvisoryLocks(sql)).toBe(0);
+      });
+    }
+  });
+
   /** A lock on another database of the same server is not this test's. */
   it("does not count an advisory lock held on another database", async () => {
     const url = testDatabaseUrl();

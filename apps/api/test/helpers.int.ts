@@ -70,8 +70,12 @@ export function openTestQueues(connection: Redis): QueueFactory {
   });
 }
 
-/** How long a test client gets to reach `ready` on the local stack. */
-const READY_TIMEOUT_MS = 5_000;
+/**
+ * How long a test client gets to reach `ready` on the local stack. Exported
+ * for the case that tells a refusal apart from this wait
+ * (`when-ready.int.test.ts`): its bound follows this one.
+ */
+export const READY_TIMEOUT_MS = 5_000;
 
 /**
  * Resolves once the client has a usable socket. A client with the offline

@@ -35,6 +35,16 @@ import { rootReads } from "./root-reads.js";
  *   one is red until it is looked at and added.
  * - A root reader closed by an input keeps that input in the `turbo.json`
  *   of its package (`CLOSED_BY_INPUT`).
+ * - `test:int` is never cached (`cache: false`), yet its inputs are not
+ *   dead: `turbo run test:int --dry=json` lists them for each node, and the
+ *   probe graph of the harness (`DECLARED_INPUTS` in
+ *   `.claude/hooks/selftest-graph.js`) reads them to learn which files an
+ *   integration run reads - without the preset there, the probe of the
+ *   `test:int` gate glob would not know that every integration config calls
+ *   `vitest.preset.ts`. So they stay exactly the files of the package and the
+ *   preset (rule (h)) - in the root `turbo.json`, and in every `turbo.json`
+ *   of a package the listing holds, which could turn the cache back on or
+ *   change the inputs for that package alone.
  *
  * Each rule is a function over parsed JSON, checked once on the files of the
  * repository and once on a broken copy, so a rule that cannot turn red is
@@ -124,6 +134,72 @@ function packageInputViolations(packages: PackageInputs[]): string[] {
           `${dir}: test.inputs of ${file} has ${input}, which its tests do not read - a change would reset the cache for nothing`,
         );
       }
+    }
+  }
+  return problems;
+}
+
+/**
+ * Rule (h): `test:int` is not cached and declares exactly the files of the
+ * package and the preset - the inputs the probe graph of the harness reads.
+ */
+function intInputViolations(turbo: Turbo): string[] {
+  const problems: string[] = [];
+  const task = turbo.tasks["test:int"];
+  if (task === undefined) return ["turbo.json: no task test:int"];
+  if (task.cache !== false) {
+    problems.push(
+      `turbo.json: test:int.cache is ${JSON.stringify(task.cache)}, not false - an integration run resets a shared database and must never be replayed from a cache`,
+    );
+  }
+  if (JSON.stringify(task.inputs) !== JSON.stringify([DEFAULT, PRESET])) {
+    problems.push(
+      `turbo.json: test:int.inputs is ${JSON.stringify(task.inputs)}, not exactly ${DEFAULT} and ${PRESET} - cache: false does not make them dead: the probe graph of .claude/hooks/selftest-graph.js (DECLARED_INPUTS) reads them to learn what an integration run reads`,
+    );
+  }
+  // A root key `<package>#test:int` is merged over the task of every run of
+  // that package, past the checks above.
+  for (const name of Object.keys(turbo.tasks)) {
+    if (name.endsWith("#test:int")) {
+      problems.push(
+        `turbo.json: ${name} overrides test:int for one package - its cache and inputs would escape rule (h)`,
+      );
+    }
+  }
+  return problems;
+}
+
+/** A `turbo.json` below the root, by its path from the root. */
+interface PackageTurbo {
+  file: string;
+  turbo: Turbo;
+}
+
+/**
+ * Rule (h) in the packages: a `turbo.json` of a package that names
+ * `test:int` keeps it out of the cache (no `cache`, or `false`) and keeps the
+ * inputs of the root (no `inputs`, or only `$TURBO_EXTENDS$`). turbo merges the task
+ * of a package over the root one, so `cache: true` there would replay the
+ * integration run of that package from the cache - no reset, no run lock,
+ * and a green gate.
+ */
+function packageIntInputViolations(turbos: readonly PackageTurbo[]): string[] {
+  const problems: string[] = [];
+  for (const { file, turbo } of turbos) {
+    const task = turbo.tasks["test:int"];
+    if (task === undefined) continue;
+    if (task.cache !== undefined && task.cache !== false) {
+      problems.push(
+        `${file}: test:int.cache is ${JSON.stringify(task.cache)} - the integration run of this package would be replayed from a cache, with no reset and no run lock`,
+      );
+    }
+    if (
+      task.inputs !== undefined &&
+      JSON.stringify(task.inputs) !== JSON.stringify([EXTENDS])
+    ) {
+      problems.push(
+        `${file}: test:int.inputs is ${JSON.stringify(task.inputs)}, not the inputs of the root (none, or exactly ${EXTENDS}) - the probe graph of .claude/hooks/selftest-graph.js (DECLARED_INPUTS) would learn other files for this package`,
+      );
     }
   }
   return problems;
@@ -247,6 +323,8 @@ function depthOf(dir: string, file: string): number {
 interface Repository {
   root: Turbo;
   packages: PackageInputs[];
+  /** Every `turbo.json` of the listing below the root, a workspace package or not. */
+  packageTurbos: PackageTurbo[];
   manifests: Record<string, Manifest>;
 }
 
@@ -269,6 +347,12 @@ function repository(): Repository {
       ...readsOf(dir, files),
     })),
     manifests: Object.fromEntries(dirs.map((dir) => [dir, readManifest(dir)])),
+    packageTurbos: files
+      .filter((file) => file.endsWith("/turbo.json"))
+      .map((file) => ({
+        file,
+        turbo: readTurbo(file.slice(0, -"/turbo.json".length)),
+      })),
   };
   return read;
 }
@@ -379,6 +463,23 @@ describe("turbo inputs of the repository", () => {
 
   it("gives every package that reads a root env file that file, and no other package", () => {
     expect(packageInputViolations(repository().packages)).toEqual([]);
+  });
+
+  it("keeps test:int out of the cache with the inputs the probe graph reads", () => {
+    expect(intInputViolations(repository().root)).toEqual([]);
+  });
+
+  it("keeps test:int out of the cache and on the root inputs in every turbo.json of a package", () => {
+    const { packageTurbos } = repository();
+    // What the listing holds today: the scan must reach the files of the packages.
+    expect(packageTurbos.map(({ file }) => file)).toEqual(
+      expect.arrayContaining([
+        "apps/api/turbo.json",
+        "apps/worker/turbo.json",
+        "packages/db/turbo.json",
+      ]),
+    );
+    expect(packageIntInputViolations(packageTurbos)).toEqual([]);
   });
 
   it("orders the integration runs of api and worker after the one of @sf/db", () => {
@@ -512,6 +613,112 @@ describe("turbo input rules on broken copies", () => {
     expect(intOrderViolations(broken, repository().manifests)).toEqual([
       expect.stringContaining("does not depend on ^test:int"),
     ]);
+  });
+
+  it.each<
+    [string, (task: NonNullable<Turbo["tasks"][string]>) => void, string]
+  >([
+    [
+      "inputs dropped",
+      (task) => {
+        task.inputs = undefined;
+      },
+      "test:int.inputs is undefined",
+    ],
+    [
+      "inputs without the preset",
+      (task) => {
+        task.inputs = [DEFAULT];
+      },
+      `test:int.inputs is ${JSON.stringify([DEFAULT])}, not exactly`,
+    ],
+    [
+      "a root file among the inputs",
+      (task) => {
+        task.inputs = [DEFAULT, PRESET, ENV_TEST];
+      },
+      `test:int.inputs is ${JSON.stringify([DEFAULT, PRESET, ENV_TEST])}, not exactly`,
+    ],
+    [
+      "the cache on",
+      (task) => {
+        task.cache = true;
+      },
+      "test:int.cache is true",
+    ],
+    [
+      "no cache field: turbo caches a task by default",
+      (task) => {
+        task.cache = undefined;
+      },
+      "test:int.cache is undefined",
+    ],
+  ])("(h) refuses test:int with %s", (_name, breakIt, reason) => {
+    const broken = clean();
+    const task = broken.tasks["test:int"];
+    if (task === undefined) throw new Error("no task test:int in turbo.json");
+    breakIt(task);
+
+    expect(intInputViolations(broken)).toEqual([
+      expect.stringContaining(reason),
+    ]);
+  });
+
+  it("(h) refuses a root key that overrides test:int for one package", () => {
+    const broken = clean();
+    broken.tasks["@sf/db#test:int"] = { cache: true };
+
+    expect(intInputViolations(broken)).toEqual([
+      expect.stringContaining("@sf/db#test:int overrides test:int"),
+    ]);
+  });
+
+  it("(h) refuses a turbo.json without the task test:int", () => {
+    const broken = clean();
+    const { "test:int": _dropped, ...rest } = broken.tasks;
+    broken.tasks = rest;
+
+    expect(intInputViolations(broken)).toEqual([
+      "turbo.json: no task test:int",
+    ]);
+  });
+
+  it.each<[string, NonNullable<Turbo["tasks"][string]>, string]>([
+    ["the cache on", { cache: true }, "test:int.cache is true"],
+    [
+      "inputs of its own",
+      { inputs: [EXTENDS, ENV_TEST] },
+      `test:int.inputs is ${JSON.stringify([EXTENDS, ENV_TEST])}, not the inputs of the root`,
+    ],
+    [
+      "inputs that drop the root ones",
+      { inputs: [DEFAULT] },
+      `test:int.inputs is ${JSON.stringify([DEFAULT])}, not the inputs of the root`,
+    ],
+  ])(
+    "(h) refuses a package turbo.json with test:int of %s",
+    (_name, task, reason) => {
+      expect(
+        packageIntInputViolations([
+          {
+            file: "packages/x/turbo.json",
+            turbo: { extends: ["//"], tasks: { "test:int": task } },
+          },
+        ]),
+      ).toEqual([expect.stringContaining(`packages/x/turbo.json: ${reason}`)]);
+    },
+  );
+
+  it.each<[string, Turbo["tasks"]]>([
+    ["no test:int", { test: { inputs: [EXTENDS] } }],
+    ["the cache off", { "test:int": { cache: false } }],
+    ["the inputs of the root", { "test:int": { inputs: [EXTENDS] } }],
+  ])("(h) lets a package turbo.json with %s through", (_name, tasks) => {
+    expect(
+      packageIntInputViolations([
+        { file: "packages/x/turbo.json", turbo: { extends: ["//"], tasks } },
+      ]),
+    ).toEqual([]);
   });
 
   it("(g) refuses a closed root reader whose package dropped the input", () => {

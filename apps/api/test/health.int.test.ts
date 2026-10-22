@@ -3,7 +3,7 @@ import { errorCode } from "@sf/core";
 import { type Relay, openRelay } from "@sf/db/test-support/relay";
 import { connectionFailure, createRequestRedis } from "@sf/runtime";
 import type { Redis } from "ioredis";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type AppInstance, buildApp } from "../src/app.js";
 import {
   DEPENDENCY_TIMEOUT_MS,
@@ -131,12 +131,24 @@ describe("GET /health against live services", () => {
     });
     expect(elapsed).toBeLessThan(FAST_FAILURE_MS);
     // The reason is the refused socket - a connection failure by its code,
-    // not whatever else the client might have run into.
-    expect(errors).not.toHaveLength(0);
+    // not whatever else the client might have run into. Read until it is
+    // there: the `error` event of ioredis may come after the answer of
+    // `inject` on a loaded runner. The first connect attempt of the request
+    // client ends within its connect timeout (one second, `@sf/runtime`),
+    // refused or timed out, and either way as an `error`; the wait is the
+    // bound of a dependency of the page (`DEPENDENCY_TIMEOUT_MS`), above it,
+    // not the one second `vi.waitFor` gives by default - the same as the
+    // attempt itself.
+    await vi.waitFor(
+      () => {
+        expect(errors).not.toHaveLength(0);
+        expect(errors.map((err) => errorCode(err))).toContain("ECONNREFUSED");
+      },
+      { timeout: DEPENDENCY_TIMEOUT_MS, interval: 20 },
+    );
     expect(errors.map((err) => connectionFailure(err))).toEqual(
       errors.map(() => "unreachable"),
     );
-    expect(errors.map((err) => errorCode(err))).toContain("ECONNREFUSED");
   });
 
   /**
