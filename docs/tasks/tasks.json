@@ -1936,9 +1936,11 @@
       "E0-12E"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-19",
-    "started_at": "2026-10-22"
+    "started_at": "2026-10-22",
+    "done_at": "2026-10-22",
+    "note": "redisStage отдельным модулем, единая форма Redis-слушателей, queue-stats без своего флага, один обход cause, страж служебной базы и независимые от порядка int-наборы @sf/db, замер точности DLQ на Redis 7; блоки C/D вынесены в E0-12Y"
   },
   {
     "id": "E0-12R",
