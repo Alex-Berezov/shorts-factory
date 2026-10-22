@@ -1,5 +1,7 @@
+import { loadEnv } from "@sf/config";
 import type { Redis } from "ioredis";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
+import { buildLoggerOptions } from "../src/logger.js";
 import {
   type ProbeRedisOptions,
   type QueueRedisOptions,
@@ -214,6 +216,44 @@ describe("the factories", () => {
       "info",
     ]);
     expect(lines.at(-1)?.msg).toBe("redis connection ready");
+  });
+
+  it("says a refused password once, with the command named and its args left out", () => {
+    // The `Worker`s and the `Queue`s stay silent on a refusal of the
+    // credentials (`authFailure`): this line of the client is all the
+    // operator gets, and the command it carries holds the password.
+    const { transport: _unused, ...options } = buildLoggerOptions(
+      loadEnv({
+        NODE_ENV: "test",
+        DATABASE_URL: "postgres://sf:sf@localhost:5442/shorts_factory_test",
+        REDIS_URL: "redis://localhost:6389/1",
+        ADMIN_PASSWORD: "testtest",
+      }),
+    );
+    const { log, lines, raw } = recordingLogger(options);
+    client = createQueueRedis(CLOSED_REDIS_URL, { log });
+
+    client.emit(
+      "error",
+      Object.assign(
+        new Error(
+          "WRONGPASS invalid username-password pair or user is disabled.",
+        ),
+        { name: "ReplyError", command: { name: "auth", args: ["sup3r-pw"] } },
+      ),
+    );
+
+    expect(lines).toEqual([
+      expect.objectContaining({
+        level: "error",
+        msg: "redis client error",
+        err: expect.objectContaining({
+          message: expect.stringMatching(/^WRONGPASS /),
+          command: { name: "auth" },
+        }),
+      }),
+    ]);
+    expect(raw()).not.toContain("sup3r-pw");
   });
 
   it("writes the outages of the queue client to the logger it is given", () => {

@@ -4,8 +4,8 @@ import { closeDb } from "@sf/db";
 import type { QueueFactory } from "@sf/runtime";
 import { closeRedis } from "@sf/runtime";
 import { silentLogger } from "@sf/runtime/test-support/recording-logger";
-import { Queue } from "bullmq";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Queue, Worker } from "bullmq";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { defineJob } from "../src/lib/define-job.js";
 import { startWorkerRuntime } from "../src/runtime.js";
@@ -64,8 +64,42 @@ function withSlowDlqWrites(real: QueueFactory, delayMs: number): QueueFactory {
       });
     },
     use: (name, read) => real.use(name, read),
+    clientErrors: real.clientErrors,
     close: () => real.close(),
   };
+}
+
+/**
+ * `Worker.close()` that closes for real and then refuses, so the case leaves
+ * no worker on the client: the first call only, or every call.
+ */
+function refuseWorkerClose(message: string, calls: "once" | "always" = "once") {
+  const closeOfWorker = Worker.prototype.close;
+  const refusing = async function (this: Worker): Promise<void> {
+    await closeOfWorker.call(this);
+    throw new Error(message);
+  };
+  const spy = vi.spyOn(Worker.prototype, "close");
+  return calls === "once"
+    ? spy.mockImplementationOnce(refusing)
+    : spy.mockImplementation(refusing);
+}
+
+/** Whether the mark of the factory still marks an error of the shared client. */
+function clientMarks(factory: QueueFactory): boolean {
+  const err = new Error("emitted after the close");
+  // Listeners of the case's own: an `error` with none would throw here, and
+  // the reader of the case hears the client too (BullMQ hands it on).
+  const heard = (): void => {};
+  redis.on("error", heard);
+  dlqReader.on("error", heard);
+  try {
+    redis.emit("error", err);
+  } finally {
+    redis.off("error", heard);
+    dlqReader.off("error", heard);
+  }
+  return factory.clientErrors.has(err);
 }
 
 const db = openTestDb();
@@ -146,6 +180,7 @@ describe("worker runtime", () => {
         return real.get(name);
       },
       use: (name, read) => real.use(name, read),
+      clientErrors: real.clientErrors,
       close: async () => {
         closed = true;
         await real.close();
@@ -169,6 +204,155 @@ describe("worker runtime", () => {
     const askedRightAfter = heartbeatAsked;
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(heartbeatAsked).toBe(askedRightAfter);
+  });
+
+  it("closes its queues even when a worker refuses to close, and says why", async () => {
+    // Only the factory takes the mark off the client: a close that stopped at
+    // the refusing worker left the queues and the mark on it.
+    const real = workerQueueFactory(redis);
+    let closed = false;
+    const factory: QueueFactory = {
+      get: (name) => real.get(name),
+      use: (name, read) => real.use(name, read),
+      clientErrors: real.clientErrors,
+      close: async () => {
+        closed = true;
+        await real.close();
+      },
+    };
+    const runtime = await startWorkerRuntime({
+      env,
+      db,
+      redis,
+      log: silentLogger(),
+      processors: { "system.smoke": failingJob },
+      queues: factory,
+      switchIntervalMs: 60_000,
+    });
+    const close = refuseWorkerClose("the worker refused to close");
+
+    try {
+      await expect(runtime.close()).rejects.toThrow(
+        "the worker refused to close",
+      );
+    } finally {
+      close.mockRestore();
+    }
+
+    expect(closed).toBe(true);
+    // And the mark is off the client: an error it emits now is not marked.
+    expect(clientMarks(real)).toBe(false);
+  });
+
+  it("keeps a dead letter copy in flight when a worker refuses to close", async () => {
+    // The refusal used to end the stage before the drain, and `close()` then
+    // closed the factory under the copy on its way to `system.dlq`.
+    const runtime = await startWorkerRuntime({
+      env,
+      db,
+      redis,
+      log: silentLogger(),
+      processors: { "system.smoke": failingJob },
+      queues: withSlowDlqWrites(workerQueueFactory(redis), DLQ_WRITE_DELAY_MS),
+      switchIntervalMs: 60_000,
+    });
+
+    const queue = runtime.queues.get("system.smoke");
+    const jobId = await failingJob.enqueue(queue, {
+      marker: `dlq-refused-${Date.now()}`,
+    });
+    await waitFor(
+      async () => {
+        const job = await queue.getJob(jobId);
+        return (await job?.getState()) === "failed" ? true : undefined;
+      },
+      { what: "the job to run out of attempts" },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const close = refuseWorkerClose("the worker refused to close");
+    try {
+      await expect(runtime.close()).rejects.toThrow(
+        "the worker refused to close",
+      );
+    } finally {
+      close.mockRestore();
+    }
+
+    const records = await dlqReader.getJobs(["wait"]);
+    expect(
+      records.filter((record) => record.data?.jobId === jobId),
+    ).toHaveLength(1);
+  });
+
+  it("throws the refusals of every worker that refused to close, not the first one", async () => {
+    const runtime = await startWorkerRuntime({
+      env,
+      db,
+      redis,
+      log: silentLogger(),
+      processors: {
+        "system.smoke": failingJob,
+        "system.heartbeat": failingJob,
+      },
+      switchIntervalMs: 60_000,
+    });
+
+    const close = refuseWorkerClose("a worker refused to close", "always");
+    let thrown: unknown;
+    try {
+      await runtime.close().catch((err: unknown) => {
+        thrown = err;
+      });
+    } finally {
+      close.mockRestore();
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    const errors = thrown instanceof AggregateError ? thrown.errors : [];
+    expect(errors).toHaveLength(2);
+    for (const err of errors) {
+      expect(err).toMatchObject({ message: "a worker refused to close" });
+    }
+  });
+
+  it("keeps the refusal of a worker when the queues refuse to close as well", async () => {
+    const real = workerQueueFactory(redis);
+    const factory: QueueFactory = {
+      get: (name) => real.get(name),
+      use: (name, read) => real.use(name, read),
+      clientErrors: real.clientErrors,
+      close: async () => {
+        await real.close();
+        throw new Error("the queues refused to close");
+      },
+    };
+    const runtime = await startWorkerRuntime({
+      env,
+      db,
+      redis,
+      log: silentLogger(),
+      processors: { "system.smoke": failingJob },
+      queues: factory,
+      switchIntervalMs: 60_000,
+    });
+
+    const close = refuseWorkerClose("the worker refused to close");
+    let thrown: unknown;
+    try {
+      await runtime.close().catch((err: unknown) => {
+        thrown = err;
+      });
+    } finally {
+      close.mockRestore();
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    const errors = thrown instanceof AggregateError ? thrown.errors : [];
+    expect(errors).toMatchObject([
+      { message: "the worker refused to close" },
+      { message: "the queues refused to close" },
+    ]);
   });
 
   it("starts a worker only where a processor really is", async () => {

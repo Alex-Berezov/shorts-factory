@@ -31,10 +31,18 @@ const SHUTDOWN_TIMEOUT_MS = 25_000;
  * drain, and the jobs it was running come back to the queue as stalled, which
  * is safe because every job is idempotent. Compose only ever sends SIGTERM,
  * so the graceful stop of a container is not affected.
+ *
+ * A stop the failed start began has no jobs to drain; its first Ctrl+C is told
+ * that the next one leaves, and that one leaves with 1 - the start broke, and
+ * nobody interrupted it (texts: docs/DECISIONS.md, Р7 E0-12R).
  */
 const REPEATED_SIGINT: RepeatedSigint = {
   hint: "press Ctrl+C again to exit now; unfinished jobs will be retried",
   forcedMessage: "forced exit, active jobs return as stalled",
+  afterFailedStart: {
+    hint: "shutdown after startup failure is already in progress, press Ctrl+C again to exit now",
+    forcedMessage: "forced exit, shutdown after startup failure did not finish",
+  },
 };
 
 /**

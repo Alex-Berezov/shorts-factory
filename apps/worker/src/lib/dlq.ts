@@ -110,8 +110,16 @@ export function toDlqRecord(
 export interface DlqOptions {
   /** The queue whose failures are being watched. */
   queue: QueueName;
-  /** The `system.dlq` queue the copy is added to. */
-  dlq: EnqueueTarget;
+  /**
+   * The `system.dlq` queue the copy is added to, asked for at every copy
+   * rather than held: the queue factory forgets a `Queue` whose connection was
+   * refused and builds a new one on the next request (`QueueFactory.get`), and
+   * a writer that held the first one would add every copy to a broken object
+   * for the life of the process. Called inside the `try` of the copy, so a
+   * refusal to hand one out - a factory already closed - is a copy that
+   * failed, not a rejection.
+   */
+  dlq: () => EnqueueTarget;
   log: Logger;
   /** Seam for tests; the clock is the process one in production. */
   now?: () => Date;
@@ -171,7 +179,7 @@ export function createFailedHandler(
           dlqTimestamp(job.timestamp),
         );
       }
-      await options.dlq.add("system.dlq", record, opts);
+      await options.dlq().add("system.dlq", record, opts);
       options.log.error(
         { queue: options.queue, jobId: record.jobId, err },
         "job failed for good, copied to the dlq",

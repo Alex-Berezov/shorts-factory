@@ -1,11 +1,7 @@
 import { type Env, buildLimits } from "@sf/config";
 import { QUEUE_NAMES, type QueueName } from "@sf/core";
 import { type BudgetGuard, type Db, createUsageLogger } from "@sf/db";
-import {
-  type QueueFactory,
-  connectionFailure,
-  markClientErrors,
-} from "@sf/runtime";
+import { type QueueFactory, workerErrorPolicy } from "@sf/runtime";
 import { Worker } from "bullmq";
 import type { Redis } from "ioredis";
 import type { Logger } from "pino";
@@ -24,13 +20,6 @@ import {
   startQueueSwitchSync,
 } from "./lib/queue-switches.js";
 import { syncSchedules } from "./schedules.js";
-
-/**
- * How long an unmarked connection failure of a `Worker` silences the next one
- * when the worker does not say `ready` in between (the `error` listener in
- * `startWorkerRuntime`).
- */
-export const CONNECTION_FAILURE_LOG_WINDOW_MS = 60_000;
 
 /**
  * The worker itself: queues, workers, the DLQ wiring, the queue switches and
@@ -64,6 +53,12 @@ export interface WorkerRuntimeDeps {
    * Overridable so a test can watch what the runtime does with the queues -
    * how long a dlq write takes, in particular. Production opens its own and
    * closes them in `closeQueues`.
+   *
+   * Built on `redis` above, and nothing else: the `Worker`s run on `redis`
+   * and read the mark of this factory (`clientErrors`), which knows only the
+   * errors of the client the factory was built on. A factory on another
+   * client would leave every error of `redis` unmarked - a `worker error`
+   * line per worker per reconnect.
    */
   queues?: QueueFactory;
 }
@@ -96,11 +91,14 @@ export async function startWorkerRuntime(
     });
   const queues = deps.queues ?? createJobQueueFactory(deps.redis, deps.log);
   const getQueue = (name: QueueName) => queues.get(name);
-  // Before the first `Worker` is built on the client: BullMQ hands every error
-  // of the shared client to every `Worker` on it, and this listener has to run
-  // ahead of theirs for the copy they hear to be marked. The client writes its
-  // own line; one more per worker would be a line per queue per reconnect.
-  const clientErrors = markClientErrors(deps.redis);
+  // The mark the factory put on the shared client before its first `Queue`,
+  // so before the first `Worker` too: BullMQ hands every error of the client
+  // to every `Worker` on it, and the mark has to run ahead of their listeners
+  // for the copy they hear to be marked. One mark per client, and one owner of
+  // it - the factory takes it off in its `close()`, which `close()` below
+  // runs after the `Worker`s whatever they answered. A `Worker` that refused
+  // to close and still hears the client hears it unmarked from then on.
+  const { clientErrors } = queues;
 
   const workers = new Map<QueueName, Worker>();
   const dlqWriters: DlqWriter[] = [];
@@ -118,16 +116,27 @@ export async function startWorkerRuntime(
     // never rejects (see `lib/queue-switches.ts`), so the close below runs.
     await stopSwitchSync();
     // `close()` without `force`: it stops taking new jobs and waits for the
-    // ones in flight - the whole point of a graceful stop.
-    try {
-      await Promise.all([...workers.values()].map((worker) => worker.close()));
-    } finally {
-      // No `Worker` hears the client any more.
-      clientErrors.dispose();
-    }
-    // Only now can no new failure arrive; what is left is the copies already
-    // on their way to `system.dlq`, which the next stage would cut off.
+    // ones in flight - the whole point of a graceful stop. Every `Worker` is
+    // waited for, a refusal of one included: a refusal is no reason to leave
+    // the others closing, nor to skip the drain below. The mark on the client
+    // is not this stage's to take off; the factory does it in `closeQueues`.
+    const workerList = [...workers.values()];
+    const outcomes = await Promise.allSettled(
+      workerList.map((worker) => worker.close()),
+    );
+    // A `Worker` that closed runs no job any more, so no new failure of it
+    // can arrive; one that refused may still be running one, and a copy it
+    // starts after the drain below is not waited for - the factory closed
+    // next may cut it off. What the drain does keep is every copy already on
+    // its way to `system.dlq`, and it runs before the refusal is thrown,
+    // since `close()` closes the factory after a refused stage too.
     await Promise.all(dlqWriters.map((writer) => writer.drain()));
+    throwRefusals(
+      outcomes.flatMap((outcome) =>
+        outcome.status === "rejected" ? [outcome.reason] : [],
+      ),
+      (count) => `${count} of ${workerList.length} workers failed to close`,
+    );
   };
 
   const closeQueues = async (): Promise<void> => {
@@ -161,10 +170,45 @@ export async function startWorkerRuntime(
     closeWorkers,
     closeQueues,
     async close(): Promise<void> {
-      await closeWorkers();
-      await closeQueues();
+      // The queues are closed even when a `Worker` refused to: only the
+      // factory takes its mark off the client. The refusal of the workers is
+      // the one thrown; when the queues refuse as well, both go out in one
+      // `AggregateError`, the workers first.
+      const refusals: unknown[] = [];
+      try {
+        await closeWorkers();
+      } catch (err) {
+        refusals.push(err);
+      }
+      try {
+        await closeQueues();
+      } catch (err) {
+        refusals.push(err);
+      }
+      throwRefusals(
+        refusals,
+        () => "the workers and the queues both failed to close",
+      );
     },
   };
+
+  /**
+   * The refusals of one stop, thrown the way both stages above throw them:
+   * nothing for none, a single one as it came, several together in one
+   * `AggregateError` in the order they were collected - so that none of them
+   * is lost behind another.
+   */
+  function throwRefusals(
+    refusals: unknown[],
+    message: (count: number) => string,
+  ): void {
+    if (refusals.length === 1) {
+      throw refusals[0];
+    }
+    if (refusals.length > 1) {
+      throw new AggregateError(refusals, message(refusals.length));
+    }
+  }
 
   /** The start itself; everything it opens is reachable from above. */
   async function startEverything(): Promise<void> {
@@ -204,7 +248,10 @@ export async function startWorkerRuntime(
 
     await syncSchedules({ getQueue, log: deps.log });
 
-    const dlq = queues.get("system.dlq");
+    // Asked for at every copy rather than held (`lib/dlq.ts`): the factory
+    // forgets a `Queue` whose `init()` was refused, and a held one would stay
+    // broken for the life of the process.
+    const dlq = () => queues.get("system.dlq");
 
     // Walked in registry order, and the entry is checked rather than cast: the
     // map is `Partial`, so a name whose value is `undefined` (a registry built
@@ -244,43 +291,22 @@ export async function startWorkerRuntime(
         dlqWriter.onFailed(job, err);
       });
       // Without an `error` listener a connection problem reaches the process as
-      // an unhandled `EventEmitter` error and does the same. Not written is an
-      // error of the shared client: the client's own line has it, and every
-      // worker on the client hears the same object. Each `Worker` also holds a
-      // blocking copy of the client of its own (BullMQ duplicates it), whose
-      // errors reach the worker unmarked and are nobody else's to write - so
-      // here the worker departs from the factory of `Queue`, which writes no
-      // connection failure at all (docs/DECISIONS.md, Т9 E0-12G). An unmarked
-      // connection failure is written once, and again after either of two
-      // things: the worker says `ready` - its copy came back - or
-      // `CONNECTION_FAILURE_LOG_WINDOW_MS` has passed since the last line, by
-      // the monotonic clock (`performance.now()`): a wall clock set back would
-      // keep the window shut for as long as it went back. The window is for an
-      // unmarked failure that is not the copy's (a `ConnectionClosedError` of
-      // `run()`): no `ready` follows it, and without the window it would
-      // silence the next outage of the copy for good. At worst a line per
-      // worker per window, not one per reconnect. A wrong password on the
-      // copies is still one line per worker per reconnect (docs/TECH_DEBT.md
-      // § E0-12R).
-      let connectionFailureWrittenAt: number | undefined;
+      // an unhandled `EventEmitter` error and does the same. What is written is
+      // the rule of `workerErrorPolicy` of `@sf/runtime`, next to the rule of
+      // the `Queue`s on the same client: not an error of the shared client, not
+      // a refused password, an unmarked connection failure of the blocking copy
+      // of the client once until the worker is `ready` again or the window has
+      // passed (docs/DECISIONS.md, Т9 E0-12G), anything else every time. One
+      // instance per `Worker`: the line of one worker silences nothing of
+      // another.
+      const errorPolicy = workerErrorPolicy(clientErrors);
       worker.on("ready", () => {
-        connectionFailureWrittenAt = undefined;
+        errorPolicy.onReady();
       });
       worker.on("error", (err) => {
-        if (clientErrors.has(err)) {
-          return;
+        if (errorPolicy.shouldWrite(err)) {
+          deps.log.error({ queue: name, err }, "worker error");
         }
-        if (connectionFailure(err) !== undefined) {
-          const now = performance.now();
-          if (
-            connectionFailureWrittenAt !== undefined &&
-            now - connectionFailureWrittenAt < CONNECTION_FAILURE_LOG_WINDOW_MS
-          ) {
-            return;
-          }
-          connectionFailureWrittenAt = now;
-        }
-        deps.log.error({ queue: name, err }, "worker error");
       });
 
       workers.set(name, worker);

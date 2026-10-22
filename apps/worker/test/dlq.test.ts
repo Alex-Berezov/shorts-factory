@@ -122,7 +122,7 @@ describe("createFailedHandler", () => {
     const dlq = fakeDlq();
     const onFailed = createFailedHandler({
       queue: "radar.score",
-      dlq,
+      dlq: () => dlq,
       log: silent,
       now: () => new Date("2026-09-10T10:00:00.000Z"),
     });
@@ -144,7 +144,7 @@ describe("createFailedHandler", () => {
     const dlq = fakeDlq();
     const onFailed = createFailedHandler({
       queue: "radar.score",
-      dlq,
+      dlq: () => dlq,
       log: silent,
       now: () => new Date("2026-09-10T10:00:00.000Z"),
     });
@@ -206,7 +206,7 @@ describe("createFailedHandler", () => {
     const dlq = fakeDlq();
     const onFailed = createFailedHandler({
       queue: "radar.score",
-      dlq,
+      dlq: () => dlq,
       log: silent,
     });
 
@@ -219,7 +219,7 @@ describe("createFailedHandler", () => {
     const dlq = fakeDlq();
     const onFailed = createFailedHandler({
       queue: "radar.score",
-      dlq,
+      dlq: () => dlq,
       log: silent,
     });
 
@@ -241,7 +241,7 @@ describe("createFailedHandler", () => {
     const recorder = recordingLogger();
     const onFailed = createFailedHandler({
       queue: "radar.score",
-      dlq,
+      dlq: () => dlq,
       log: recorder.log,
     });
 
@@ -249,6 +249,48 @@ describe("createFailedHandler", () => {
       onFailed(failedJob(), new Error("boom")),
     ).resolves.toBeUndefined();
     expect(errorsOf(recorder)).toHaveLength(1);
+  });
+
+  it("asks for the dlq at every copy, so a queue built anew gets the next one", async () => {
+    // The queue factory forgets a `system.dlq` whose `init()` was refused and
+    // hands out a new one; a handler that held the first would keep adding
+    // to a broken object.
+    const broken = fakeDlq();
+    const rebuilt = fakeDlq();
+    let current = broken;
+    const onFailed = createFailedHandler({
+      queue: "radar.score",
+      dlq: () => current,
+      log: silent,
+    });
+
+    await onFailed(failedJob(), new Error("boom"));
+    current = rebuilt;
+    await onFailed(failedJob({ id: "radar.score/def/24h" }), new Error("boom"));
+
+    expect(broken.add).toHaveBeenCalledTimes(1);
+    expect(rebuilt.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs a dlq that could not be handed out instead of rejecting", async () => {
+    // A factory that is already closed refuses the queue with a throw.
+    const recorder = recordingLogger();
+    const onFailed = createFailedHandler({
+      queue: "radar.score",
+      dlq: () => {
+        throw new Error(
+          'queue "system.dlq" requested after the queue factory was closed',
+        );
+      },
+      log: recorder.log,
+    });
+
+    await expect(
+      onFailed(failedJob(), new Error("boom")),
+    ).resolves.toBeUndefined();
+    expect(errorsOf(recorder)).toEqual([
+      expect.objectContaining({ msg: "failed to copy a job to the dlq" }),
+    ]);
   });
 });
 
@@ -272,7 +314,11 @@ describe("createDlqWriter", () => {
     // the queues and the connection while the copy is in flight, and the
     // record E13-02 exists to show is lost - into the `catch` of the writer.
     const dlq = heldDlq();
-    const writer = createDlqWriter({ queue: "radar.score", dlq, log: silent });
+    const writer = createDlqWriter({
+      queue: "radar.score",
+      dlq: () => dlq,
+      log: silent,
+    });
     let drained = false;
 
     writer.onFailed(failedJob(), new Error("boom"));
@@ -291,7 +337,11 @@ describe("createDlqWriter", () => {
 
   it("returns at once when nothing is in flight", async () => {
     const dlq = fakeDlq();
-    const writer = createDlqWriter({ queue: "radar.score", dlq, log: silent });
+    const writer = createDlqWriter({
+      queue: "radar.score",
+      dlq: () => dlq,
+      log: silent,
+    });
 
     await expect(writer.drain()).resolves.toBeUndefined();
 
@@ -311,7 +361,7 @@ describe("createDlqWriter", () => {
     };
     const writer = createDlqWriter({
       queue: "radar.score",
-      dlq,
+      dlq: () => dlq,
       log: recorder.log,
     });
 

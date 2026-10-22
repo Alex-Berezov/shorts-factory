@@ -26,9 +26,20 @@ afterEach(() => {
 const FORCED = "forced exit, active jobs return as stalled";
 const HINT = "press Ctrl+C again to exit now; unfinished jobs will be retried";
 const SAME_KEYPRESS = "repeated SIGINT within the window, same keypress";
+const FAILED_START_HINT =
+  "shutdown after startup failure is already in progress, press Ctrl+C again to exit now";
+const FAILED_START_FORCED =
+  "forced exit, shutdown after startup failure did not finish";
 
 /** The worker's choice: a second Ctrl+C leaves at once. */
-const FORCE_ON_SIGINT: RepeatedSigint = { hint: HINT, forcedMessage: FORCED };
+const FORCE_ON_SIGINT: RepeatedSigint = {
+  hint: HINT,
+  forcedMessage: FORCED,
+  afterFailedStart: {
+    hint: FAILED_START_HINT,
+    forcedMessage: FAILED_START_FORCED,
+  },
+};
 
 /** A handler with the parts a case does not care about filled in. */
 function handler(
@@ -458,6 +469,25 @@ describe("one pass", () => {
     expect([...closed].sort()).toEqual(["app", "db", "queues", "redis"]);
     expect(codes).toEqual([1]);
   });
+
+  it.each(["SIGINT", "SIGTERM"])(
+    "leaves with 1 from a stop %s started when it is asked as a failure",
+    async (signal) => {
+      // A command whose check a signal cut short: nothing was proven, and the
+      // clean stop of a signal must not read as a pass (docs/DECISIONS.md,
+      // Р6 E0-12R).
+      const closed: string[] = [];
+      const codes: number[] = [];
+
+      await handler({
+        plan: workerPlan(closed),
+        exit: (code) => codes.push(code),
+      })(signal, { failed: true });
+
+      expect(closed).toHaveLength(4);
+      expect(codes).toEqual([1]);
+    },
+  );
 });
 
 describe("the deadline", () => {
@@ -705,16 +735,19 @@ describe("a second Ctrl+C with the forced exit on", () => {
     expect(forced?.failed).toBe(false);
   });
 
-  it("does not force a stop the failed start began", async () => {
-    // Nobody pressed anything to begin this stop, so there is no keypress to
-    // repeat and no stalled job to warn about; the code stays the failure's.
-    const codes: number[] = [];
-    const { log, lines } = recordingLogger();
+  /**
+   * A stop the failed start began: nobody pressed anything to begin it, and
+   * the first line of the stop went to nobody at the console. Revised on
+   * 22.10.2026 (docs/DECISIONS.md, Р7 E0-12R; before, 17.10.2026, a Ctrl+C
+   * there was only "shutdown already in progress" and the operator waited
+   * for the deadline).
+   */
+  function failedStart(log = silentLogger(), codes: number[] = []) {
     let release: () => void = () => {};
     const shutdown = handler({
       plan: [
         {
-          name: "workers",
+          name: "redis",
           close: () =>
             new Promise<void>((resolve) => {
               release = resolve;
@@ -727,8 +760,15 @@ describe("a second Ctrl+C with the forced exit on", () => {
       timeoutMs: 60_000,
       exit: (code) => codes.push(code),
     });
-
     const stopping = shutdown("startup failure", { failed: true });
+    return { shutdown, stopping, release: () => release() };
+  }
+
+  it("answers the first Ctrl+C of a stop the failed start began with a hint, not an exit", async () => {
+    const codes: number[] = [];
+    const { log, lines } = recordingLogger();
+    const { shutdown, stopping, release } = failedStart(log, codes);
+
     await vi.advanceTimersByTimeAsync(SIGINT_REPEAT_WINDOW_MS);
     await shutdown("SIGINT");
     expect(codes).toEqual([]);
@@ -736,11 +776,72 @@ describe("a second Ctrl+C with the forced exit on", () => {
     await stopping;
 
     expect(codes).toEqual([1]);
+    expect(
+      lines.filter((line) => line.msg === FAILED_START_HINT),
+    ).toMatchObject([{ level: "info", signal: "SIGINT", failed: true }]);
+    expect(lines.map((line) => line.msg)).not.toContain(FAILED_START_FORCED);
     expect(lines.map((line) => line.msg)).not.toContain(FORCED);
-    const repeated = lines.find(
-      (line) => line.msg === "shutdown already in progress",
+  });
+
+  it("leaves with the failure's code on the next Ctrl+C after the window", async () => {
+    const codes: number[] = [];
+    const { log, lines } = recordingLogger();
+    const { shutdown } = failedStart(log, codes);
+
+    await shutdown("SIGINT");
+    await vi.advanceTimersByTimeAsync(SIGINT_REPEAT_WINDOW_MS);
+    await shutdown("SIGINT");
+
+    expect(codes).toEqual([1]);
+    const forced = lines.find((line) => line.level === "error");
+    expect(forced).toMatchObject({ msg: FAILED_START_FORCED, failed: true });
+    expect(lines.map((line) => line.msg)).not.toContain(FORCED);
+  });
+
+  it("takes copies of the first Ctrl+C after a failed start for one keypress, and hints once", async () => {
+    // The window is opened by the hint, not by the stop: a keypress that
+    // arrives twice right behind the hint must not leave.
+    const codes: number[] = [];
+    const { log, lines } = recordingLogger();
+    const { shutdown } = failedStart(log, codes);
+
+    await vi.advanceTimersByTimeAsync(SIGINT_REPEAT_WINDOW_MS - 1);
+    await shutdown("SIGINT");
+    // The window of the stop itself would end here; the hint opened its own.
+    await vi.advanceTimersByTimeAsync(1);
+    await shutdown("SIGINT");
+    await vi.advanceTimersByTimeAsync(SIGINT_REPEAT_WINDOW_MS - 2);
+    await shutdown("SIGINT");
+
+    expect(codes).toEqual([]);
+    expect(lines.filter((line) => line.msg === FAILED_START_HINT)).toHaveLength(
+      1,
     );
-    expect(repeated?.level).toBe("info");
+    expect(
+      lines.filter((line) => line.msg === SAME_KEYPRESS).map((l) => l.level),
+    ).toEqual(["debug", "debug"]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await shutdown("SIGINT");
+    expect(codes).toEqual([1]);
+  });
+
+  it("only logs a SIGTERM during a stop the failed start began", async () => {
+    // An orchestrator that repeats its SIGTERM wants the same graceful stop.
+    const codes: number[] = [];
+    const { log, lines } = recordingLogger();
+    const { shutdown, stopping, release } = failedStart(log, codes);
+
+    await vi.advanceTimersByTimeAsync(SIGINT_REPEAT_WINDOW_MS);
+    await shutdown("SIGTERM");
+    release();
+    await stopping;
+
+    expect(codes).toEqual([1]);
+    expect(
+      lines.find((line) => line.msg === "shutdown already in progress"),
+    ).toMatchObject({ level: "info", signal: "SIGTERM" });
+    expect(lines.map((line) => line.msg)).not.toContain(FAILED_START_HINT);
   });
 
   it("forces the exit with the failure's code when the start failed during a signal's stop", async () => {

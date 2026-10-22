@@ -4,8 +4,9 @@ import { errorCode } from "@sf/core";
  * Which failures mean "the dependency is not there" rather than "it answered
  * badly" - one set, read by the status page of the api (`system-status.ts`,
  * which adds the codes of postgres-js and the classes of a refusal) and by the
- * `error` listener of every `Queue` (`queues.ts`), so that the two cannot
- * disagree about the same ioredis error.
+ * `error` listeners of every `Queue` and `Worker` (`client-errors.ts`), so
+ * that they cannot disagree about the same ioredis error. A refused password
+ * is a class of its own (`authFailure`): the server is there and answered.
  */
 
 /**
@@ -85,4 +86,34 @@ export function connectionFailure(err: unknown): ConnectionFailure | undefined {
     return "unreachable";
   }
   return undefined;
+}
+
+/**
+ * The first word of a Redis reply that refuses the credentials of the client:
+ * a wrong password or user (`WRONGPASS`), none given where one is required
+ * (`NOAUTH`).
+ */
+const REDIS_AUTH_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  "WRONGPASS",
+  "NOAUTH",
+]);
+
+/**
+ * Whether `err` is Redis refusing the credentials of the client - not a
+ * connection failure (the server is there and answered), and not a defect of
+ * a `Queue` or a `Worker` either: every connection with the same credentials
+ * gets the same refusal on every reconnect.
+ *
+ * ioredis raises a refusal of the server as a `ReplyError` whose message is
+ * the reply itself, and the first word of a reply is the error code of the
+ * Redis protocol - a fixed token, compared whole against a constant set. It
+ * is never a host, a port or a password (those, if anywhere, come after it),
+ * so this reads no free text the way `connectionFailure` refuses to.
+ */
+export function authFailure(err: unknown): boolean {
+  if (!(err instanceof Error) || err.name !== "ReplyError") {
+    return false;
+  }
+  const [code = ""] = err.message.split(" ", 1);
+  return REDIS_AUTH_REFUSAL_CODES.has(code);
 }

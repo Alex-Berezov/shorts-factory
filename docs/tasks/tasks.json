@@ -1955,8 +1955,9 @@
       "E0-12Q"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-19"
+    "status": "in_progress",
+    "added_at": "2026-10-19",
+    "started_at": "2026-10-22"
   },
   {
     "id": "E0-12S",
@@ -2053,6 +2054,19 @@
       "E0-12G",
       "E0-12P",
       "E0-12Q"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-22"
+  },
+  {
+    "id": "E0-12Z",
+    "epic": "E0",
+    "title": "@sf/core, worker healthcheck, api, test-support: один ответ на неверные часы, причина healthcheck по классу без текста клиента, waitForLine по событию и responseTime, докблоки queue-stats и порядок стадий",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-12R"
     ],
     "doc": "TECH_DEBT.md",
     "status": "todo",

@@ -25,6 +25,13 @@ const fakes = vi.hoisted(() => {
     readonly options: Record<string, unknown>;
     readonly listeners = new Map<string, Array<(err: Error) => void>>();
     closed = false;
+    /** How many times anybody asked for the verdict on `init()`. */
+    waitedForReady = 0;
+    /**
+     * Where BullMQ keeps the job scheduler a `upsertJobScheduler` built; set
+     * by a case that wants the `Queue` to have one.
+     */
+    _jobScheduler: { close(): Promise<void> } | undefined;
     private readonly initializing: Promise<void>;
     /** Takes the listener this `Queue` put on the client off it again. */
     private readonly stopHearing: () => void = () => {};
@@ -83,8 +90,37 @@ const fakes = vi.hoisted(() => {
       }
     }
 
-    async waitUntilReady(): Promise<void> {
-      await this.initializing;
+    /**
+     * What BullMQ's getter does (`queue.js`, `get jobScheduler`, an `async`
+     * executor of a `new Promise`): the scheduler is built, and the field set,
+     * only once the client of the `Queue` is there; a refused client is a
+     * rejection nobody handles, and the promise handed out never settles.
+     */
+    get jobScheduler(): Promise<{ close(): Promise<void> }> {
+      return new Promise((resolve) => {
+        void (async () => {
+          await this.initializing;
+          this._jobScheduler ??= state.scheduler(this.name);
+          resolve(this._jobScheduler);
+        })();
+      });
+    }
+
+    /** What BullMQ does (`queue.js`): the scheduler first, then the command. */
+    async upsertJobScheduler(id: string): Promise<string> {
+      await this.jobScheduler;
+      return id;
+    }
+
+    /**
+     * What BullMQ does (`queue-base.js`, `waitUntilReady() { return
+     * this.client; }`): the very promise every command awaits, not a new one
+     * that settles a tick later - the order in which the factory and a read
+     * hear a refusal depends on it.
+     */
+    waitUntilReady(): Promise<void> {
+      this.waitedForReady += 1;
+      return this.initializing;
     }
 
     async count(): Promise<number> {
@@ -111,6 +147,8 @@ const fakes = vi.hoisted(() => {
     command: () => Promise<number>;
     /** What the `close()` of the `Queue` of this name does after it is marked. */
     closeOf: (name: string) => Promise<void>;
+    /** The job scheduler the getter of a `Queue` of this name builds. */
+    scheduler: (name: string) => { close(): Promise<void> };
     built: FakeQueue[];
     // `INIT_MS`, which is not hoisted.
   } = {
@@ -118,6 +156,7 @@ const fakes = vi.hoisted(() => {
     initMs: 5,
     command: async () => 1,
     closeOf: async () => {},
+    scheduler: () => ({ close: async () => {} }),
     built: [],
   };
 
@@ -171,6 +210,7 @@ beforeEach(() => {
   state.initMs = INIT_MS;
   state.command = async () => 1;
   state.closeOf = async () => {};
+  state.scheduler = () => ({ close: async () => {} });
 });
 
 /**
@@ -448,6 +488,30 @@ describe("createQueueFactory", () => {
     expect(built[1]?.closed).toBe(false);
   });
 
+  it("hands a read that retries from its own refusal a new queue, not the refused one", async () => {
+    // The retry runs in the handler of the refusal, on the same turn: the
+    // factory has to have forgotten the `Queue` by then, or the retry gets
+    // the broken object back.
+    vi.useFakeTimers();
+    const factory = open({
+      connection,
+      log: recordingLogger().log,
+      readOnly: true,
+    });
+    state.initRefusal = new Error("Connection is closed.");
+
+    const retried = factory.use("system.smoke", countOf).then(
+      () => undefined,
+      () => factory.get("system.smoke"),
+    );
+    await vi.advanceTimersByTimeAsync(INIT_MS);
+
+    const again = await retried;
+    expect(built).toHaveLength(2);
+    expect(again).toBe(built[1]);
+    expect(again).not.toBe(built[0]);
+  });
+
   it("keeps a queue whose read failed after its init succeeded", async () => {
     vi.useFakeTimers();
     const factory = open({
@@ -652,5 +716,518 @@ describe("createQueueFactory", () => {
     expect(() => factory.get("system.smoke")).toThrow(
       /after the queue factory was closed/,
     );
+  });
+});
+
+describe("the verdict on init()", () => {
+  it("asks for it once per queue, however many errors the queue hears", async () => {
+    // A Redis that is down leaves `init()` pending for as long as it is down;
+    // a handler per error on that promise piled up for the life of the
+    // process.
+    vi.useFakeTimers();
+    state.initMs = 60_000;
+    const factory = open({
+      connection,
+      log: recordingLogger().log,
+      readOnly: false,
+      defaultJobOptions: POLICY,
+    });
+    const queue = fake(factory.get("system.smoke"));
+
+    for (let index = 0; index < 20; index += 1) {
+      queue.emit("error", new Error(`Missing key for job ${index}`));
+    }
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(queue.waitedForReady).toBe(1);
+  });
+
+  it("writes an error a moment after it came when the verdict is not in yet", async () => {
+    vi.useFakeTimers();
+    state.initMs = 60_000;
+    const { log, lines } = recordingLogger();
+    const factory = open({ connection, log, readOnly: true });
+    const queue = fake(factory.get("system.smoke"));
+
+    queue.emit("error", new Error("Missing key for job 42"));
+    expect(lines).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(lines.map((line) => line.msg)).toEqual(["queue error"]);
+  });
+
+  it("writes an error of a ready queue at once", async () => {
+    vi.useFakeTimers();
+    const { log, lines } = recordingLogger();
+    const factory = open({ connection, log, readOnly: true });
+    const queue = fake(factory.get("system.smoke"));
+    await vi.advanceTimersByTimeAsync(INIT_MS);
+
+    queue.emit("error", new Error("Missing key for job 42"));
+
+    expect(lines.map((line) => line.msg)).toEqual(["queue error"]);
+  });
+
+  it("forgets a writer whose init Redis refused, with no read, and says so once per queue", async () => {
+    // The worker adds jobs through its queues and never reads them: a
+    // permission the user of the client lacks broke them for good, and
+    // nothing said so.
+    vi.useFakeTimers();
+    const { log, lines } = recordingLogger();
+    const factory = open({
+      connection,
+      log,
+      readOnly: false,
+      defaultJobOptions: POLICY,
+    });
+    state.initRefusal = Object.assign(
+      new Error("NOPERM User sf has no permissions to run the 'info' command"),
+      { name: "ReplyError" },
+    );
+    const names = QUEUE_NAMES.slice(0, 3);
+    const first = names.map((name) => factory.get(name));
+    await vi.advanceTimersByTimeAsync(INIT_MS + 100);
+
+    expect(lines.map((line) => [line.level, line.msg, line.queue])).toEqual(
+      names.map((name) => ["error", "queue init refused", name]),
+    );
+    expect(lines[0]?.err).toMatchObject({
+      message: expect.stringMatching(/^NOPERM/),
+    });
+    expect(first.map((queue) => fake(queue).closed)).toEqual([
+      true,
+      true,
+      true,
+    ]);
+
+    // Redis is fixed; the next write must not get the broken object.
+    state.initRefusal = undefined;
+    const next = names.map((name) => factory.get(name));
+    expect(next.every((queue, index) => queue !== first[index])).toBe(true);
+  });
+
+  it("says nothing of a name refused again, and still speaks of another name", async () => {
+    // The switch resync of the worker asks for every name on each pass: a
+    // permission still missing would be a line per queue per pass
+    // (docs/DECISIONS.md, Р1 E0-12R, clarification 1).
+    vi.useFakeTimers();
+    const { log, lines } = recordingLogger();
+    const factory = open({
+      connection,
+      log,
+      readOnly: false,
+      defaultJobOptions: POLICY,
+    });
+    state.initRefusal = Object.assign(
+      new Error("NOPERM User sf has no permissions to run the 'info' command"),
+      { name: "ReplyError" },
+    );
+
+    const first = factory.get("system.smoke");
+    await vi.advanceTimersByTimeAsync(INIT_MS + 100);
+    // The next passes: a new `Queue` each, refused the same way.
+    const second = factory.get("system.smoke");
+    await vi.advanceTimersByTimeAsync(INIT_MS + 100);
+    factory.get("system.smoke");
+    await vi.advanceTimersByTimeAsync(INIT_MS + 100);
+    factory.get("system.heartbeat");
+    await vi.advanceTimersByTimeAsync(INIT_MS + 100);
+
+    expect(lines.map((line) => [line.level, line.msg, line.queue])).toEqual([
+      ["error", "queue init refused", "system.smoke"],
+      ["error", "queue init refused", "system.heartbeat"],
+    ]);
+    // Silence is not keeping: every refused `Queue` is still thrown away.
+    expect(second).not.toBe(first);
+    expect(built.map((queue) => queue.closed)).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
+  });
+
+  it.each([
+    ["a connection failure", new Error("Connection is closed.")],
+    [
+      "a refused password",
+      Object.assign(new Error("WRONGPASS invalid username-password pair"), {
+        name: "ReplyError",
+      }),
+    ],
+  ])(
+    "forgets a writer whose init was refused by %s, without a line of its own",
+    async (_what, refusal) => {
+      // The client reports both; a line per queue on top would be a line per
+      // queue per pass.
+      vi.useFakeTimers();
+      const { log, lines } = recordingLogger();
+      const factory = open({
+        connection,
+        log,
+        readOnly: false,
+        defaultJobOptions: POLICY,
+      });
+      state.initRefusal = refusal;
+      const first = factory.get("system.smoke");
+      await vi.advanceTimersByTimeAsync(INIT_MS + 100);
+
+      expect(lines).toEqual([]);
+      state.initRefusal = undefined;
+      expect(factory.get("system.smoke")).not.toBe(first);
+    },
+  );
+
+  it.each([
+    ["a connection failure", () => new Error("Connection is closed.")],
+    [
+      "a refused password",
+      () =>
+        Object.assign(new Error("WRONGPASS invalid username-password pair"), {
+          name: "ReplyError",
+        }),
+    ],
+  ])(
+    "writes no line for %s heard while the verdict is not in, nor when it comes",
+    async (_what, refusal) => {
+      // The refusal reaches the listener ahead of the verdict, from the
+      // client or from BullMQ; on a Redis that is down that is every queue.
+      vi.useFakeTimers();
+      const { log, lines } = recordingLogger();
+      const factory = open({
+        connection,
+        log,
+        readOnly: false,
+        defaultJobOptions: POLICY,
+      });
+      const err = refusal();
+      state.initRefusal = err;
+      const queue = fake(factory.get("system.smoke"));
+
+      queue.emit("error", err);
+      await vi.advanceTimersByTimeAsync(INIT_MS + 1_000);
+
+      expect(lines).toEqual([]);
+    },
+  );
+
+  it("forgets a reader whose init Redis refused, without a line", async () => {
+    // Every read of it is refused with the reason and reports it.
+    vi.useFakeTimers();
+    const { log, lines } = recordingLogger();
+    const factory = open({ connection, log, readOnly: true });
+    state.initRefusal = Object.assign(new Error("NOPERM no permissions"), {
+      name: "ReplyError",
+    });
+    const first = factory.get("system.smoke");
+    await vi.advanceTimersByTimeAsync(INIT_MS + 100);
+
+    expect(lines).toEqual([]);
+    state.initRefusal = undefined;
+    expect(factory.get("system.smoke")).not.toBe(first);
+  });
+});
+
+describe("the close of the factory", () => {
+  it("is one close for two callers, with one mark taken off", async () => {
+    const client = new Redis({ lazyConnect: true, port: 6399 });
+    const factory = open({
+      connection: client,
+      log: recordingLogger().log,
+      readOnly: true,
+    });
+    const takenOff = vi.spyOn(client, "off");
+    factory.get("system.smoke");
+    // A listener on the client that belongs to somebody else.
+    const other = (): void => {};
+    client.on("error", other);
+
+    const first = factory.close();
+    const second = factory.close();
+    expect(second).toBe(first);
+    await Promise.all([first, second]);
+
+    expect(client.listeners("error")).toEqual([other]);
+    expect(built.filter((queue) => queue.closed)).toHaveLength(1);
+    // Taken off once each - the listener of the queue and the mark - and not
+    // a second time by a second pass.
+    expect(
+      takenOff.mock.calls.filter(([event]) => event === "error"),
+    ).toHaveLength(2);
+  });
+
+  it("hands a second caller the refusal of the first", async () => {
+    const factory = open({
+      connection,
+      log: recordingLogger().log,
+      readOnly: true,
+    });
+    state.closeOf = async () => {
+      throw new Error("the queue refused to close");
+    };
+    factory.get("system.smoke");
+
+    const first = factory.close();
+    const second = factory.close();
+    const [verdict, again] = await Promise.allSettled([first, second]);
+
+    expect(verdict).toMatchObject({
+      status: "rejected",
+      reason: { message: "1 of 1 queues failed to close" },
+    });
+    expect(again).toEqual(verdict);
+  });
+
+  it("stops waiting for a queue it threw away whose close never ends", async () => {
+    vi.useFakeTimers();
+    const factory = open({
+      connection,
+      log: recordingLogger().log,
+      readOnly: true,
+      drainTimeoutMs: 20,
+    });
+    state.initRefusal = new Error("Connection is closed.");
+    // A close that hangs for real: nothing ever resolves it.
+    state.closeOf = () => new Promise<void>(() => {});
+    factory.get("system.smoke");
+    await vi.advanceTimersByTimeAsync(INIT_MS);
+    expect(built[0]?.closed).toBe(true);
+
+    let settled = false;
+    const closing = factory.close().finally(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(19);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await closing;
+
+    expect(settled).toBe(true);
+  });
+
+  it("writes no queue error that comes due after the close", async () => {
+    // The error came while `init()` had no verdict; the line would be
+    // written once the verdict was read, by which time the process is
+    // stopping.
+    vi.useFakeTimers();
+    state.initMs = 60_000;
+    const { log, lines } = recordingLogger();
+    const factory = open({ connection, log, readOnly: true });
+    const queue = fake(factory.get("system.smoke"));
+
+    queue.emit("error", new Error("Missing key for job 42"));
+    await factory.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(lines).toEqual([]);
+  });
+
+  it("closes the job scheduler of a queue before the queue", async () => {
+    // BullMQ closes the `Repeat` of a queue and not its `JobScheduler`,
+    // whose listeners stay on the shared client.
+    const order: string[] = [];
+    const factory = open({
+      connection,
+      log: recordingLogger().log,
+      readOnly: false,
+      defaultJobOptions: POLICY,
+    });
+    const scheduled = fake(factory.get("system.heartbeat"));
+    scheduled._jobScheduler = {
+      close: async () => {
+        order.push("scheduler");
+      },
+    };
+    factory.get("system.smoke");
+    state.closeOf = async (name) => {
+      order.push(name);
+    };
+
+    await factory.close();
+
+    // The queues close side by side; the scheduler goes ahead of its own.
+    expect([...order].sort()).toEqual([
+      "scheduler",
+      "system.heartbeat",
+      "system.smoke",
+    ]);
+    expect(order.indexOf("scheduler")).toBeLessThan(
+      order.indexOf("system.heartbeat"),
+    );
+  });
+
+  it("closes the job scheduler of a queue it threw away", async () => {
+    vi.useFakeTimers();
+    const factory = open({
+      connection,
+      log: recordingLogger().log,
+      readOnly: false,
+      defaultJobOptions: POLICY,
+    });
+    let schedulerClosed = false;
+    state.initRefusal = new Error("Connection is closed.");
+    const refused = fake(factory.get("system.heartbeat"));
+    refused._jobScheduler = {
+      close: async () => {
+        schedulerClosed = true;
+      },
+    };
+    await vi.advanceTimersByTimeAsync(INIT_MS);
+
+    expect(refused.closed).toBe(true);
+    expect(schedulerClosed).toBe(true);
+  });
+
+  it("closes the queue even when its job scheduler refuses to", async () => {
+    const factory = open({
+      connection,
+      log: recordingLogger().log,
+      readOnly: false,
+      defaultJobOptions: POLICY,
+    });
+    const scheduled = fake(factory.get("system.heartbeat"));
+    scheduled._jobScheduler = {
+      close: async () => {
+        throw new Error("the scheduler refused to close");
+      },
+    };
+
+    await expect(factory.close()).rejects.toThrow(
+      "1 of 1 queues failed to close",
+    );
+    expect(scheduled.closed).toBe(true);
+  });
+
+  it("closes a job scheduler that comes after the close began", async () => {
+    // A call of the schedules asked for the scheduler while the client was
+    // not there yet; the close found no field, and the scheduler came later.
+    vi.useFakeTimers();
+    let schedulerClosed = false;
+    state.scheduler = () => ({
+      close: async () => {
+        schedulerClosed = true;
+      },
+    });
+    const factory = open({
+      connection,
+      log: recordingLogger().log,
+      readOnly: false,
+      defaultJobOptions: POLICY,
+    });
+    const asked = factory.get("system.heartbeat").jobScheduler;
+
+    await factory.close();
+    expect(schedulerClosed).toBe(false);
+    await vi.advanceTimersByTimeAsync(INIT_MS);
+    await asked;
+
+    expect(schedulerClosed).toBe(true);
+  });
+
+  it("refuses a schedule on a queue whose init was refused, with no rejection left unhandled", async () => {
+    // BullMQ's getter awaits the client inside an `async` executor: without
+    // the factory waiting for `init()` first, the refusal escapes as an
+    // unhandled rejection and the upsert never answers.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const refusal = new Error("NOPERM no permissions");
+      state.initRefusal = refusal;
+      const factory = open({
+        connection,
+        log: recordingLogger().log,
+        readOnly: false,
+        defaultJobOptions: POLICY,
+      });
+      const upserting = factory
+        .get("system.heartbeat")
+        .upsertJobScheduler("heartbeat", { every: 60_000 });
+
+      const verdict = await withDeadline(
+        () =>
+          upserting.then(
+            () => "scheduled",
+            (err: unknown) => err,
+          ),
+        INIT_MS + 200,
+        { unref: false, error: () => new Error("the upsert never answered") },
+      ).catch((err: unknown) => err);
+      // An unhandled rejection is reported once the microtasks are through.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      expect(verdict).toBe(refusal);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("reports the refusal of the job scheduler and of the queue when both refuse", async () => {
+    const factory = open({
+      connection,
+      log: recordingLogger().log,
+      readOnly: false,
+      defaultJobOptions: POLICY,
+    });
+    const scheduled = fake(factory.get("system.heartbeat"));
+    scheduled._jobScheduler = {
+      close: async () => {
+        throw new Error("the scheduler refused to close");
+      },
+    };
+    state.closeOf = async () => {
+      throw new Error("the queue refused to close");
+    };
+
+    const verdict = await factory.close().then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+
+    expect(verdict).toBeInstanceOf(AggregateError);
+    const [refusal] = verdict instanceof AggregateError ? verdict.errors : [];
+    expect(refusal).toBeInstanceOf(AggregateError);
+    expect(
+      refusal instanceof AggregateError
+        ? refusal.errors.map((err: unknown) =>
+            err instanceof Error ? err.message : err,
+          )
+        : [],
+    ).toEqual(["the scheduler refused to close", "the queue refused to close"]);
+  });
+
+  it("waits for a queue whose init is refused while it closes, before it lets go of the client", async () => {
+    // The verdict comes during the close: the factory does not forget a
+    // `Queue` that is no longer in its cache, and closes it as one of its own.
+    vi.useFakeTimers();
+    const client = new Redis({ lazyConnect: true, port: 6399 });
+    const factory = open({
+      connection: client,
+      log: recordingLogger().log,
+      readOnly: false,
+      defaultJobOptions: POLICY,
+    });
+    state.initRefusal = new Error("NOPERM no permissions");
+    let finishClose = (): void => {};
+    state.closeOf = () =>
+      new Promise<void>((resolve) => {
+        finishClose = resolve;
+      });
+    factory.get("system.smoke");
+
+    let settled = false;
+    const closing = factory.close().finally(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(INIT_MS + 1_000);
+    expect(settled).toBe(false);
+    expect(client.listenerCount("error")).toBeGreaterThan(0);
+
+    finishClose();
+    await closing;
+    expect(client.listenerCount("error")).toBe(0);
   });
 });

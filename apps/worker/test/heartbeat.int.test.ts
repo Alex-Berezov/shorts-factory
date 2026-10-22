@@ -162,6 +162,7 @@ function noting(real: QueueFactory, events: string[]): QueueFactory {
       });
     },
     use: (name, read) => real.use(name, read),
+    clientErrors: real.clientErrors,
     close: () => real.close(),
   };
 }

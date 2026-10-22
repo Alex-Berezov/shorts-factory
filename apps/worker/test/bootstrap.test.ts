@@ -26,6 +26,11 @@ function fakeRuntime(closed: string[]): WorkerRuntime {
       use: () => {
         throw new Error("not used");
       },
+      clientErrors: {
+        has: () => false,
+        writtenByClient: () => false,
+        dispose: () => {},
+      },
       close: async () => {},
     },
     handled: ["system.smoke"],
@@ -180,6 +185,50 @@ describe("bootstrap", () => {
     await booting;
 
     expect(codes).toEqual([1]);
+  });
+
+  it("hints on the first Ctrl+C after a failed start and leaves with 1 on the next", async () => {
+    // The connections of a start that failed may take until the deadline to
+    // close; an operator at the console is told how to leave, and leaving
+    // still says the start broke (docs/DECISIONS.md, Р7 E0-12R).
+    const codes: number[] = [];
+    const { log: recording, lines } = recordingLogger();
+    let handler: (signal: string) => void = () => {};
+
+    void bootstrap({
+      log: recording,
+      start: async () => {
+        throw new Error("the queue switches are not seeded");
+      },
+      connections: [
+        { name: "redis", close: () => new Promise<void>(() => {}) },
+      ],
+      subscribe: (fn) => {
+        handler = fn;
+      },
+      exit: (code) => codes.push(code),
+      timeoutMs: 60_000,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    handler("SIGINT");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(codes).toEqual([]);
+    expect(
+      lines.find((line) => line.level === "info" && line.signal === "SIGINT"),
+    ).toMatchObject({
+      msg: "shutdown after startup failure is already in progress, press Ctrl+C again to exit now",
+    });
+
+    await vi.advanceTimersByTimeAsync(SIGINT_REPEAT_WINDOW_MS);
+    handler("SIGINT");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(codes).toEqual([1]);
+    expect(lines.find((line) => line.level === "error")).toMatchObject({
+      msg: "forced exit, shutdown after startup failure did not finish",
+      failed: true,
+    });
   });
 
   it("still drains a runtime that was signalled while it was starting", async () => {

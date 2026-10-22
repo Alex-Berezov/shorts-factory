@@ -478,6 +478,349 @@ describe("the logger of a service", () => {
     },
   );
 
+  it.each([
+    [
+      "two levels below the top",
+      () => ({
+        a: { b: { command: { name: "auth", args: [REDIS_PASSWORD] } } },
+      }),
+    ],
+    [
+      "inside an array",
+      () => ({
+        failures: [
+          "first",
+          { command: { name: "auth", args: [REDIS_PASSWORD] } },
+        ],
+      }),
+    ],
+    [
+      "on a cause that is not an error, under a key that is not err",
+      () => ({
+        failure: {
+          message: "refused",
+          cause: { command: { name: "auth", args: [REDIS_PASSWORD] } },
+        },
+      }),
+    ],
+    [
+      "on an error deep under a key that is not err",
+      () => ({ job: { attempt: { lastError: ioredisError() } } }),
+    ],
+  ])(
+    "keeps the redis password of a command %s out of the log, and its name in",
+    (_where, line: () => Record<string, unknown>) => {
+      // `redact` reaches one level per wildcard; a command can sit at any
+      // depth of what a caller logs.
+      const { log, raw } = serviceLogger();
+
+      log.error(line(), "job failed");
+
+      expect(raw()).not.toContain(REDIS_PASSWORD);
+      expect(raw()).toContain('"name":"auth"');
+      expect(raw()).toContain('"args":"[Redacted]"');
+    },
+  );
+
+  it("redacts a command that is the whole object of a line", () => {
+    const { log, lines, raw } = serviceLogger();
+
+    log.info({ name: "auth", args: [REDIS_PASSWORD] }, "command");
+
+    expect(raw()).not.toContain(REDIS_PASSWORD);
+    expect(lines[0]).toMatchObject({ name: "auth", args: "[Redacted]" });
+  });
+
+  it("leaves what the caller logged as it was", () => {
+    const { log } = serviceLogger();
+    const command = { name: "auth", args: [REDIS_PASSWORD] };
+    const error = ioredisError();
+    const line = { a: { b: { command } }, list: [{ command }], error };
+
+    log.error(line, "job failed");
+
+    expect(command.args).toEqual([REDIS_PASSWORD]);
+    expect(line.a.b.command).toBe(command);
+    expect(line.list[0]?.command).toBe(command);
+    expect(error).toMatchObject({
+      command: { name: "auth", args: [REDIS_PASSWORD] },
+    });
+    expect(line.error).toBe(error);
+  });
+
+  it("redacts a command met twice in a line, and one in a cycle", () => {
+    const { log, lines, raw } = serviceLogger();
+    const command = { name: "auth", args: [REDIS_PASSWORD] };
+    const looped: Record<string, unknown> = { command };
+    looped.self = looped;
+
+    expect(() =>
+      log.error({ first: { command }, second: { command }, looped }, "x"),
+    ).not.toThrow();
+
+    expect(raw()).not.toContain(REDIS_PASSWORD);
+    expect(lines[0]).toMatchObject({
+      first: { command: { name: "auth", args: "[Redacted]" } },
+      second: { command: { name: "auth", args: "[Redacted]" } },
+      looped: { command: { args: "[Redacted]" }, self: "[Circular]" },
+    });
+  });
+
+  it("writes an error under another key with its class and fields", () => {
+    // Copied rather than changed, and copied as what it is: what pino writes
+    // of an error that is not under `err` is its enumerable fields.
+    const { log, lines } = serviceLogger();
+
+    log.error(
+      { failure: Object.assign(ioredisError(), { code: "WRONGPASS" }) },
+      "x",
+    );
+
+    expect(lines[0]?.failure).toEqual({
+      command: { name: "auth", args: "[Redacted]" },
+      code: "WRONGPASS",
+    });
+  });
+
+  it("keeps args that are not a command's", () => {
+    // Only the shape of a command of ioredis: a name and a list of args.
+    const { log, lines } = serviceLogger();
+
+    log.info(
+      { cli: { args: ["--dry-run"] }, call: { name: "probe", args: "x" } },
+      "started",
+    );
+
+    expect(lines[0]).toMatchObject({
+      cli: { args: ["--dry-run"] },
+      call: { name: "probe", args: "x" },
+    });
+  });
+
+  /** `{ l1: { l2: ... { l<levels>: leaf } } }`: `leaf` is `levels` levels down. */
+  function nested(levels: number, leaf: unknown): Record<string, unknown> {
+    let value: unknown = leaf;
+    for (let level = levels; level >= 1; level -= 1) {
+      value = { [`l${level}`]: value };
+    }
+    return value as Record<string, unknown>;
+  }
+
+  it("redacts a command at the deepest level the walk goes to, and keeps its name", () => {
+    const { log, raw } = serviceLogger();
+
+    // The command is eight levels below the object of the line, the last
+    // one the walk goes into.
+    log.error(nested(7, { command: { name: "auth", args: [REDIS_PASSWORD] } }));
+
+    expect(raw()).not.toContain(REDIS_PASSWORD);
+    expect(raw()).toContain('"command":{"name":"auth","args":"[Redacted]"}');
+  });
+
+  it("writes a branch past the deepest level as truncated, not as it was", () => {
+    // Fail closed: what the walk did not look into may hold a password.
+    const { log, lines, raw } = serviceLogger();
+
+    log.error(nested(9, { command: { name: "auth", args: [REDIS_PASSWORD] } }));
+
+    expect(raw()).not.toContain(REDIS_PASSWORD);
+    expect(lines[0]).toMatchObject(nested(9, "[Truncated]"));
+  });
+
+  it("walks again a value met first too deep to be walked whole", () => {
+    // Met first at the limit, its command was cut off; met again near the
+    // top, it is written whole - not with the cut of its first answer.
+    const { log, lines, raw } = serviceLogger();
+    const shared = {
+      inner: { command: { name: "auth", args: [REDIS_PASSWORD] } },
+    };
+
+    log.error({ deep: nested(6, shared), shallow: shared }, "x");
+
+    expect(raw()).not.toContain(REDIS_PASSWORD);
+    expect(lines[0]).toMatchObject({
+      deep: nested(6, { inner: { command: "[Truncated]" } }),
+      shallow: { inner: { command: { name: "auth", args: "[Redacted]" } } },
+    });
+  });
+
+  it.each([
+    ["under a key of the line", (held: object) => ({ job: held })],
+    ["deep down", (held: object) => ({ a: { b: { held } } })],
+    ["inside an array", (held: object) => ({ list: ["first", held] })],
+  ])(
+    "keeps the redis password of a command on an instance of a class %s out of the log",
+    (_where, line) => {
+      // pino writes the enumerable fields of any object, an instance of a
+      // class too: a `Job`, an error class of a library.
+      class Holder {
+        readonly id = "job-1";
+        readonly command = { name: "auth", args: [REDIS_PASSWORD] };
+      }
+      const { log, raw } = serviceLogger();
+
+      log.error(line(new Holder()), "x");
+
+      expect(raw()).not.toContain(REDIS_PASSWORD);
+      expect(raw()).toContain('"id":"job-1"');
+      expect(raw()).toContain('"command":{"name":"auth","args":"[Redacted]"}');
+    },
+  );
+
+  it("keeps the redis password of a command that is an instance of a class out of the log", () => {
+    // The `Command` of ioredis is a class.
+    class Command {
+      readonly name = "auth";
+      readonly args = [REDIS_PASSWORD];
+    }
+    const { log, raw } = serviceLogger();
+
+    log.error({ a: { b: { pending: new Command() } } }, "x");
+
+    expect(raw()).not.toContain(REDIS_PASSWORD);
+    expect(raw()).toContain('"pending":{"name":"auth","args":"[Redacted]"}');
+  });
+
+  it.each([
+    [
+      "one level down",
+      { held: { command: { name: "auth", args: ["pw-c1"] } } },
+    ],
+    ["at the top", { command: { name: "auth", args: ["pw-c2"] } }],
+  ])(
+    "keeps the redis password of a command in the bindings of a child %s out of the log",
+    (_where, bindings) => {
+      // pino writes the bindings of `log.child()` through `redact` and the
+      // serializers, not through `formatters.log`.
+      const { log, raw } = serviceLogger();
+
+      log.child(bindings).error("x");
+
+      expect(raw()).not.toMatch(/pw-c\d/);
+      expect(raw()).toContain('"name":"auth"');
+    },
+  );
+
+  it("leaves err to its serializer and walks req and res, which have none here", () => {
+    // `err` has its serializer in every logger; `req` and `res` have one
+    // only on the loggers of Fastify, so a worker that logs them gets the walk.
+    const { formatters } = buildLoggerOptions(envWith());
+    const err = ioredisError();
+    const req = { command: { name: "auth", args: [REDIS_PASSWORD] } };
+
+    const line = formatters.log({ err, req, res: { reply: req } });
+
+    expect(line.err).toBe(err);
+    expect(line.req).toEqual({ command: { name: "auth", args: "[Redacted]" } });
+    expect(line.res).toEqual({
+      reply: { command: { name: "auth", args: "[Redacted]" } },
+    });
+  });
+
+  it.each(["req", "res"])(
+    "keeps the redis password of a command under %s out of the log of a worker",
+    (key) => {
+      const { log, raw } = serviceLogger();
+
+      log.error(
+        {
+          [key]: {
+            reply: { command: { name: "auth", args: [REDIS_PASSWORD] } },
+          },
+        },
+        "x",
+      );
+
+      expect(raw()).not.toContain(REDIS_PASSWORD);
+      expect(raw()).toContain('"name":"auth"');
+    },
+  );
+
+  it("hands the request of Fastify to its serializer as it is", () => {
+    // An instance of a class: the walk does not enter it, the serializer of
+    // the api gets the very object.
+    class Request {
+      readonly method = "GET";
+      readonly url = "/system/status";
+    }
+    const { formatters } = buildLoggerOptions(envWith());
+    const req = new Request();
+
+    expect(formatters.log({ req }).req).toBe(req);
+  });
+
+  it("names the command of an error whose args are not a list", () => {
+    // The name is what an operator reads; it does not depend on the args.
+    const { log, lines } = serviceLogger();
+    const err = Object.assign(new Error("ERR wrong number of arguments"), {
+      command: { name: "get", args: "key" },
+    });
+
+    log.error({ err }, "x");
+
+    expect(lines[0]?.err).toMatchObject({ command: { name: "get" } });
+  });
+
+  it("copies a frozen command without throwing and without its password", () => {
+    const { log, raw } = serviceLogger();
+    const command = Object.freeze({ name: "auth", args: [REDIS_PASSWORD] });
+    const line = Object.freeze({ held: Object.freeze({ command }) });
+
+    expect(() => log.error({ a: line }, "x")).not.toThrow();
+
+    expect(raw()).not.toContain(REDIS_PASSWORD);
+    expect(raw()).toContain('"command":{"name":"auth","args":"[Redacted]"}');
+    expect(command.args).toEqual([REDIS_PASSWORD]);
+  });
+
+  it("does not reuse a [Circular] met under an ancestor that is not one here", () => {
+    // `inner` walked first under `outer` points back at it, a cycle there;
+    // met again under `elsewhere` at the same depth, `outer` is no ancestor
+    // of it, and is written.
+    const { log, lines, raw } = serviceLogger();
+    const outer: Record<string, unknown> = {
+      command: { name: "auth", args: [REDIS_PASSWORD] },
+    };
+    const inner = { back: outer };
+    outer.inner = inner;
+
+    log.error({ outer, elsewhere: { inner } }, "x");
+
+    expect(raw()).not.toContain(REDIS_PASSWORD);
+    expect(lines[0]).toMatchObject({
+      outer: { inner: { back: "[Circular]" } },
+      elsewhere: {
+        inner: {
+          back: {
+            command: { name: "auth", args: "[Redacted]" },
+            inner: "[Circular]",
+          },
+        },
+      },
+    });
+  });
+
+  it("reads two fields of an instance of a class by name, not all its keys", () => {
+    // A `Buffer` or a typed array has a key per byte: listing them on every
+    // line is a cost for nothing.
+    class Payload {
+      readonly bytes = [1, 2, 3];
+    }
+    const listed: string[] = [];
+    const payload = new Proxy(new Payload(), {
+      ownKeys(target) {
+        listed.push("ownKeys");
+        return Reflect.ownKeys(target);
+      },
+    });
+    const { formatters } = buildLoggerOptions(envWith());
+
+    const line = formatters.log({ payload });
+
+    expect(line.payload).toBe(payload);
+    expect(listed).toEqual([]);
+  });
+
   it("redacts the credentials a caller sends", () => {
     // Basic auth puts the only secret of the api into `authorization`; one
     // plugin logging the headers would write it to disk in plain base64.

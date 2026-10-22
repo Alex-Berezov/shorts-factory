@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionFailure } from "../src/connection-failure.js";
+import { authFailure, connectionFailure } from "../src/connection-failure.js";
 
 /** An error of a socket the way Node raises it: a message and a `code`. */
 function socketError(code: string): Error {
@@ -61,6 +61,47 @@ describe("connectionFailure", () => {
     ["something that is not an error", "ECONNREFUSED"],
     ["nothing", undefined],
   ])("does not classify %s", (_what, err) => {
+    expect(connectionFailure(err)).toBeUndefined();
+  });
+});
+
+/**
+ * A refusal of the server the way ioredis raises it: a `ReplyError` (of
+ * `redis-errors`, whose `name` is its class) with the reply as the message.
+ * Built by hand because ioredis types its re-export of the class as `any`.
+ */
+function reply(message: string): Error {
+  return Object.assign(new Error(message), { name: "ReplyError" });
+}
+
+describe("authFailure", () => {
+  it.each([
+    "WRONGPASS invalid username-password pair or user is disabled.",
+    "NOAUTH Authentication required.",
+  ])("calls the reply %j a refusal of the credentials", (message) => {
+    const refused = reply(message);
+
+    expect(authFailure(refused)).toBe(true);
+    // The server answered: no connection failure, whatever else it is.
+    expect(connectionFailure(refused)).toBeUndefined();
+  });
+
+  it.each([
+    ["another reply of the server", reply("ERR unknown command")],
+    [
+      "a refused permission",
+      reply("NOPERM User sf has no permissions to run 'info'"),
+    ],
+    ["a reply whose code only starts like one", reply("WRONGPASSWORD invalid")],
+    ["the word further into the reply", reply("ERR WRONGPASS invalid")],
+    [
+      "the same text on an error that is not a reply",
+      new Error("WRONGPASS invalid username-password pair"),
+    ],
+    ["something that is not an error", "WRONGPASS"],
+    ["nothing", undefined],
+  ])("does not call %s a refusal of the credentials", (_what, err) => {
+    expect(authFailure(err)).toBe(false);
     expect(connectionFailure(err)).toBeUndefined();
   });
 });

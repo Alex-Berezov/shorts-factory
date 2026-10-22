@@ -1,4 +1,5 @@
 import type { Env } from "@sf/config";
+import { field, isObject, redactCommandArgs } from "./redact-command-args.js";
 
 /**
  * Paths pino replaces with `[Redacted]`, one list for every process.
@@ -8,22 +9,32 @@ import type { Env } from "@sf/config";
  * already logs the request) would write the single secret of the api into the
  * log file; the cookies go with it.
  *
- * `*.command.args` is the Redis password: ioredis attaches the command it was
- * running to the error it emits (`err.command = { name, args }`), and a failed
- * `auth` carries the password in `args`. Under `err` the serializer below
- * keeps the name of the command and drops the rest; the wildcard covers the
- * same object arriving under another key, one level deep - which is all a
- * wildcard of `redact` reaches, and why the serializer is the real guard.
- * `err.command` itself is not listed: it would hide the name of the command
- * the serializer deliberately keeps.
+ * The Redis password rides in the `args` of a command at any depth of a line.
+ * The walk of `formatters.log` (`redactCommandArgs`) covers the object of a
+ * line, and the serializer of `err` drops `args` altogether; the paths of a
+ * command stay here as well, because the bindings of `log.child()` reach
+ * neither - pino writes them through `redact` and the serializers only - and
+ * one level is what a binding of a command is put at.
  */
 const REDACTED_LOG_PATHS = [
   "req.headers.authorization",
   "req.headers.cookie",
   "res.headers['set-cookie']",
+  "command.args",
   "err.command.args",
   "*.command.args",
 ] as const;
+
+/**
+ * Keys of a line that have a rule of their own in every logger: `err` its
+ * serializer below. `req` and `res` are not among them: their serializers are
+ * Fastify's, on the loggers of the api requests only, and a worker or a
+ * command line tool that logs `{ res: { reply } }` has nothing else between a
+ * command under it and the file. The walk costs little on what Fastify hands
+ * its serializers - a request and a reply are instances of classes, which it
+ * does not enter (`redactCommandArgs`).
+ */
+const OWN_RULE_KEYS: ReadonlySet<string> = new Set(["err"]);
 
 /** How many links of `cause` (or levels of `errors`) are written at most. */
 const MAX_ERROR_DEPTH = 8;
@@ -62,7 +73,7 @@ const SCALAR_ERROR_FIELDS = [
 type LoggedError = Record<string, unknown>;
 
 /** What the walk below one outermost error carries from link to link. */
-interface Walk {
+interface CauseWalk {
   /** Errors already written: a cycle of causes ends at the first repeat. */
   seen: Set<object>;
   /**
@@ -72,21 +83,12 @@ interface Walk {
   stacked: ReadonlySet<object>;
 }
 
-function isObject(value: unknown): value is object {
-  return typeof value === "object" && value !== null;
-}
-
 function isScalar(value: unknown): value is string | number | boolean {
   return (
     typeof value === "string" ||
     typeof value === "number" ||
     typeof value === "boolean"
   );
-}
-
-/** A property of an object read by key, without assuming its type. */
-function field(source: object, key: string | symbol): unknown {
-  return (source as Record<string | symbol, unknown>)[key];
 }
 
 /** A text field of an object, or nothing when it is not a string. */
@@ -167,7 +169,7 @@ function withCauses(
 function nestedValue(
   value: unknown,
   depth: number,
-  walk: Walk,
+  walk: CauseWalk,
 ): { value: unknown } | undefined {
   if (isScalar(value)) {
     return { value };
@@ -189,7 +191,7 @@ function pickFields(
   source: object,
   base: { type?: unknown; message?: unknown; stack?: unknown },
   depth: number,
-  walk: Walk,
+  walk: CauseWalk,
 ): LoggedError {
   const out: LoggedError = {};
   for (const [key, value] of Object.entries(base)) {
@@ -242,7 +244,7 @@ function pickFields(
 function nestedError(
   source: object,
   depth: number,
-  walk: Walk,
+  walk: CauseWalk,
 ): LoggedError | undefined {
   if (depth > MAX_ERROR_DEPTH || walk.seen.has(source)) {
     return undefined;
@@ -287,6 +289,18 @@ function serializeError(err: unknown): unknown {
   });
 }
 
+/**
+ * The `log` formatter of every logger: the object of a line, with the `args`
+ * of every command of ioredis in it redacted (`redactCommandArgs`). pino runs
+ * it before the serializers and before `redact`, so the key with a serializer
+ * of every logger is left to it.
+ */
+function formatLogObject(
+  object: Record<string, unknown>,
+): Record<string, unknown> {
+  return redactCommandArgs(object, OWN_RULE_KEYS);
+}
+
 /** Pretty printer options, only ever used in local development. */
 interface PrettyTransport {
   target: string;
@@ -297,6 +311,9 @@ interface LoggerOptions {
   level: Env["LOG_LEVEL"];
   redact: string[];
   serializers: { err: (err: unknown) => unknown };
+  formatters: {
+    log: (object: Record<string, unknown>) => Record<string, unknown>;
+  };
   transport?: PrettyTransport;
 }
 
@@ -318,6 +335,7 @@ export function buildLoggerOptions(env: Env): LoggerOptions {
     level: env.LOG_LEVEL,
     redact: [...REDACTED_LOG_PATHS],
     serializers: { err: serializeError },
+    formatters: { log: formatLogObject },
   };
 
   if (env.NODE_ENV !== "development") {

@@ -47,6 +47,10 @@ const QUEUES = ["system.smoke", "system.dlq", "system.heartbeat"] as const;
 const ENTRY = fileURLToPath(
   new URL("./fixtures/entry-under-signal.ts", import.meta.url),
 );
+/** The bootstrap with a start that fails and a stop that lasts. */
+const FAILED_START = fileURLToPath(
+  new URL("./fixtures/failed-start-under-signal.ts", import.meta.url),
+);
 /** Enough jobs that the worker is busy when the signal arrives. */
 const JOB_COUNT = 30;
 /** How long the worker may take to come up and say so. */
@@ -280,6 +284,50 @@ describe("worker entry point under a signal", () => {
       runUnderSignal({ env: { ...process.env, LOG_LEVEL: "loud" } }),
     ).rejects.toThrow(/exited before it started \(code 1, .*LOG_LEVEL/s);
     expect(performance.now() - startedAt).toBeLessThan(START_DEADLINE_MS / 2);
+  });
+
+  it("hints on Ctrl+C after a failed start and leaves with 1 on the next", async () => {
+    // The stop a failed start began has no jobs to drain and may last until
+    // its deadline; the operator is told how to leave, and leaving still says
+    // the start broke (docs/DECISIONS.md, Р7 E0-12R).
+    const child = fork(FAILED_START, [], {
+      execArgv: ["--import", "tsx"],
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    });
+    const output = collectOutput(child);
+    const ended = endOf(child, output);
+    const said = (text: string) => async () =>
+      output().includes(text) ? true : undefined;
+
+    try {
+      await waitFor(said("worker failed to start"), {
+        what: "the start to fail",
+        intervalMs: 20,
+      });
+      child.send("signal");
+      await waitFor(
+        said(
+          "shutdown after startup failure is already in progress, press Ctrl+C again to exit now",
+        ),
+        { what: "the hint of the first Ctrl+C", intervalMs: 20 },
+      );
+      await new Promise((resolve) =>
+        setTimeout(resolve, SIGINT_REPEAT_WINDOW_MS + 100),
+      );
+      child.send("signal");
+    } catch (err) {
+      child.kill("SIGKILL");
+      await ended.catch(() => undefined);
+      throw err;
+    }
+    const run = await ended;
+
+    expect(run.signal).toBeNull();
+    expect(run.code).toBe(1);
+    expect(run.output).toContain(
+      "forced exit, shutdown after startup failure did not finish",
+    );
+    expect(run.output).not.toContain("shutdown timed out");
   });
 
   it("is started by `pnpm dev` exactly the way this test starts it", () => {

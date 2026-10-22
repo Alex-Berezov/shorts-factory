@@ -85,8 +85,20 @@ interface ShutdownLogger extends RuntimeLogger {
  * `"log"`: nothing but a line - the stop goes on. Otherwise the process
  * leaves at once with 130 (128 + SIGINT), and the first SIGINT tells the
  * operator so with `hint`; `forcedMessage` is the line of the forced exit.
+ *
+ * `afterFailedStart` is the same for a stop the process began itself because
+ * its start failed: nobody pressed anything to begin it, so the first Ctrl+C
+ * only gets `hint` - a line of its own, at `info` - and the next one, past
+ * the window, leaves with the code of the failure and `forcedMessage`
+ * (docs/DECISIONS.md, Р7 E0-12R).
  */
-export type RepeatedSigint = "log" | { hint: string; forcedMessage: string };
+export type RepeatedSigint =
+  | "log"
+  | {
+      hint: string;
+      forcedMessage: string;
+      afterFailedStart: { hint: string; forcedMessage: string };
+    };
 
 export interface ShutdownOptions {
   /** Closed in this order; the order is the contract of the caller. */
@@ -220,9 +232,11 @@ const TIMED_OUT = Symbol("timed out");
  *   `SIGINT_REPEAT_WINDOW_MS` after a stop a signal began leaves at once with
  *   130, and a SIGINT inside the window is a copy of the first keypress and is
  *   only logged at debug. A stop the process began itself, because its start
- *   failed, has no keypress to repeat: a SIGINT there is only logged, and the
- *   exit code stays the failure's. A start that fails while a signal's stop is
- *   already running still lets a later Ctrl+C force the exit, with 1, not 130;
+ *   failed, has no keypress to repeat: its first SIGINT is answered with the
+ *   hint of `afterFailedStart` and opens the window, and a SIGINT after the
+ *   window forces the exit with the failure's code. A SIGTERM there is only
+ *   logged. A start that fails while a signal's stop is already running still
+ *   lets a later Ctrl+C force the exit, with 1, not 130;
  * - **a deadline**: a socket that never finishes closing - a command to a
  *   Redis that is down waits forever on the queue client - would leave the
  *   process hanging until the orchestrator kills it, losing the exit code. The
@@ -255,6 +269,25 @@ export function createShutdownHandler(
   let startedBySignal = false;
   /** Set once the window has passed: a SIGINT from then on is a new keypress. */
   let repeatArmed = false;
+  let repeatWindow: ReturnType<typeof setTimeout> | undefined;
+  /** The stop of a failed start told the operator about the next Ctrl+C. */
+  let hinted = false;
+
+  /**
+   * Opens the window anew: a SIGINT within `SIGINT_REPEAT_WINDOW_MS` from now
+   * is a copy of the keypress that opened it. A window still open is
+   * replaced, so that its timer cannot close the new one early. Not holding
+   * the loop open: the window only matters while something else - the drain,
+   * the deadline - keeps the process alive.
+   */
+  const armRepeatWindow = (): void => {
+    clearTimeout(repeatWindow);
+    repeatArmed = false;
+    repeatWindow = setTimeout(() => {
+      repeatArmed = true;
+    }, SIGINT_REPEAT_WINDOW_MS);
+    repeatWindow.unref();
+  };
 
   /** The process leaves once, with the verdict that was reached first. */
   const exitOnce = async (code: number): Promise<void> => {
@@ -321,7 +354,15 @@ export function createShutdownHandler(
       failed = true;
     }
     if (started) {
-      if (repeatedSigint !== "log" && signal === "SIGINT" && startedBySignal) {
+      if (repeatedSigint !== "log" && signal === "SIGINT") {
+        if (!startedBySignal && !hinted) {
+          // The first Ctrl+C of a stop the failed start began: the operator
+          // has not seen the hint of the first line, which went to nobody.
+          hinted = true;
+          armRepeatWindow();
+          log.info({ signal, failed }, repeatedSigint.afterFailedStart.hint);
+          return;
+        }
         if (!repeatArmed) {
           log.debug(
             { signal },
@@ -329,7 +370,12 @@ export function createShutdownHandler(
           );
           return;
         }
-        log.error({ signal, failed }, repeatedSigint.forcedMessage);
+        log.error(
+          { signal, failed },
+          startedBySignal
+            ? repeatedSigint.forcedMessage
+            : repeatedSigint.afterFailedStart.forcedMessage,
+        );
         await exitOnce(failed ? 1 : 130);
         return;
       }
@@ -339,11 +385,7 @@ export function createShutdownHandler(
     started = true;
     startedBySignal = signal === "SIGINT" || signal === "SIGTERM";
     if (repeatedSigint !== "log") {
-      // Not holding the loop open: the window only matters while something
-      // else - the drain, the deadline - keeps the process alive.
-      setTimeout(() => {
-        repeatArmed = true;
-      }, SIGINT_REPEAT_WINDOW_MS).unref();
+      armRepeatWindow();
     }
     log.info(
       signal === "SIGINT" && repeatedSigint !== "log"
