@@ -1988,8 +1988,9 @@
       "E0-12L"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-21"
+    "status": "in_progress",
+    "added_at": "2026-10-21",
+    "started_at": "2026-10-22"
   },
   {
     "id": "E0-12U",

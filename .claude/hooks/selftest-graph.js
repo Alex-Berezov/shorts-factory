@@ -54,6 +54,14 @@ const DECLARED_INPUTS = {
 };
 
 /**
+ * Законное расширение inputs одной задачи сверх DECLARED_INPUTS её скрипта (TECH_DEBT 21.10.2026 E0-12L круг 4, `checkDeclaredInputs`):
+ * taskId -> { inputs (записи turbo.json, как в DECLARED_INPUTS), why }. Ожидание узла - inputs
+ * скрипта и затем его расширение; тот же вход у задачи вне перечня - отказ, как и прежде. Перечень
+ * именованный, с причиной на задачу; сейчас пуст.
+ */
+const EXTRA_INPUTS = {};
+
+/**
  * Файлы пакета, которые git видит, а turbo по замыслу не хеширует: сверка «файлы пакета - во
  * входах узла» (inputsGap) их пропускает. Перечень именованный, с причиной на файл (путь от
  * корня); сейчас пуст - на 21.10.2026 turbo хеширует каждый файл пакета, видимый git.
@@ -134,12 +142,36 @@ function resolveFrom(spec, from, name, root) {
 }
 
 /**
- * file лежит под `<root>/node_modules` (оба пути - через realpath); нет node_modules - не лежит,
- * иная ошибка realpath (EACCES) - исключение как есть. opts - подмена для кейсов: realpath
- * (вместо fs.realpathSync).
+ * child лежит строго под dir (оба пути абсолютные и уже через realpath): один предикат «путь под
+ * каталогом» для модуля графа и harness-selftest.js (relUnder) - каталог `..x` внутри dir под ним.
+ */
+function strictlyUnder(child, dir) {
+  const rel = path.relative(dir, child);
+  return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+}
+
+/**
+ * Путь rel от корня репозитория (posix, после path.posix.normalize) выходит из корня: `..`, `../…`
+ * или абсолютный. Один предикат «вне корня» для путей от корня - inRoot здесь, резолв `./`/`../` и
+ * join/resolve(repoRoot, …) обхода int-наборов в harness-selftest.js; каталог `..x` - внутри корня.
+ */
+function outsideRoot(rel) {
+  return rel === '..' || rel.startsWith('../') || path.posix.isAbsolute(rel);
+}
+
+/**
+ * file лежит под `<root>/node_modules` или под виртуальным хранилищем pnpm этого корня
+ * (`virtualStoreDir` из `<root>/node_modules/.modules.yaml`: законный `virtual-store-dir` вне
+ * корня, TECH_DEBT 21.10.2026 E0-12L круг 4, `underNodeModules`) - пути через realpath. Нет node_modules - не лежит; иная ошибка
+ * realpath (EACCES) - исключение как есть. `.modules.yaml` читается, только если file не под
+ * node_modules: его нет - хранилища вне корня нет; он не разбирается yaml или virtualStoreDir не
+ * строка - исключение (fail-closed). Относительный virtualStoreDir - от node_modules. opts -
+ * подмена для кейсов: realpath (вместо fs.realpathSync), modulesYaml (текст `.modules.yaml` или
+ * null - файла нет), parseYaml (разбор текста).
  */
 function underNodeModules(file, root, opts) {
-  const realpath = (opts && opts.realpath) || fs.realpathSync;
+  const o = opts || {};
+  const realpath = o.realpath || fs.realpathSync;
   let nm;
   try {
     nm = realpath(path.join(root, 'node_modules'));
@@ -147,8 +179,37 @@ function underNodeModules(file, root, opts) {
     if (isGone(e)) return false;
     throw e;
   }
-  const rel = path.relative(nm, realpath(file));
-  return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+  const real = realpath(file);
+  if (strictlyUnder(real, nm)) return true;
+  const text = o.modulesYaml !== undefined ? o.modulesYaml : readIfExists(path.join(nm, '.modules.yaml'));
+  if (text === null) return false;
+  let store;
+  try {
+    // yaml берётся у корня без проверки underNodeModules: иначе круг (yaml сам резолвится через неё)
+    const parse = o.parseYaml || require(require.resolve('yaml', { paths: [root] })).parse;
+    store = parse(text).virtualStoreDir;
+  } catch (e) {
+    throw new Error('node_modules/.modules.yaml не разбирается yaml: ' + ((e && e.message) || String(e)));
+  }
+  if (typeof store !== 'string' || !store) throw new Error('в node_modules/.modules.yaml нет строки virtualStoreDir');
+  let dir;
+  try {
+    dir = realpath(path.resolve(nm, store));
+  } catch (e) {
+    if (isGone(e)) return false;
+    throw e;
+  }
+  return strictlyUnder(real, dir);
+}
+
+/** Текст файла или null, если его нет (ENOENT); иная ошибка - исключение. */
+function readIfExists(file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (isGone(e)) return null;
+    throw e;
+  }
 }
 
 /**
@@ -267,20 +328,34 @@ function packageDir(t) {
   return path.posix.normalize(posixDir(t.directory) || '.');
 }
 
-/** Путь входа задачи от корня репозитория; вход вне корня - исключение. */
-function inRoot(dir, input, taskId) {
+/**
+ * Путь входа задачи от корня репозитория; вход вне корня - исключение. Абсолютный - `/…` и буква
+ * диска со слешем (`C:\x`, `C:/x`) на любой платформе; на Windows (platform win32, по умолчанию -
+ * платформа процесса) и буква диска без слеша (`C:x.ts` - путь от текущего каталога диска C, вне
+ * репозитория): имя файла с двоеточием там невозможно. На прочих платформах `a:b.json` - законное
+ * имя файла (TECH_DEBT 21.10.2026 E0-12L круг 4, `inRoot`).
+ */
+function inRoot(dir, input, taskId, platform = process.platform) {
   const posix = input.split('\\').join('/');
+  const drive = platform === 'win32' ? /^[A-Za-z]:/ : /^[A-Za-z]:\//;
   // абсолютный путь проверяется до склейки с каталогом: 'packages/b/' + '/etc/x' стал бы относительным
-  if (path.posix.isAbsolute(posix) || /^[A-Za-z]:/.test(posix)) {
+  if (path.posix.isAbsolute(posix) || drive.test(posix)) {
     throw new Error('вход ' + input + ' задачи ' + taskId + ' - абсолютный путь, вне корня репозитория');
   }
   const rel = path.posix.normalize(path.posix.join(dir || '.', posix));
-  if (rel === '..' || rel.startsWith('../')) throw new Error('вход ' + input + ' задачи ' + taskId + ' вне корня репозитория');
+  if (outsideRoot(rel)) throw new Error('вход ' + input + ' задачи ' + taskId + ' вне корня репозитория');
   return rel;
 }
 
-/** Задачи dry по taskId; задача без taskId или без поля из TASK_FIELDS - исключение. */
+/**
+ * Задачи dry по taskId; задача без taskId или без поля из TASK_FIELDS - исключение. Форма
+ * проверяется раз на объект dry (TECH_DEBT 21.10.2026 E0-12L круг 3, `dryPackages` -> `tasksById`; круг 4, время прогона): результат в WeakMap по самому
+ * объекту; стабы - новые объекты dry и проверяются сами. Объект dry после первого вызова не
+ * правится (стабы копируют).
+ */
+const byIdCache = new WeakMap();
 function tasksById(dry) {
+  if (byIdCache.has(dry)) return byIdCache.get(dry);
   const byId = new Map();
   for (const t of dry.tasks) {
     if (!t || typeof t.taskId !== 'string') throw new Error('задача dry-JSON без taskId - форма dry-JSON turbo неизвестна');
@@ -289,6 +364,7 @@ function tasksById(dry) {
     }
     byId.set(t.taskId, t);
   }
+  byIdCache.set(dry, byId);
   return byId;
 }
 
@@ -303,18 +379,27 @@ function rootTasks(dry, script) {
   return rootIds(byId, script).map((id) => ({ name: id, command: byId.get(id).command }));
 }
 
+/** Ожидание inputs скрипта задачи taskId (DECLARED_INPUTS); нет - исключение с именем задачи. */
+function declaredFor(taskId) {
+  const decl = DECLARED_INPUTS[taskScript(taskId)];
+  if (!decl) throw new Error('у задачи ' + taskId + ' нет ожидания inputs в DECLARED_INPUTS selftest-graph.js');
+  return decl;
+}
+
 /**
- * resolvedTaskDefinition.inputs задачи t (каталог dir) - ровно DECLARED_INPUTS её скрипта;
- * иначе исключение с taskId и фактическим перечнем.
+ * resolvedTaskDefinition.inputs задачи t (каталог dir) - ровно DECLARED_INPUTS её скрипта и
+ * затем расширение задачи из extra (EXTRA_INPUTS); иначе исключение с taskId и фактическим
+ * перечнем. Вход сверх ожидания у задачи вне extra - отказ: расширение одного пакета не
+ * ослабляет сверку остальных.
  */
-function checkDeclaredInputs(t, dir) {
-  const decl = DECLARED_INPUTS[taskScript(t.taskId)];
-  if (!decl) throw new Error('у задачи ' + t.taskId + ' нет ожидания inputs в DECLARED_INPUTS selftest-graph.js');
-  const want = resolvedInputs(decl.inputs, dir);
+function checkDeclaredInputs(t, dir, extra) {
+  const decl = declaredFor(t.taskId);
+  const more = Object.prototype.hasOwnProperty.call(extra, t.taskId) ? extra[t.taskId] : null;
+  const want = resolvedInputs(decl.inputs.concat(more ? more.inputs : []), dir);
   const got = t.resolvedTaskDefinition.inputs;
   if (JSON.stringify(got) !== JSON.stringify(want)) {
     throw new Error('inputs задачи ' + t.taskId + ' в turbo.json: ' + JSON.stringify(got) + ', ожидалось ' + JSON.stringify(want) +
-      ' (DECLARED_INPUTS: ' + decl.why + ')');
+      ' (DECLARED_INPUTS: ' + decl.why + (more ? '; EXTRA_INPUTS: ' + more.why : '') + ')');
   }
 }
 
@@ -324,9 +409,11 @@ function checkDeclaredInputs(t, dir) {
  * есть узлы всех пакетов, и web потребовал бы glob test:int. Каждый узел -
  * { name, pkg, dir, command, root, reads: [{ file, why }] }, file - путь от корня с `/`.
  * Отказ (исключение, не пропуск): нет корней, зависимость на taskId вне dry, вход вне корня,
- * задача неизвестной формы, inputs узла не DECLARED_INPUTS.
+ * задача неизвестной формы, inputs узла не DECLARED_INPUTS с расширением EXTRA_INPUTS.
+ * opts.extraInputs - подмена EXTRA_INPUTS для кейсов.
  */
-function taskGraph(dry, script) {
+function taskGraph(dry, script, opts) {
+  const extra = (opts && opts.extraInputs) || EXTRA_INPUTS;
   const byId = tasksById(dry);
   const roots = rootIds(byId, script);
   if (!roots.length) throw new Error('в dry-JSON нет задачи ' + script + ' с командой - ни у одного пакета нет ' + scriptKey(script));
@@ -345,7 +432,7 @@ function taskGraph(dry, script) {
   const nodes = Array.from(reachedFrom, ([id, root]) => {
     const t = byId.get(id);
     const dir = packageDir(t);
-    checkDeclaredInputs(t, dir);
+    checkDeclaredInputs(t, dir, extra);
     const why = id === root ? 'корень ' + id : 'узел ' + id + ' графа ' + root;
     return {
       name: id,
@@ -360,24 +447,43 @@ function taskGraph(dry, script) {
 }
 
 /**
+ * Файл file (путь от корня с `/`) - в каталоге пакета dir: у корневого пакета (`.`) - любой файл.
+ * Один предикат для inputsGap и детектора входов harness-selftest (TECH_DEBT 21.10.2026 E0-12L
+ * круг 4, `own` в пробе входов).
+ */
+function under(file, dir) {
+  return dir === '.' || file.startsWith(dir + '/');
+}
+
+/**
+ * Файлы files (пути от корня), которые inputsGap считает файлами пакета узла n: под его каталогом
+ * (under), не во вложенном пакете (dirs - каталоги пакетов dry) и не в TRACKED_NOT_HASHED. Один
+ * отбор для inputsGap и детектора входов harness-selftest (inputsGapBlind): срез файла, который
+ * inputsGap не считает, дал бы ложное «проба не замечает».
+ */
+function ownFiles(n, files, dirs) {
+  const nested = dirs.filter((d) => d !== n.dir && under(d, n.dir));
+  return files.filter((file) => under(file, n.dir) && !nested.some((d) => under(file, d)) &&
+    !Object.prototype.hasOwnProperty.call(TRACKED_NOT_HASHED, file));
+}
+
+/**
  * Файлы пакетов, видимые git (tracked - пути от корня, список даёт вызывающий: git зовёт
  * harness-selftest), которых нет среди входов узла graph (решение техлида по `$TURBO_DEFAULT$`,
  * E0-12L): turbo пишет inputs разрешёнными без `$TURBO_DEFAULT$`, и его снятие в turbo.json
  * видно только так. Сверяются узлы, чьё ожидание DECLARED_INPUTS пусто или содержит
  * `$TURBO_DEFAULT$`; файлы вложенного пакета (каталоги пакетов dry) и TRACKED_NOT_HASHED не
- * считаются. Строки `<taskId>: <до 5 файлов>[ и ещё N]`; пусто - покрыто.
+ * считаются. Скрипт узла без ожидания в DECLARED_INPUTS - исключение с именем задачи, а не
+ * TypeError (TECH_DEBT 21.10.2026 E0-12L круг 3, `inputsGap`). Строки `<taskId>: <до 5 файлов>[ и ещё N]`; пусто - покрыто.
  */
 function inputsGap(graph, tracked, dry) {
   const dirs = Array.from(dryPackages(dry).values());
-  const under = (file, dir) => dir === '.' || file.startsWith(dir + '/');
   const out = [];
   for (const n of graph.nodes) {
-    const decl = DECLARED_INPUTS[taskScript(n.name)];
+    const decl = declaredFor(n.name);
     if (decl.inputs.length && !decl.inputs.includes('$TURBO_DEFAULT$')) continue;
     const have = new Set(n.reads.map((r) => r.file));
-    const nested = dirs.filter((d) => d !== n.dir && under(d, n.dir));
-    const missing = tracked.filter((file) => under(file, n.dir) && !have.has(file) && !nested.some((d) => under(file, d)) &&
-      !Object.prototype.hasOwnProperty.call(TRACKED_NOT_HASHED, file));
+    const missing = ownFiles(n, tracked, dirs).filter((file) => !have.has(file));
     if (missing.length) out.push(n.name + ': ' + missing.slice(0, 5).join(', ') + (missing.length > 5 ? ' и ещё ' + (missing.length - 5) : ''));
   }
   return out;
@@ -400,6 +506,14 @@ const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies'];
  */
 function manifestGap(graph, ws) {
   const inGraph = new Set(graph.nodes.map((n) => n.pkg));
+  return Array.from(manifestClosure(graph, ws)).filter((n) => !inGraph.has(n)).sort();
+}
+
+/**
+ * Замыкание workspace:-зависимостей манифестов (поля DEP_FIELDS) от пакетов корней graph, сами
+ * корни - тоже: Set имён пакетов. workspace:-зависимость на пакет вне ws - исключение.
+ */
+function manifestClosure(graph, ws) {
   const seen = new Set();
   const queue = graph.roots.map((r) => r.pkg);
   while (queue.length) {
@@ -414,7 +528,26 @@ function manifestGap(graph, ws) {
       }
     }
   }
-  return Array.from(seen).filter((n) => !inGraph.has(n)).sort();
+  return seen;
+}
+
+/**
+ * workspace:-зависимости только в peerDependencies (без дубля в DEP_FIELDS) у манифестов ws
+ * (решение техлида Р5 E0-12T; TECH_DEBT 21.10.2026 E0-12L круг 4, peer-only workspace-зависимость): turbo 2.10.12 ребра `^<script>` по peer не
+ * строит, и сверка с манифестами её не видит - пакет собирался бы не раньше того, кто его читает.
+ * Признак - префикс значения `workspace:`, не имя `@sf/*`. Строки отказа с пакетом, зависимостью
+ * и подсказкой; пусто - таких нет.
+ */
+function peerOnly(ws) {
+  const out = [];
+  for (const [name, { pkg }] of Object.entries(ws)) {
+    for (const [dep, spec] of Object.entries(pkg.peerDependencies || {})) {
+      if (!String(spec).startsWith('workspace:')) continue;
+      if (DEP_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(pkg[field] || {}, dep))) continue;
+      out.push('пакет ' + name + ': ' + dep + ' (' + spec + ') только в peerDependencies - turbo не строит по нему ребро, добавь в devDependencies');
+    }
+  }
+  return out;
 }
 
 /**
@@ -453,41 +586,50 @@ function inDir(dir, file) {
 const NEW_SIBLING = 'selftest-new';
 
 /**
- * Каталог нового пакета, который добавил бы шаблон pattern pnpm-workspace.yaml: `*` и `**`
- * -> NEW_SIBLING (`tools/*` -> `tools/selftest-new`), шаблон без них - сам каталог. Иные знаки
- * glob (`?`, `[`, `{`) - исключение: пример пакета из них не построить.
+ * Каталоги нового пакета, который добавил бы шаблон pattern pnpm-workspace.yaml: `*` ->
+ * NEW_SIBLING (`tools/*` -> `tools/selftest-new`); `**` - любая глубина, поэтому и один, и два
+ * уровня (`packages/**` -> `packages/selftest-new` и `packages/selftest-new/selftest-new`: glob,
+ * покрывающий только первый уровень, иначе прошёл бы сверку, TECH_DEBT 21.10.2026 E0-12L круг 3, `patternPackage`); шаблон без них -
+ * сам каталог. Иные знаки glob (`?`, `[`, `{`) - исключение: пример пакета из них не построить.
  */
-function patternPackage(pattern) {
+function patternPackages(pattern) {
   const p = pattern.replace(/^\.\//, '').replace(/\/+$/, '');
   if (/[?[\]{}]/.test(p)) throw new Error('шаблон ' + pattern + ' pnpm-workspace.yaml не разбирается пробой (знаки ? [ ] { }) - разбери руками');
-  return p.replace(/\*\*?/g, NEW_SIBLING);
+  const one = p.replace(/\*\*?/g, NEW_SIBLING);
+  if (!p.includes('**')) return [one];
+  return [one, p.replace(/\*\*/g, NEW_SIBLING + '/' + NEW_SIBLING).replace(/\*/g, NEW_SIBLING)];
 }
 
 /**
- * Файлы, из которых turbo строит граф: корневые package.json, pnpm-workspace.yaml и turbo.json;
- * у каждого пакета dry - его package.json и turbo.json (`extends ["//"]` правит inputs задач
- * пакета; файла может не быть - turbo прочтёт его, как только он появится); у каждого шаблона
- * patterns pnpm-workspace.yaml - те же два файла нового пакета patternPackage: шаблон добавит
- * пакет без правки pnpm-workspace.yaml, и шаблон без единого пакета (`tools/*`) - тоже, поэтому
- * glob обязан покрывать шаблон, а не перечень сегодняшних пакетов. Исключающий шаблон (`!x`)
- * пакетов не добавляет. [{ file, why }] без повторов.
+ * Файлы конфигурации turbo в каталоге: turbo 2.10 читает и turbo.json, и turbo.jsonc (проверено
+ * живым прогоном, TECH_DEBT 21.10.2026 E0-12L круг 4, `turbo.jsonc`) - оба в источниках графа.
+ */
+const TURBO_CONFIGS = ['turbo.json', 'turbo.jsonc'];
+
+/**
+ * Файлы, из которых turbo строит граф: корневые package.json, pnpm-workspace.yaml, turbo.json и
+ * turbo.jsonc; у каждого пакета dry - его package.json, turbo.json и turbo.jsonc (`extends ["//"]`
+ * правит inputs задач пакета; файла может не быть - turbo прочтёт его, как только он появится); у
+ * каждого шаблона patterns pnpm-workspace.yaml - те же файлы нового пакета patternPackages: шаблон
+ * добавит пакет без правки pnpm-workspace.yaml, и шаблон без единого пакета (`tools/*`) - тоже,
+ * поэтому glob обязан покрывать шаблон, а не перечень сегодняшних пакетов. Исключающий шаблон
+ * (`!x`) пакетов не добавляет. [{ file, why }] без повторов.
  */
 function graphSources(dry, patterns) {
   const out = new Map([
     ['package.json', 'корневой манифест'],
     ['pnpm-workspace.yaml', 'пакеты workspace'],
-    ['turbo.json', 'задачи turbo'],
   ]);
   const add = (file, why) => { if (!out.has(file)) out.set(file, why); };
-  for (const [name, dir] of dryPackages(dry)) {
-    add(inDir(dir, 'package.json'), 'манифест ' + name);
-    add(inDir(dir, 'turbo.json'), 'turbo.json пакета ' + name);
-  }
+  for (const f of TURBO_CONFIGS) add(f, 'задачи turbo');
+  const pkgFiles = (dir, who) => {
+    add(inDir(dir, 'package.json'), 'манифест ' + who);
+    for (const f of TURBO_CONFIGS) add(inDir(dir, f), f + ' ' + who);
+  };
+  for (const [name, dir] of dryPackages(dry)) pkgFiles(dir, 'пакета ' + name);
   for (const pattern of patterns) {
     if (pattern.startsWith('!')) continue;
-    const dir = patternPackage(pattern);
-    add(inDir(dir, 'package.json'), 'манифест нового пакета по шаблону ' + pattern);
-    add(inDir(dir, 'turbo.json'), 'turbo.json нового пакета по шаблону ' + pattern);
+    for (const dir of patternPackages(pattern)) pkgFiles(dir, 'нового пакета по шаблону ' + pattern);
   }
   return Array.from(out, ([file, why]) => ({ file, why }));
 }
@@ -514,7 +656,7 @@ const STUB_DIR = 'selftest-stub';
 const STUB_PACKAGE = '@sf/selftest-stub';
 const STUB_GLOBAL = STUB_DIR + '/selftest-global.json';
 const STUB_PATTERN = STUB_DIR + '/*';
-const STUB_SOURCES = ['package.json', 'turbo.json', NEW_SIBLING + '/package.json', NEW_SIBLING + '/turbo.json'].map((f) => STUB_DIR + '/' + f);
+const STUB_SOURCES = ['package.json', ...TURBO_CONFIGS, NEW_SIBLING + '/package.json', ...TURBO_CONFIGS.map((f) => NEW_SIBLING + '/' + f)].map((f) => STUB_DIR + '/' + f);
 const STUB_FILES = STUB_SOURCES.concat(STUB_GLOBAL);
 
 /** taskId стаб-задачи script. */
@@ -571,7 +713,7 @@ function stubCut(dry, taskId) {
 function stubWithoutInput(dry, taskId, file) {
   requireTask(dry, taskId);
   const t = dry.tasks.find((x) => x.taskId === taskId);
-  const dir = posixDir(t.directory);
+  const dir = packageDir(t);
   const keys = Object.keys(t.inputs).filter((k) => inRoot(dir, k, taskId) !== file);
   if (keys.length === Object.keys(t.inputs).length) throw new Error('стаб: у задачи ' + taskId + ' нет входа ' + file);
   const inputs = Object.fromEntries(keys.map((k) => [k, t.inputs[k]]));
@@ -598,11 +740,19 @@ module.exports = {
   scriptKey,
   turboEnv,
   underNodeModules,
+  strictlyUnder,
+  outsideRoot,
+  under,
+  ownFiles,
+  inRoot,
   turboDry,
+  EXTRA_INPUTS,
   workspacePatterns,
   rootTasks,
   taskGraph,
   manifestGap,
+  manifestClosure,
+  peerOnly,
   inputsGap,
   globalReads,
   dryPackages,

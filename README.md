@@ -47,7 +47,9 @@ docs          project documentation (RU engineering docs + original EN blueprint
 
 ## Getting started
 
-**Prerequisites:** Node 22 (`engines` in `package.json`); pnpm 9.12 through corepack
+**Prerequisites:** Node 22.18+ on the 22 line, 23.6+ on the 23 line, or 24+ (`engines` in
+`package.json`, `.nvmrc` and `.node-version` pin 22.18; the harness self-check loads `test/imports.ts`
+with `require`, which needs type stripping on by default - 22.18 and 23.6); pnpm 9.12 through corepack
 (`packageManager` pins the version); Docker with Compose - on Windows, Docker Desktop with the
 WSL2 backend.
 

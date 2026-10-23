@@ -106,9 +106,105 @@ export function importSpecifiers(fileName: string, text: string): string[] {
   return found;
 }
 
+/** The path functions whose call with `repoRoot` first names a file. */
+const PATH_CALLS = new Set(["join", "resolve"]);
+
 /**
- * The name a call is made by: `resolve` of `resolve(…)` and of
- * `path.resolve(…)`; null for any other callee (`f()()`, `a[b]()`).
+ * One use of the identifier `repoRoot` in a module, with its line (from 1):
+ * - `path` - a `join(repoRoot, …)` or `resolve(repoRoot, …)` call (`join`,
+ *   `resolve`, `path.join`, `path.resolve`): `path` is its parts after
+ *   `repoRoot` joined with `/`, or `DYNAMIC_SPECIFIER` when a part is not a
+ *   string literal or a template without substitutions;
+ * - `other` - any other mention: an argument of another call
+ *   (`relative(repoRoot, …)`, `dirname(repoRoot)`), a template, an alias
+ *   (`import { repoRoot as root }`), a property, an array element.
+ * The declaration of `repoRoot` and its import under its own name are not
+ * uses.
+ */
+export type RepoRootUse =
+  | { kind: "path"; callee: string; path: string; line: number }
+  | { kind: "other"; line: number };
+
+/**
+ * Every use of `repoRoot` in a module, in the order of the file - what
+ * `harness-selftest` takes for the files an integration run reads: a `path`
+ * use is a read, an `other` use is a refusal to be checked by hand, since
+ * what it reads cannot be told from the text. The text of a comment or a
+ * string is not a use. Paths built from `new URL(…, import.meta.url)` or
+ * `fileURLToPath` without `repoRoot` are not seen here.
+ */
+export function repoRootUses(fileName: string, text: string): RepoRootUse[] {
+  const source = ts.createSourceFile(
+    fileName,
+    text,
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const lineOf = (node: ts.Node): number =>
+    source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+  const consumed = new Set<ts.Node>();
+  const found: RepoRootUse[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = calleeName(node.expression);
+      const [first, ...rest] = node.arguments;
+      if (
+        callee !== null &&
+        PATH_CALLS.has(callee) &&
+        first !== undefined &&
+        isRepoRoot(first)
+      ) {
+        consumed.add(first);
+        const parts: string[] = [];
+        for (const part of rest) {
+          const value = literal(part);
+          if (value === null) break;
+          parts.push(value);
+        }
+        found.push({
+          kind: "path",
+          callee,
+          path:
+            parts.length > 0 && parts.length === rest.length
+              ? parts.join("/")
+              : DYNAMIC_SPECIFIER,
+          line: lineOf(node),
+        });
+      }
+    } else if (
+      isRepoRoot(node) &&
+      !consumed.has(node) &&
+      !declaresRepoRoot(node)
+    ) {
+      found.push({ kind: "other", line: lineOf(node) });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
+/** Whether `node` is the identifier `repoRoot`. */
+function isRepoRoot(node: ts.Node): boolean {
+  return ts.isIdentifier(node) && node.text === "repoRoot";
+}
+
+/**
+ * Whether the identifier `repoRoot` names itself rather than uses a value:
+ * the name of its `const`, or its import under the same name
+ * (`import { repoRoot }`, not `import { repoRoot as root }`).
+ */
+function declaresRepoRoot(node: ts.Node): boolean {
+  const parent = node.parent;
+  if (parent === undefined) return false;
+  if (ts.isVariableDeclaration(parent)) return parent.name === node;
+  return ts.isImportSpecifier(parent) && parent.propertyName === undefined;
+}
+
+/**
+ * The name a call is made by: `join` of `join(…)` and of `path.join(…)`,
+ * `resolve` of `resolve(…)` and of `path.resolve(…)`; null for any other
+ * callee (`f()()`, `a[b]()`).
  */
 export function calleeName(callee: ts.Expression): string | null {
   if (ts.isIdentifier(callee)) return callee.text;

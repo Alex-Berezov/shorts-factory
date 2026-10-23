@@ -17,8 +17,18 @@ Say "репозиторий: $Root"
 Write-Host ""
 
 # --- 0. Node и git ---
-try { $nodeVersion = (& node --version) } catch { throw "Не найден node. Хуки написаны на Node - поставь Node.js 20+." }
+try { $nodeVersion = (& node --version) } catch { throw "Не найден node. Хуки написаны на Node - поставь Node.js 22.18+ (линия 22.x), 23.6+ (линия 23.x) или 24+ (engines в package.json)." }
 Say "node $nodeVersion"
+# Граница Node - как nodeVerdict в harness-selftest.js: 22.18+ в линии 22.x, 23.6+ в линии 23.x, 24+.
+function Test-NodeFloor([string]$version) {
+    if ($version -notmatch '^v?(\d+)\.(\d+)\.') { return $false }
+    $major = [int]$Matches[1]; $minor = [int]$Matches[2]
+    return ($major -gt 23) -or ($major -eq 22 -and $minor -ge 18) -or ($major -eq 23 -and $minor -ge 6)
+}
+if (-not (Test-NodeFloor $nodeVersion)) {
+    $Problems += "node $nodeVersion ниже границы: нужен Node 22.18+ (линия 22.x), 23.6+ (линия 23.x) или 24+ (engines в package.json)"
+    Say "node $nodeVersion ниже границы 22.18 / 23.6 / 24" "Red"
+}
 if (-not (Test-Path (Join-Path $Root ".git"))) { $Problems += "в $Root нет .git - замки работают по диффу и без git бесполезны" ; Say "нет .git" "Red" }
 
 # --- 1. Снимок (10 последних) ---

@@ -54,8 +54,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+      # node-version 22 with check-latest is the newest 22.x, not a 22.x the
+      # runner has cached: at or above the engines floor (22.18,
+      # package.json) - test/imports.ts is loaded with require.
       - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: pnpm }
+        with: { node-version: 22, check-latest: true, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       # The local cache of turbo (.turbo/cache, the default of turbo 2.10)
       # replays a task whose inputs did not change. One archive per ISO week:
@@ -134,8 +137,11 @@ jobs:
         image: [api, migrate, web, worker]
     steps:
       - uses: actions/checkout@v4
+      # node-version 22 with check-latest is the newest 22.x, not a 22.x the
+      # runner has cached: at or above the engines floor (22.18,
+      # package.json) - test/imports.ts is loaded with require.
       - uses: actions/setup-node@v4
-        with: { node-version: 22 }
+        with: { node-version: 22, check-latest: true }
       - uses: docker/setup-buildx-action@v3
       # One target of the one Dockerfile, loaded into the local engine for the
       # probe under the tag it runs by default (imageTag of

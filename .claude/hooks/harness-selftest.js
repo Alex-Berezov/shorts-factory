@@ -33,7 +33,7 @@ const ALLOWED_MODELS = new Set(['opus', 'sonnet', 'haiku', 'fable', 'inherit']);
 const HOOK_FILES = [
   'lib.js', 'diff-hash.js', 'standards.js', 'commit-gate.js',
   'answer-length.js', 'report-honesty.js', 'remind-format.js',
-  'gates.js', 'selftest-graph.js',
+  'gates.js', 'selftest-graph.js', 'selftest-vitest.mjs', 'selftest-temp.js',
 ];
 
 const results = [];
@@ -41,19 +41,39 @@ function ok(name, note) { results.push({ ok: true, name, note }); }
 function fail(name, note) { results.push({ ok: false, name, note }); }
 /**
  * Результат пробы, которая не гонялась: её отказ уже назван своей красной строкой. Его отдаёт
- * только graphGate.guard, и только когда строка «граф turbo: dry-JSON настоящего дерева» красная.
+ * только snapshotGate.guard, и только когда строка «граф turbo: dry-JSON настоящего дерева» красная.
  */
 const SKIPPED = Symbol('skipped');
-function check(name, fn) {
+/**
+ * Исключение пробы, которой нужен ленивый снимок (snapshotGate с lazy: take), а он не снят: проба
+ * не гонялась, её имя уходит в перечень снимка (state.blocked), строки нет - отказ называет одна
+ * строка снимка.
+ */
+class GateBlocked extends Error {
+  constructor(state) {
+    super('снимок не снят: ' + state.error);
+    this.state = state;
+  }
+}
+/** Итог пробы name: { ok, name, note } или null - проба не гонялась (SKIPPED, GateBlocked). */
+function outcome(name, fn) {
   try {
     const r = fn();
-    if (r === SKIPPED) return;
-    if (r === false) fail(name, '');
-    else if (typeof r === 'string') fail(name, r);
-    else ok(name, typeof r === 'object' && r && r.note ? r.note : '');
+    if (r === SKIPPED) return null;
+    if (r === false) return { ok: false, name, note: '' };
+    if (typeof r === 'string') return { ok: false, name, note: r };
+    return { ok: true, name, note: typeof r === 'object' && r && r.note ? r.note : '' };
   } catch (e) {
-    fail(name, (e && e.message) || String(e));
+    if (e instanceof GateBlocked) {
+      e.state.blocked.push(name);
+      return null;
+    }
+    return { ok: false, name, note: (e && e.message) || String(e) };
   }
+}
+function check(name, fn) {
+  const r = outcome(name, fn);
+  if (r) results.push(r);
 }
 
 /**
@@ -67,26 +87,171 @@ function run(cmd, args, opts) {
 }
 
 /**
- * Модуль графа selftest-graph.js грузится только после пробы синтаксиса (`node --check`), как
- * gates.js - после пробы require (gatesModuleSafe): синтаксическая ошибка или исключение при
- * загрузке модуля - одна красная строка и итог сразу (код 1), а не стек вместо отчёта. Без
- * модуля пробы гейтов build, test:int и harness-selftest не построить, поэтому прогон кончается.
+ * Реестр временных каталогов прогона (E0-12T, TECH_DEBT 19.10.2026 E0-12D «каталоги sf-selftest-* в
+ * %TEMP%»): модуль selftest-temp.js, его же берёт дочерний node пробы обработчика exit.
+ */
+const { makeTempRegistry } = require('./selftest-temp.js');
+const TEMP = makeTempRegistry({ fs, os, path, isNotFile: L.isNotFile });
+const tempDir = TEMP.tempDir;
+const dropTemp = TEMP.dropTemp;
+/**
+ * Дочерние процессы, запущенные без ожидания (startVitest): выход прогона до их ответа (report()
+ * внутри пробы, Ctrl+C) снимает их SIGKILL до снятия каталогов реестра - иначе на Windows каталог с
+ * открытыми ими файлами stdout/stderr не снимается (EBUSY) и остаётся в %TEMP%. children - набор
+ * (по умолчанию LIVE_CHILDREN; кейс берёт свой).
+ */
+const LIVE_CHILDREN = new Set();
+function killLiveChildren(children = LIVE_CHILDREN) {
+  for (const child of children) {
+    try {
+      child.kill('SIGKILL');
+    } catch (_) {
+      // выход процесса: ребёнок уже вышел или не запускался
+    }
+  }
+  children.clear();
+}
+// report()/process.exit внутри пробы и Ctrl+C (SIGINT -> exit(130)) минуют finally проб: каталоги
+// реестра снимает выход процесса. Убитый снаружи процесс (TerminateProcess, SIGKILL) обработчиков
+// не зовёт - так остались каталоги пачки 19.10.2026 (файл дела E0-12T, шаг 11).
+// обработчик exit получает код выхода первым аргументом - набор ему не передаётся
+function killLiveChildrenOnExit() {
+  killLiveChildren();
+}
+process.on('exit', killLiveChildrenOnExit);
+process.on('exit', TEMP.dropAll);
+process.on('SIGINT', () => process.exit(130));
+
+/**
+ * Снятие каталога, чей сбой не подменяет итог пробы и не роняет прогон до report(): EBUSY/EPERM
+ * на Windows (каталог держит только что вышедший дочерний процесс) - запись в DROP_FAILURES, её
+ * называет проба «временные каталоги прогона сняты» в конце, каталог остаётся в реестре (live) и
+ * снимается ещё раз обработчиком exit. opts - как у dropTemp. true - снят.
+ */
+const DROP_FAILURES = [];
+function releaseTemp(dir, opts) {
+  try {
+    dropTemp(dir, opts);
+    return true;
+  } catch (e) {
+    DROP_FAILURES.push(dir + ': ' + ((e && e.message) || String(e)));
+    return false;
+  }
+}
+
+/**
+ * Пути p нет: lstat отвечает ENOENT или ENOTDIR (L.isNotFile). Иная ошибка (EACCES, EPERM) -
+ * исключение, а не «нет»: existsSync глотает любую ошибку, и недоступный файл сошёл бы за
+ * отсутствующий (L-027, L-028). lstat - подмена для кейса.
+ */
+function absent(p, lstat = fs.lstatSync) {
+  try {
+    lstat(p);
+    return false;
+  } catch (e) {
+    if (L.isNotFile(e)) return true;
+    throw e;
+  }
+}
+
+/** Пустой каталог хуков git на весь прогон: core.hooksPath временных репозиториев проб. */
+let noHooks = null;
+function noHooksDir() {
+  if (!noHooks) noHooks = tempDir('nohooks');
+  return noHooks;
+}
+
+/** Имя программы git в помощнике git(); имя в кавычках в другом месте или вызов мимо помощника - красный (кейс ниже). */
+const GIT_BIN = 'git';
+/**
+ * Все вызовы git проб selftest (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «изоляция git в пробах», решение техлида Р6): всегда
+ * `-c core.fsmonitor=false` - глобальный fsmonitor - внешняя команда, git исполнил бы её в пробе;
+ * opts.isolated - временный репозиторий пробы с коммитом: `-c core.hooksPath=<пустой каталог
+ * прогона>` и `-c commit.gpgsign=false` (глобальный pre-commit и подпись машины в пробе не
+ * исполняются). opts.cwd, opts.env, opts.maxBuffer - в spawn; opts.spawn и opts.bin - подмена
+ * для кейсов. Результат - как у run. Боевые хуки (commit-gate, diff-hash, gates.js) и
+ * isolatedGitEnv тестов этим помощником не покрыты (TECH_DEBT, Р6).
+ */
+function git(args, opts) {
+  const o = opts || {};
+  const pre = ['-c', 'core.fsmonitor=false'];
+  if (o.isolated) pre.push('-c', 'core.hooksPath=' + noHooksDir(), '-c', 'commit.gpgsign=false');
+  const spawnOpts = {};
+  for (const key of ['cwd', 'env', 'maxBuffer']) if (o[key] !== undefined) spawnOpts[key] = o[key];
+  return (o.spawn || run)(o.bin || GIT_BIN, pre.concat(args), spawnOpts);
+}
+/**
+ * git(args, opts), чей сбой - исключение с подкомандой и stderr: временные репозитории проб.
+ * Подкоманда - первый аргумент, который не пара `-c <ключ=значение>` (замечание ревью C13 E0-12T:
+ * `-c user.name=…` впереди съедал имя шага).
+ */
+function gitStrict(args, opts) {
+  const r = git(args, opts);
+  if (r.error || r.status !== 0) {
+    const sub = args.find((a, i) => a !== '-c' && args[i - 1] !== '-c');
+    throw new Error('git ' + String(sub) + ': ' + String((r.error && r.error.message) || r.stderr).slice(0, 160));
+  }
+  return r;
+}
+
+// ------------------------------------------------------------------ 1. синтаксис хуков
+/**
+ * Проба синтаксиса (`node --check`) - один раз на файл за прогон: её результат берёт и загрузчик
+ * модуля графа (SYNTAX_OK), второго `node --check` нет.
+ */
+const SYNTAX_OK = new Map();
+for (const f of HOOK_FILES) {
+  check('синтаксис ' + f, () => {
+    const p = path.join(HOOKS, f);
+    if (!fs.existsSync(p)) return 'файла нет';
+    const r = run(process.execPath, ['--check', p]);
+    SYNTAX_OK.set(f, r.status === 0);
+    return r.status === 0 ? true : String(r.stderr).split('\n')[0];
+  });
+}
+
+/** Строки текста text, на которых re находит совпадение: номера с 1. */
+function linesMatching(text, re) {
+  return text.split(/\r?\n/).map((line, i) => (re.test(line) ? i + 1 : 0)).filter(Boolean);
+}
+/**
+ * Модули самопроверки без exit процесса: selftest-vitest.mjs выходит, когда цикл событий опустел
+ * (решение техлида Р3 E0-12T: vite снимает свой `<конфиг>.timestamp-*.mjs` неожидаемым unlink, и
+ * ранний выход оставил бы файл в дереве); selftest-temp.js процессом не распоряжается (решение
+ * техлида B4 E0-12T). Сверка по тексту без комментариев не строится, поэтому запрещено само имя
+ * вызова в любом месте файла (сканер linesMatching); сторона отказа - текст со вставленным вызовом.
+ */
+const EXIT_CALL = /\bprocess\s*\.\s*(?:exit|reallyExit|abort)\b/;
+const NO_EXIT_FILES = ['selftest-vitest.mjs', 'selftest-temp.js'];
+check('selftest-vitest.mjs и selftest-temp.js не выходят через exit процесса (Р3, B4), вызов exit в тексте - отказ', () => {
+  const bad = [];
+  for (const f of NO_EXIT_FILES) {
+    for (const n of linesMatching(fs.readFileSync(path.join(HOOKS, f), 'utf8'), EXIT_CALL)) bad.push(f + ':' + n);
+  }
+  if (bad.length) return 'exit процесса: ' + bad.join(', ');
+  return linesMatching('const a = 1;\nprocess' + '.exit(0);\n', EXIT_CALL).join() === '2' || 'вызов exit в тексте не пойман - сверка слепа';
+});
+
+/**
+ * Модуль графа selftest-graph.js грузится после пробы синтаксиса (её результат - SYNTAX_OK), как
+ * gates.js - после пробы require (gatesModuleSafe). Синтаксическая ошибка - красная строка синтаксиса,
+ * исключение при загрузке - одна строка здесь; в обоих случаях G = null: пробы графа не гоняются
+ * (строка «граф turbo: dry-JSON настоящего дерева» называет их), остальные пробы идут.
  */
 const G = loadGraphModule();
 function loadGraphModule() {
-  const file = path.join(HOOKS, 'selftest-graph.js');
-  const name = 'selftest-graph.js загружается (node --check до require)';
-  const r = run(process.execPath, ['--check', file]);
-  if (r.status !== 0) {
-    fail(name, String(r.stderr || (r.error && r.error.message) || 'код ' + r.status).split(/\r?\n/).map((s) => s.trim()).filter(Boolean).slice(0, 3).join(' | '));
-    report();
-  }
+  if (SYNTAX_OK.get('selftest-graph.js') !== true) return null;
   try {
-    return require(file);
+    return require(path.join(HOOKS, 'selftest-graph.js'));
   } catch (e) {
-    fail(name, 'require: ' + ((e && e.message) || String(e)));
-    return report();
+    fail('selftest-graph.js загружается require', (e && e.message) || String(e));
+    return null;
   }
+}
+
+/** Ключ скрипта в тексте отказа: из модуля графа, без модуля - имя скрипта как есть. */
+function scriptKey(script) {
+  return G ? G.scriptKey(script) : script;
 }
 
 /*
@@ -109,58 +274,103 @@ function liveBytes() {
 const LIVE_BYTES = liveBytes();
 /**
  * Снимок рабочего дерева до первой пробы: последняя проба сверяет с ним текущий. Файлы проб
- * живут во временных папках (withScratchTree), и любая разница - проба, которая пишет мимо них
- * или не убрала за собой. В снимке три вещи (E0-12D, B8 круга 1):
+ * живут во временных каталогах (tempDir, withScratchTree), и любая разница - проба, которая пишет
+ * мимо них или не убрала за собой. В снимке (E0-12D, B8 круга 1; E0-12T, решение техлида Р4 E0-12L):
  *   - каждая запись git status (новый, изменённый, удалённый файл) с отпечатком содержимого:
  *     перезапись файла, который уже был `M` или `??`, меняет отпечаток, а не строку status;
- *   - игнорируемые записи (`!!`, по одной на каталог - node_modules/, .turbo/): новый файл
- *     под .gitignore status без --ignored не показывает;
- *   - ничего больше: новый файл внутри уже игнорируемого каталога снимок не видит (TECH_DEBT, E0-12T).
- * Правка руками или другой процесс в то же время даёт ту же красную строку - тогда перезапуск.
+ *   - каждый игнорируемый файл (`!!` поштучно: `--ignored=traditional --untracked-files=all`) с
+ *     отпечатком размер+mtime: новый или переписанный файл внутри уже игнорируемого каталога
+ *     (`coverage/`, `.turbo/`, `vitest.int.config.ts.timestamp-*.mjs` рядом с конфигом - Р3
+ *     E0-12T) виден; исключений нет: turbo dry в `.turbo/` не пишет (замер E0-12T, шаг 0);
+ *   - `node_modules` - кроме: их файлы не перечисляются (pathspec exclude с маской node_modules,
+ *     десятки тысяч файлов), каталоги - по одному (`git ls-files --others --ignored --directory`), как
+ *     прежде. Условие: проба не пишет в node_modules - новый файл внутри них снимок не видит.
+ * Правка руками или другой процесс в то же время (IDE, turbo daemon) даёт ту же красную строку -
+ * тогда перезапуск; пути, которые пишет сессия во время фонового прогона (.qa-state, файлы дела),
+ * treeDiff не сравнивает - именованный перечень TREE_NOT_COMPARED (ОВ2 E0-12T).
  * root - корень рабочего дерева (по умолчанию репозиторий; проба сверки берёт временный).
  * Возвращает Map<запись, отпечаток>; сбой git - исключение (его ловит проба, не верхний уровень).
  */
 function repoSnapshot(root = ROOT) {
-  const status = (extra) => {
-    // core.fsmonitor=false: глобальный fsmonitor - внешняя команда, status её бы исполнил.
-    const r = run('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain=v1', '-z'].concat(extra), { cwd: root });
-    if (r.error || r.status !== 0) throw new Error('git status: ' + String((r.error && r.error.message) || r.stderr || 'код ' + r.status).slice(0, 160));
+  const listing = (args) => {
+    const r = git(args, { cwd: root, maxBuffer: LISTING_MAX_BUFFER });
+    if (r.error || r.status !== 0) throw new Error('git ' + args[0] + ': ' + String((r.error && r.error.message) || r.stderr || 'код ' + r.status).slice(0, 160));
     return String(r.stdout).split('\0');
   };
-  const crypto = require('crypto');
-  const fingerprint = (rel) => {
-    try {
-      const abs = path.join(root, rel);
-      return fs.statSync(abs).isFile() ? crypto.createHash('sha1').update(fs.readFileSync(abs)).digest('hex') : 'не файл';
-    } catch (e) {
-      if (L.isGone(e)) return 'нет на диске';
-      throw e;
-    }
-  };
+  const fingerprint = (rel, ignored) => snapshotPrint(path.join(root, rel), ignored);
   const snap = new Map();
-  const tracked = status(['--untracked-files=all']);
-  for (let i = 0; i < tracked.length; i++) {
-    const e = tracked[i];
+  const status = listing(['status', '--porcelain=v1', '-z', '--ignored=traditional', '--untracked-files=all', '--', '.', ':(exclude,glob)**/node_modules/**']);
+  for (let i = 0; i < status.length; i++) {
+    const e = status[i];
     if (!e) continue;
     const xy = e.slice(0, 2);
     const rel = e.slice(3);
     // у переименования и копии за записью идёт прежний путь отдельным полем -z
     if (/[RC]/.test(xy)) i++;
-    snap.set(xy + ' ' + rel, fingerprint(rel));
+    snap.set(xy + ' ' + rel, fingerprint(rel, xy === '!!'));
   }
-  for (const e of status(['--ignored=traditional', '--untracked-files=normal'])) {
-    if (e.startsWith('!! ')) snap.set(e, '');
+  // игнорируемые каталоги целиком (--directory); отбор node_modules - регэксп ниже: прежний pathspec
+  // `**/node_modules/` с --directory пропускал и .turbo/, dist/ (замер Fix 2 E0-12T: 28 записей, из них
+  // 13 node_modules - те же 13, что без него), фильтром он не был (замечание ревью C14 E0-12T)
+  for (const dir of listing(['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'])) {
+    if (/(?:^|\/)node_modules\/$/.test(dir)) snap.set('!! ' + dir, '');
   }
   return snap;
 }
-/** Разница двух снимков repoSnapshot строками «появилось / изменилось содержимое / пропало <запись>». */
+/**
+ * Отпечаток записи снимка repoSnapshot по абсолютному пути abs. Игнорируемая (ignored) - размер и
+ * mtime самой записи (lstat: ссылку не проходит). Прочие - sha1 содержимого цели (stat и чтение идут
+ * по ссылке: правка цели отслеживаемой или новой ссылки на файл видна, замечание ревью C11 E0-12T),
+ * каталог и ссылка на каталог - «не файл»; записи (или цели ссылки) нет - «нет на диске». io -
+ * подмена для кейса: { lstat, stat, read }.
+ */
+function snapshotPrint(abs, ignored, io) {
+  const o = io || { lstat: fs.lstatSync, stat: fs.statSync, read: fs.readFileSync };
+  try {
+    if (ignored) {
+      const st = o.lstat(abs);
+      return st.size + ' ' + st.mtimeMs;
+    }
+    return o.stat(abs).isFile() ? require('crypto').createHash('sha1').update(o.read(abs)).digest('hex') : 'не файл';
+  } catch (e) {
+    if (L.isGone(e)) return 'нет на диске';
+    throw e;
+  }
+}
+/**
+ * Пути, которые сверка дерева не сравнивает (ОВ2 техлида E0-12T), по образцу HASHED_NOT_READ: их
+ * пишут не пробы, а сессия, пока gates.js гоняет selftest в фоне. Запись - точный путь (path),
+ * префикс (prefix) или пара префикс+суффикс со средней частью без «/» (prefix и suffix); у каждой
+ * причина. Ни glob, ни regex: новая запись - новая строка здесь, с причиной и кейсом в пробе сверки.
+ */
+const TREE_NOT_COMPARED = [
+  { path: '.claude/.qa-state', why: 'боевое состояние хуков сессии: пишут Stop- и PostToolUse-хуки во время фонового прогона; пробы сверяет строка «боевой .qa-state байт в байт»' },
+  { prefix: '.claude/.qa-state.', suffix: '.tmp', why: 'временный файл атомарной записи .qa-state (lib.js: <путь>.<pid>.tmp) тех же хуков сессии' },
+  { prefix: 'tasks/', why: 'файлы дела: их пишет оркестратор и агенты, пока идут гейты; пробы в tasks/ не пишут' },
+];
+/** Путь rel (от корня) под записью TREE_NOT_COMPARED: точное равенство, префикс, префикс+суффикс. */
+function treeNotCompared(rel) {
+  return TREE_NOT_COMPARED.some((x) => {
+    if (x.path !== undefined) return rel === x.path;
+    if (!rel.startsWith(x.prefix)) return false;
+    if (x.suffix === undefined) return true;
+    const middle = rel.slice(x.prefix.length, rel.length - x.suffix.length);
+    return rel.length > x.prefix.length + x.suffix.length && rel.endsWith(x.suffix) && !middle.includes('/');
+  });
+}
+/**
+ * Разница двух снимков repoSnapshot строками «появилось / изменилось содержимое / пропало <запись>»;
+ * записи с путём под TREE_NOT_COMPARED не называются.
+ */
 function treeDiff(before, now) {
   const diff = [];
+  const counted = (entry) => !treeNotCompared(entry.slice(3));
   for (const [entry, print] of now) {
+    if (!counted(entry)) continue;
     if (!before.has(entry)) diff.push('появилось ' + entry);
     else if (before.get(entry) !== print) diff.push('изменилось содержимое ' + entry);
   }
-  for (const entry of before.keys()) if (!now.has(entry)) diff.push('пропало ' + entry);
+  for (const entry of before.keys()) if (counted(entry) && !now.has(entry)) diff.push('пропало ' + entry);
   return diff;
 }
 let LIVE_TREE = null;
@@ -170,10 +380,9 @@ try {
 } catch (e) {
   LIVE_TREE_ERROR = (e && e.message) || String(e);
 }
-const PROBE_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-state-'));
+// каталог состояния проб живёт до выхода процесса: его снимает обработчик exit реестра (TEMP.dropAll)
+const PROBE_STATE_DIR = tempDir('state');
 process.env.SF_HOOK_STATE_DIR = PROBE_STATE_DIR;
-process.on('exit', () => fs.rmSync(PROBE_STATE_DIR, { recursive: true, force: true }));
-process.on('SIGINT', () => process.exit(130));
 
 /**
  * Запуск хука с JSON на stdin (hooksDir - каталог хуков, по умолчанию боевой; extraEnv -
@@ -190,27 +399,30 @@ const HOOK_ERROR = 'hook error:';
 
 /**
  * Пробы standards.js не пишут в боевые src (E0-12D, TECH_DEBT: прерванный прогон оставлял
- * zz_selftest_* под git add -A). Дерево пробы - временная папка с копией .claude/hooks
- * (*.js и *.json байт в байт, repos.json тот же: репозиторий sf - корень копии) и файлами
- * пробы по их путям от корня репозитория, так что glob правил и rules.sf.json те же, что
- * у боевого хука. Папка убирается в finally, в том числе после красной строки.
+ * zz_selftest_* под git add -A). Дерево пробы - временный каталог (tempDir) с полной копией
+ * .claude/hooks (copyHooksTo: каждый файл и подкаталог байт в байт, repos.json тот же:
+ * репозиторий sf - корень копии) и файлами пробы по их путям от корня репозитория, так что glob
+ * правил и rules.sf.json те же, что у боевого хука. Каталог снимается в finally (dropTemp), в
+ * том числе после красной строки.
  *   tree.dir              - корень дерева (пробе, которой нужен git в нём);
  *   tree.write(rel, body) - пишет файл пробы и отдаёт абсолютный путь;
  *   tree.standards(rel)   - запуск копии standards.js на этом файле ({ code, out, err }).
  * Хук идёт с CLAUDE_HOOK_DEBUG: исключение внутри L.guard без failClosed даёт код 0 и пустой
  * stdout - ровно как пропуск, - и отличить их можно только по строке HOOK_ERROR в stderr.
  */
-/** Копия хуков (*.js, *.json) в <dir>/.claude/hooks - одна для дерева standards и дерева gates.js. */
-function copyHooksTo(dir) {
+/**
+ * Полная копия каталога хуков from (по умолчанию боевой) в <dir>/.claude/hooks - одна для дерева
+ * standards и дерева gates.js (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 3, `withScratchTree`): хук с иным расширением или в
+ * подкаталоге в пробу попадает (кейс полноты копии ниже).
+ */
+function copyHooksTo(dir, from = HOOKS) {
   const hooks = path.join(dir, '.claude', 'hooks');
-  fs.mkdirSync(hooks, { recursive: true });
-  for (const f of fs.readdirSync(HOOKS)) {
-    if (/\.(?:js|json)$/.test(f)) fs.copyFileSync(path.join(HOOKS, f), path.join(hooks, f));
-  }
+  fs.mkdirSync(path.dirname(hooks), { recursive: true });
+  fs.cpSync(from, hooks, { recursive: true });
   return hooks;
 }
 function withScratchTree(fn) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-tree-'));
+  const dir = tempDir('tree');
   try {
     const hooks = copyHooksTo(dir);
     const abs = (rel) => path.join(dir, ...rel.split('/'));
@@ -224,8 +436,22 @@ function withScratchTree(fn) {
       standards: (rel) => probe('standards.js', { tool_input: { file_path: abs(rel) } }, dir, hooks, { CLAUDE_HOOK_DEBUG: '1' }),
     });
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    releaseTemp(dir);
   }
+}
+
+/** Файлы каталога dir рекурсивно, пути от него с `/`, по алфавиту. */
+function filesUnder(dir) {
+  const out = [];
+  const walk = (sub) => {
+    for (const entry of fs.readdirSync(path.join(dir, sub), { withFileTypes: true })) {
+      const rel = sub ? sub + '/' + entry.name : entry.name;
+      if (entry.isDirectory()) walk(rel);
+      else out.push(rel);
+    }
+  };
+  walk('');
+  return out.sort();
 }
 
 function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
@@ -240,16 +466,6 @@ function frontmatter(file) {
     if (kv) fm[kv[1]] = kv[2].trim();
   }
   return fm;
-}
-
-// ------------------------------------------------------------------ 1. синтаксис хуков
-for (const f of HOOK_FILES) {
-  check('синтаксис ' + f, () => {
-    const p = path.join(HOOKS, f);
-    if (!fs.existsSync(p)) return 'файла нет';
-    const r = run(process.execPath, ['--check', p]);
-    return r.status === 0 ? true : String(r.stderr).split('\n')[0];
-  });
 }
 
 // ------------------------------------------------------------------ 2. правила и репозитории
@@ -309,7 +525,7 @@ check('у каждого гейта есть id, cmd и when', () => {
  * У гейта пробы есть timeoutSec (без него runGate ответил бы «нет предела», не дойдя до cp.spawn),
  * подменённый spawn сразу «завершает» команду, а итог пробы печатается на beforeExit - когда цикл
  * событий опустел: main() асинхронный, и без стража его запуск, отметка и process.exit идут после
- * await, позже синхронного конца require (E0-12M, круг fix 2, C8).
+ * await, позже синхронного конца require (E0-12M, C8).
  * Ждём код 0, пустой stderr, в stdout ровно строку итога пробы, ноль запусков, ни одного
  * process.exit и ни одной отметки в состоянии пробы (своя временная папка,
  * SF_HOOK_STATE_DIR). Каждое - своя причина отказа. Положительный контроль: настоящий
@@ -327,8 +543,8 @@ function lastGatesIn(dir) {
 }
 let gatesModuleSafe = false;
 check('gates.js: require не запускает гейты, не пишет отметку и не выходит из процесса', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-require-'));
-  const control = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-mark-'));
+  const dir = tempDir('require');
+  const control = tempDir('mark');
   const file = path.join(HOOKS, 'gates.js');
   try {
     const mark = run(process.execPath, ['-e', 'require(' + JSON.stringify(path.join(HOOKS, 'diff-hash.js')) + ').markGates(0);'], {
@@ -398,8 +614,8 @@ check('gates.js: require не запускает гейты, не пишет о�
     gatesModuleSafe = true;
     return true;
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.rmSync(control, { recursive: true, force: true });
+    releaseTemp(dir);
+    releaseTemp(control);
   }
 });
 
@@ -552,7 +768,7 @@ function gateRunner(cfg) {
 }
 
 /**
- * Пробы запуска гейтов (E0-12M, решения техлида Р7, Р8; круги fix 1-2): один дочерний node
+ * Пробы запуска гейтов (E0-12M, решения техлида Р7, Р8): один дочерний node
  * (gateRunner) на все случаи, каждый случай - своя строка check. Команды - файлы во временной
  * папке, путь в двойных кавычках: одна строка cmd годится и для cmd.exe, и для sh.
  * runGate (gates.js из боевого каталога, тот же require, что у selectGates):
@@ -611,7 +827,7 @@ function buildGateRunCases() {
   // без умолчания: снятый экспорт - красная строка, а не молча 2 с
   const grace = limits && limits.KILL_GRACE_MS;
   if (!Number.isInteger(grace) || grace <= 0) throw new Error('gates.js не экспортирует limits.KILL_GRACE_MS: ' + JSON.stringify(grace));
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-rungate-'));
+  const dir = tempDir('rungate');
   try {
     const put = (rel, text) => {
       const p = path.join(dir, ...rel.split('/'));
@@ -716,7 +932,7 @@ function buildGateRunCases() {
         { id: 'p-green-201', cmd: cmd(green201), when: 'never', timeoutSec: 30 },
       ].concat(PROBE_SIGNALS.map(([s]) => ({ id: 'p-tree-' + s, cmd: withGc(tree, s), when: 'never', timeoutSec: 30 }))),
     }));
-    const init = run('git', ['init', '-q', '--template='], { cwd: dir });
+    const init = git(['init', '-q', '--template='], { cwd: dir });
     if (init.error || init.status !== 0) throw new Error('git init дерева пробы: ' + String((init.error && init.error.message) || init.stderr).slice(0, 160));
     const preload = put('pre.js', [
       "const fs = require('fs');",
@@ -821,7 +1037,7 @@ function buildGateRunCases() {
     // свой TEMP у пробы файла, оставшегося с тем же pid: его файл вывода не смешивается с общими
     const tmpExisting = path.join(dir, 'tmp-existing');
     const cliCase = (k, args, env, stdinOpen) => {
-      state[k] = fs.mkdtempSync(path.join(dir, 'state-' + k + '-'));
+      state[k] = tempDir('state-' + k, dir);
       spies[k] = path.join(dir, 'spy-' + k + '.json');
       cli[k] = { args, env: Object.assign({ SF_HOOK_STATE_DIR: state[k], SF_PROBE_SPY: spies[k], TEMP: tmp, TMP: tmp, TMPDIR: tmp }, env), capMs: 40000, stdinOpen: Boolean(stdinOpen) };
     };
@@ -885,11 +1101,9 @@ function buildGateRunCases() {
     res.existingLogs = fs.existsSync(existingDir) ? fs.readdirSync(existingDir).map((f) => ({ name: f, text: fs.readFileSync(path.join(existingDir, f), 'utf8') })) : [];
     return res;
   } finally {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-    } catch (_) {
-      // папку держит не снятый процесс - его отказ назван строкой пробы
-    }
+    // папку держит не снятый процесс - его отказ назван строкой пробы; каталог остаётся в
+    // реестре: его снимет выход процесса, а не снятый назовёт проба «каталоги прогона»
+    releaseTemp(dir);
   }
 }
 /** Случай пробы runGate словами для строки отказа. */
@@ -1361,16 +1575,28 @@ function selects(gate, file) {
 }
 
 /**
- * Гейт id из rules.sf.json и runs(file) - selects на нём. Нет гейта - исключение (красная
- * строка check).
+ * Гейт id из rules.sf.json и runs(file) - selects на нём, с мемо на гейт: пробы графа и стабов
+ * спрашивают о тех же файлах много раз за прогон (TECH_DEBT 21.10.2026 E0-12L круги 3 и 4,
+ * время прогона: `runs` без мемо). Нет гейта - исключение (красная строка check). Счёт: asked -
+ * вопросов runs, selected - вызовов selects, seen - разных файлов; их сверяет проба в конце прогона
+ * (selected === seen.size: каждый файл спрошен у gates.js один раз).
  */
 const gateProbes = new Map();
 function gateProbe(id) {
   if (gateProbes.has(id)) return gateProbes.get(id);
   const gate = ((repoRules && repoRules.gates) || []).find((g) => g.id === id);
   if (!gate) throw new Error('гейта ' + id + ' нет в правилах');
-  const runs = (file) => selects(gate, file);
-  const res = { gate, runs };
+  const seen = new Map();
+  const res = { gate, seen, asked: 0, selected: 0 };
+  const select = (file) => {
+    res.selected++;
+    return selects(gate, file);
+  };
+  res.runs = (file) => {
+    res.asked++;
+    if (!seen.has(file)) seen.set(file, select(file));
+    return seen.get(file);
+  };
   gateProbes.set(id, res);
   return res;
 }
@@ -1476,9 +1702,10 @@ check('пути note: файл на диске, которого нет в вы�
  * строки: отказ одной не скрывает состояние другой.
  *   spec.runWhat / spec.skipWhat - хвосты названий строк выбора и пропуска;
  *   spec.mustRun / spec.mustSkip - файлы, на которых гейт обязан выбираться / пропускаться;
- *   spec.extra - [{ name, fn({ gate, runs }, spec), graph }]: fn получает пробу гейта (gateProbe)
- *     и тот же spec вторым аргументом; результат fn - как у check; graph - fn читает граф
- *     turbo настоящего дерева (LIVE_GRAPH) и без него не гоняется.
+ *   spec.extra - [{ name, fn({ gate, runs }, spec), graph, int }]: fn получает пробу гейта
+ *     (gateProbe) и тот же spec вторым аргументом; результат fn - как у check; graph - fn читает
+ *     граф turbo настоящего дерева (GRAPH_GATE) и без него не гоняется; int - ещё и test/imports.ts
+ *     с дочерним vitest или require(esm) - та же граница Node (intGuard).
  * id - идентификатор гейта в правилах; spec - описание пробы выше.
  */
 function checkGateSelection(id, spec) {
@@ -1497,12 +1724,12 @@ function checkGateSelection(id, spec) {
   // gates.js берёт изменённые файлы из git (L.changedFiles: diff и ls-files --exclude-standard):
   // файл из .gitignore туда не попадает никогда, и выбор на нём - обещание без покрытия (E0-12K, B1).
   check('гейт ' + id + ': каждый файл выбора git показывает (не в .gitignore)', () =>
-    checkIgnoreVerdict(run('git', ['check-ignore', '--', ...spec.mustRun], { cwd: ROOT }), spec.mustRun.length));
-  // x.graph - проба графа turbo настоящего дерева: без графа она не гоняется (graphGate)
+    checkIgnoreVerdict(git(['check-ignore', '--', ...spec.mustRun], { cwd: ROOT }), spec.mustRun.length));
+  // x.graph - проба графа turbo настоящего дерева: без графа она не гоняется (snapshotGate)
   for (const x of spec.extra || []) {
     const name = 'гейт ' + id + ': ' + x.name;
     const fn = () => x.fn(gateProbe(id), spec);
-    check(name, x.graph ? LIVE_GRAPH.guard(name, fn) : fn);
+    check(name, x.int ? intGuard(name, fn) : x.graph ? GRAPH_GATE.guard(name, fn) : fn);
   }
 }
 
@@ -1624,7 +1851,7 @@ function trackedOutsideExtra(exempt = []) {
   return {
     name: 'ни один файл, который видит git, кроме файлов выбора' + (exempt.length ? ' и масок целиком (' + exempt.join(', ') + ')' : '') + ', его не выбирает',
     fn: ({ runs }, spec) => {
-      const r = run('git', ['-c', 'core.quotepath=false', 'ls-files', '-z'], { cwd: ROOT });
+      const r = git(['-c', 'core.quotepath=false', 'ls-files', '-z'], { cwd: ROOT, maxBuffer: LISTING_MAX_BUFFER });
       if (r.error) return 'git ls-files не запустился: ' + r.error.message;
       if (r.status !== 0) return 'git ls-files: ' + (r.status === null ? 'сигнал ' + r.signal : 'код ' + r.status) + ': ' + String(r.stderr || '').trim();
       const files = String(r.stdout || '').split('\0').filter(Boolean);
@@ -1765,7 +1992,7 @@ checkGateSelection('compose', {
 
 // Скрипт трекера берёт корень из scripts/lib/paths.mjs: правка любого из них
 // может сломать render --check так же, как правка tasks.json (E0-12F). when - ровно то,
-// что render --check читает (E0-12M, круг fix 1 - B11): tasks.json, 00_STATUS.md, doc каждой
+// что render --check читает (E0-12M, B11): tasks.json, 00_STATUS.md, doc каждой
 // задачи (сегодня docs/*_TASKS.md и docs/TECH_DEBT.md) и граф импортов scripts/tasks.mjs.
 // Журнал 90_WORKLOG.md render --check не читает: его дописывают done и add.
 checkGateSelection('tracker', {
@@ -1822,7 +2049,7 @@ checkGateSelection('tracker', {
     {
       name: 'render --check краснеет на удалённом документе задачи и зелёный на полной копии',
       fn: () => {
-        const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-tracker-'));
+        const tmp = tempDir('tracker');
         try {
           const tasks = readJson(path.join(ROOT, 'docs', 'tasks', 'tasks.json'));
           fs.mkdirSync(path.join(tmp, 'docs', 'tasks'), { recursive: true });
@@ -1855,7 +2082,7 @@ checkGateSelection('tracker', {
           if (red.status === 0 || !gone.test(String(red.stderr))) return 'render --check без docs/' + doc + ': ' + said(red);
           return { note: 'красный: docs/' + doc };
         } finally {
-          fs.rmSync(tmp, { recursive: true, force: true });
+          releaseTemp(tmp);
         }
       },
     },
@@ -1931,22 +2158,36 @@ checkGateSelection('schema-drift', {
 const GRAPH_SCRIPTS = ['build', 'test:int'];
 
 /**
- * Снимок графа настоящего дерева для проб снимается один раз: snap - { dry, ws, patterns, tracked }
- * (dry-JSON, манифесты пакетов dry, шаблоны pnpm-workspace.yaml, tracked - файлы из git ls-files,
- * которые есть на диске, trackedFiles) - один снимок на прогон по построению. Его отказ (нет
- * turbo, код, не JSON, манифест не читается, сбой git ls-files или stat файла...) - одна красная строка
- * «граф turbo: dry-JSON настоящего дерева» с перечнем проб, которые без графа не гонялись, а не
- * каскад одинаковых красных строк. guard(name, fn) - обёртка пробы графа: при отказе fn не
- * зовётся, строка пробы не пишется (SKIPPED), name уходит в перечень. getSnap - источник снимка
- * (liveSnap или подмена в кейсе).
+ * Снимок, без которого группа проб не гоняется, - один на прогон: getSnap() зовётся один раз, его
+ * результат - state.snap, отказ - state.error. Так устроены граф настоящего дерева (GRAPH_GATE:
+ * snap - { dry, ws, patterns, tracked } - dry-JSON, манифесты пакетов dry, шаблоны
+ * pnpm-workspace.yaml, tracked - файлы из git ls-files, которые есть на диске) и модуль разбора
+ * импортов (IMPORTS_GATE: snap - модуль test/imports.ts). Отказ снимка (нет turbo, код, не JSON,
+ * сбой git ls-files; Node ниже границы, сбой require...) - одна красная строка группы с перечнем
+ * проб, которые без снимка не гонялись, а не каскад одинаковых красных строк. guard(name, fn) -
+ * обёртка пробы группы: при отказе fn не зовётся, строка пробы не пишется (SKIPPED), name уходит в
+ * перечень. getSnap - источник снимка (liveSnap, loadImports или подмена в кейсе).
+ * opts.lazy - снимок снимается не сразу, а первым take() (ответ дочернего vitest - VITEST_GATE: его
+ * ждут только пробы, которым он нужен); take() отдаёт снимок или бросает GateBlocked - проба, которая
+ * его зовёт, уходит в перечень, где бы ни был вызов. guard - для снятого сразу снимка.
  */
-function graphGate(getSnap) {
-  const state = { snap: null, error: null, blocked: [] };
-  try {
-    state.snap = getSnap();
-  } catch (e) {
-    state.error = (e && e.message) || String(e);
-  }
+function snapshotGate(getSnap, opts) {
+  const state = { snap: null, error: null, blocked: [], taken: false };
+  const takeOnce = () => {
+    if (state.taken) return;
+    state.taken = true;
+    try {
+      state.snap = getSnap();
+    } catch (e) {
+      state.error = (e && e.message) || String(e);
+    }
+  };
+  state.take = () => {
+    takeOnce();
+    if (state.error !== null) throw new GateBlocked(state);
+    return state.snap;
+  };
+  if (!(opts && opts.lazy)) takeOnce();
   state.guard = (name, fn) => (...args) => {
     if (state.error === null) return fn(...args);
     state.blocked.push(name);
@@ -1955,40 +2196,236 @@ function graphGate(getSnap) {
   return state;
 }
 
-/** Строка пробы графа state (graphGate): отказ снимка с перечнем проб, которые не гонялись. */
+/**
+ * Строка пробы state (snapshotGate): отказ снимка с перечнем проб, которые не гонялись (what - чьи
+ * пробы, в тексте отказа); okNote(snap) - пометка зелёной строки.
+ */
+function gateVerdict(state, okNote, what) {
+  if (state.error !== null) return state.error + '; ' + (what || 'пробы') + ' не гонялись (' + state.blocked.length + '): ' + state.blocked.join('; ');
+  return { note: okNote(state.snap) };
+}
+/** Строка пробы графа state (snapshotGate). */
 function graphVerdict(state) {
-  if (state.error !== null) return state.error + '; пробы графа не гонялись (' + state.blocked.length + '): ' + state.blocked.join('; ');
-  return { note: state.snap.dry.tasks.length + ' задач' };
+  return gateVerdict(state, (snap) => snap.dry.tasks.length + ' задач', 'пробы графа');
+}
+
+/**
+ * Кейс отказа: fn обязан бросить ровно want. Нет исключения или иной текст - красная строка с
+ * полученным (L-020: ветка, заменённая на пропуск, краснит свой кейс, а не соседний).
+ */
+function refusedCheck(name, fn, want) {
+  check(name, () => refusalVerdict(fn, want));
+}
+/** Вердикт кейса отказа (как у check): true - fn бросила ровно want, иначе строка с полученным. */
+function refusalVerdict(fn, want) {
+  try {
+    fn();
+  } catch (e) {
+    // снимок пробы не снят - не отказ кейса: проба уходит в перечень снимка (outcome)
+    if (e instanceof GateBlocked) throw e;
+    const got = (e && e.message) || String(e);
+    return got === want || 'ожидалось «' + want + '», получено «' + got + '»';
+  }
+  return 'отказа нет, ожидалось «' + want + '»';
+}
+
+/** Граф настоящего дерева (snapshotGate): один снимок на прогон; без модуля графа - отказ снимка. */
+const GRAPH_GATE = snapshotGate(liveSnap);
+
+/**
+ * Граница Node и модуль разбора импортов (E0-12T, решение техлида Р2 E0-12L): проба test:int
+ * грузит test/imports.ts через require (type stripping без флага и require(esm)) и гоняет
+ * дочерний vitest. Type stripping включён по умолчанию с 22.18 в линии 22.x и с 23.6 в линии
+ * 23.x, в 24+ - всегда; поэтому граница - по линии, а не «мажор больше 22» (NODE_LINES: мажор ->
+ * наименьший минор; мажор выше последнего в перечне - годится). Ниже границы или при сбое
+ * require - одна красная строка «test/imports.ts: require .ts» с причиной («нужен Node …, у тебя
+ * X» или ошибка загрузки), пробы, которым нужен модуль, - SKIPPED (как у графа). Модуль грузится
+ * один раз за прогон, на версии этого процесса (IMPORTS_GATE.version - её сверяет кейс).
+ */
+const NODE_LINES = { 22: 18, 23: 6 };
+const NODE_NEED = 'нужен Node 22.18+ (линия 22.x), 23.6+ (линия 23.x) или 24+';
+/** Отказ версии version (`v22.17.0`) или null: Node не ниже границы своей линии (NODE_LINES). */
+function nodeVerdict(version) {
+  const m = /^v?(\d+)\.(\d+)\./.exec(String(version));
+  const major = m ? Number(m[1]) : 0;
+  const minor = m ? Number(m[2]) : 0;
+  const lines = Object.keys(NODE_LINES).map(Number);
+  const top = Math.max(...lines);
+  const fits = major > top || (lines.includes(major) && minor >= NODE_LINES[major]);
+  return fits ? null : NODE_NEED + ', у тебя ' + version;
+}
+/** test/imports.ts через require на Node version; ниже границы или сбой загрузки - исключение с причиной. */
+function loadImports(version) {
+  const low = nodeVerdict(version);
+  if (low) throw new Error(low + ' (require test/imports.ts и дочерний vitest пробы test:int)');
+  let mod;
+  try {
+    mod = require(path.join(ROOT, 'test', 'imports.ts'));
+  } catch (e) {
+    throw new Error('require test/imports.ts: ' + ((e && e.message) || String(e)) + ' (в модуле нет относительных импортов и не-стираемого синтаксиса TS?)');
+  }
+  for (const name of ['importSpecifiers', 'repoRootUses']) {
+    if (typeof mod[name] !== 'function') throw new Error('test/imports.ts не экспортирует функцию ' + name);
+  }
+  if (typeof mod.DYNAMIC_SPECIFIER !== 'string') throw new Error('test/imports.ts не экспортирует строку DYNAMIC_SPECIFIER');
+  return mod;
+}
+/** Модуль test/imports.ts на версии version (snapshotGate с полем version - на какой версии он судился). */
+function importsGate(version) {
+  return Object.assign(snapshotGate(() => loadImports(version)), { version });
+}
+const IMPORTS_GATE = importsGate(process.version);
+/** Обёртка пробы, которой нужны и граф, и test/imports.ts: без любого из них - SKIPPED. */
+function intGuard(name, fn) {
+  return GRAPH_GATE.guard(name, IMPORTS_GATE.guard(name, fn));
+}
+
+/** Дочерний процесс конфигов vitest (selftest-vitest.mjs) и начало его строки вывода. */
+const VITEST_CHILD = path.join(HOOKS, 'selftest-vitest.mjs');
+const VITEST_MARK = 'selftest-vitest ';
+/** Предел дочернего vitest: замер E0-12T - 0,9 с на три конфига. */
+const VITEST_TIMEOUT_MS = 60 * 1000;
+/**
+ * Код отказа «не запустился», когда pid нет, а повтор той же программы запустился (startVitest):
+ * рядом с прочими VITEST_* - первый вызов startVitest (INT_VITEST_START) идёт до тела функций ниже,
+ * const ниже него читался бы до инициализации (замечание ревью E2 E0-12T).
+ */
+const SPAWN_CODE_UNKNOWN = 'код ошибки неизвестен (pid нет, повтор запустился)';
+/** Сколько awaitVitest и кейсы ждут конца процесса (pidGone) после строки выхода или SIGKILL. */
+const VITEST_GONE_MS = 2000;
+
+/** Команда корня стаба int-пробы и его файлы (пути от каталога стаба). */
+const INT_STUB_COMMAND = 'vitest run --config vitest.selftest.config.mjs';
+const INT_STUB_BASE = {
+  'vitest.selftest.config.mjs': 'export default { test: { setupFiles: ["./vitest/selftest-setup.ts"], globalSetup: ["./vitest/selftest-global.mjs"] } };\n',
+  'vitest/selftest-setup.ts': 'import { testEnvFilePath } from "./selftest-paths.js";\n\nvoid testEnvFilePath;\n',
+  'vitest/selftest-paths.ts': 'import { join } from "node:path";\n\nconst repoRoot = "";\nexport const testEnvFilePath = join(repoRoot, ".env.test");\n',
+  // globalSetup пишет метку и при загрузке, и в setup(): метка после ответа vitest - globalSetup исполнился
+  'vitest/selftest-global.mjs': 'import { writeFileSync } from "node:fs";\n\nconst mark = () => writeFileSync(new URL("../global-ran", import.meta.url), "ran");\nmark();\nexport function setup() {\n  mark();\n}\n',
+};
+/**
+ * Стаб: базовые файлы, конфиг с пробелом в имени (пары `-c "…"`, `-c '…'`) и корень `rooted/` для
+ * пары с `--root rooted`: его конфиг и setup с именами, которых нет вне `rooted/`, - ответ с ними
+ * значит, что vitest получил корень из флага, как у настоящего запуска.
+ */
+const INT_STUB_FILES = Object.assign({}, INT_STUB_BASE, {
+  'vitest space.config.mjs': INT_STUB_BASE['vitest.selftest.config.mjs'],
+  'rooted/vitest.selftest.config.mjs': 'export default { test: { setupFiles: ["./vitest/rooted-setup.ts"], globalSetup: ["./vitest/rooted-global.mjs"] } };\n',
+  'rooted/vitest/rooted-setup.ts': 'export {};\n',
+  'rooted/vitest/rooted-global.mjs': INT_STUB_BASE['vitest/selftest-global.mjs'],
+});
+/** Метки globalSetup стаба (пишет selftest-global.mjs): ни одной после ответа vitest. */
+const INT_STUB_GLOBAL_MARKS = ['global-ran', 'rooted/global-ran'];
+/**
+ * Пары дочернего vitest по стабу сверх основной: ветки отказа конфига (команда без --config,
+ * конфиг, которого нет, оператор оболочки в команде) и разбор флагов (путь в двойных и одинарных
+ * кавычках, в том числе с пробелом; --root).
+ */
+const INT_STUB_PAIRS = {
+  noConfig: 'vitest run',
+  missingConfig: 'vitest run --config vitest.missing.config.ts',
+  shell: 'vitest run --config vitest.selftest.config.mjs && rm -rf x',
+  quoted: 'vitest run -c "vitest.selftest.config.mjs"',
+  spacedDouble: 'vitest run -c "vitest space.config.mjs"',
+  spacedSingle: "vitest run -c 'vitest space.config.mjs'",
+  rooted: 'vitest run --root rooted --config vitest.selftest.config.mjs',
+};
+
+// Боевой путь «pid нет, повтор запустился» до первого вызова startVitest (замечание ревью E2
+// E0-12T): всё, что он читает, обязано быть инициализировано здесь - кейс ниже по файлу шёл после
+// всех const и TDZ не видел. Программы нет - процесса нет, повтор подменён (ошибки нет).
+check('ответ vitest: «pid нет, повтор запустился» до INT_VITEST_START - отказ «код ошибки неизвестен», а не ReferenceError', () => {
+  const dir = tempDir('vitest-early');
+  try {
+    const h = startVitest([['/a', 'vitest run --config x.ts']], dir, { bin: 'sf-selftest-no-node', spawnSync: () => ({ status: 0 }) });
+    return refusalVerdict(() => awaitVitest(h), 'selftest-vitest.mjs не запустился: ' + SPAWN_CODE_UNKNOWN);
+  } finally {
+    releaseTemp(dir);
+  }
+});
+/** Дочерний vitest пробы test:int стартует здесь, без ожидания (startIntVitest). */
+const INT_VITEST_START = startIntVitest();
+// Причина «не стартовал» - своя на каждую из трёх (замечание ревью E4 E0-12T): красный граф или
+// test/imports.ts не объясняется пробой синтаксиса. Подменённые снимки - процесс не стартует.
+check('дочерний vitest: не стартовал - причина названа (граф, test/imports.ts, синтаксис selftest-vitest.mjs), null нет', () => {
+  const ok = { error: null };
+  const syntax = (v) => new Map([['selftest-vitest.mjs', v]]);
+  const cases = [
+    [{ graph: { error: 'g' }, imports: ok, syntax: syntax(true) }, 'дочерний vitest не стартовал: нет графа turbo (g)'],
+    [{ graph: ok, imports: { error: 'i' }, syntax: syntax(true) }, 'дочерний vitest не стартовал: test/imports.ts не загружен (i)'],
+    [{ graph: ok, imports: ok, syntax: syntax(false) }, 'дочерний vitest не стартовал: selftest-vitest.mjs не прошёл пробу синтаксиса'],
+  ];
+  const bad = cases.map(([gates, want]) => {
+    const got = startIntVitest(gates);
+    const text = got && got.error && got.error.message;
+    return text === want ? null : 'ожидалось «' + want + '», получено ' + (got === null ? 'null' : JSON.stringify(text));
+  }).filter(Boolean);
+  return !bad.length || bad.join('; ');
+});
+/** Ответ дочернего vitest - ленивый снимок: его ждёт первая проба, которой он нужен (intVitest). */
+const VITEST_GATE = snapshotGate(takeIntVitest, { lazy: true });
+// Ленивый снимок (замечание ревью C10 E0-12T): снимается первым take(), один раз; проба, чей take()
+// упал (и внутри refusalVerdict), не гонялась - она в перечне снимка, своей строки нет.
+check('снимок: ленивый снимок не снят - пробы, которые его взяли (и через refusalVerdict), не гонялись и названы одной строкой', () => {
+  let calls = 0;
+  const g = snapshotGate(() => {
+    calls++;
+    throw new Error('boom');
+  }, { lazy: true });
+  if (calls) return 'ленивый снимок снят до первой пробы';
+  const got = [outcome('a', () => g.take() && true), outcome('b', () => refusalVerdict(() => g.take(), 'x'))];
+  if (got.some((r) => r !== null)) return 'проба без снимка дала строку: ' + JSON.stringify(got);
+  if (calls !== 1) return 'getSnap вызван ' + calls + ' раз(а)';
+  const line = gateVerdict(g, () => '');
+  return line === 'boom; пробы не гонялись (2): a; b' || 'строка снимка: ' + JSON.stringify(line);
+});
+
+// Граница Node - на подменённой версии: ниже 22.18 - отказ с версией, пробы за ней не гоняются.
+check('граница Node: отказ на v21.9.0, v22.17.0, v23.1.0, v23.5.1; пропуск на v22.18.0, v23.6.0, v24.0.0; без модуля пробы не гоняются', () => {
+  const versions = ['v21.9.0', 'v22.17.0', 'v23.1.0', 'v23.5.1', 'v22.18.0', 'v23.6.0', 'v24.0.0'];
+  const got = JSON.stringify(versions.map(nodeVerdict));
+  const want = JSON.stringify(versions.map((v, i) => (i < 4 ? NODE_NEED + ', у тебя ' + v : null)));
+  if (got !== want) return 'ожидалось ' + want + ', получено ' + got;
+  const low = importsGate('v22.17.0');
+  let called = 0;
+  const r = low.guard('проба x', () => { called++; return true; })();
+  if (r !== SKIPPED || called) return 'проба гонялась без модуля (результат ' + String(r) + ', вызовов ' + called + ')';
+  const line = gateVerdict(low, () => '');
+  const wantLine = NODE_NEED + ', у тебя v22.17.0 (require test/imports.ts и дочерний vitest пробы test:int); пробы не гонялись (1): проба x';
+  return line === wantLine || 'строка отказа: ' + JSON.stringify(line);
+});
+// Живой модуль судится на версии этого процесса, а не на подставленной: подмена версии в
+// IMPORTS_GATE выключила бы границу на настоящем прогоне при зелёном кейсе выше.
+check('граница Node: модуль test/imports.ts этого прогона судился на process.version', () =>
+  IMPORTS_GATE.version === process.version || 'IMPORTS_GATE на версии ' + JSON.stringify(IMPORTS_GATE.version) + ', процесс ' + process.version);
+
+/**
+ * Временный корень кейса: файлы files ({ путь: текст }) во временном каталоге реестра; каталог
+ * снимается dropTemp (ссылки и junction внутри - unlink до удаления; TECH_DEBT 21.10.2026 E0-12L круг 4, `withTempRoot`).
+ */
+function withTempRoot(files, fn) {
+  const dir = tempDir('turbo');
+  try {
+    for (const [rel, body] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel), body);
+    }
+    return fn(dir);
+  } finally {
+    releaseTemp(dir);
+  }
 }
 
 // Ветки отказа selftest-graph.js - на синтетическом dry и подменённом результате spawn, без
 // turbo: каждый кейс ждёт точный текст отказа, и ветка, заменённая на пропуск (`return []`,
 // `continue`), краснит свой кейс (E0-12L, L-020). Кейсы spawn идут на стаб-корне FIXTURE со
 // своими turbo и @turbo/<os>-<arch>, а не на node_modules репозитория: свежий клон без
-// pnpm install краснит одну строку «dry-JSON настоящего дерева», а не каждый кейс.
-{
-  const refusedWith = (name, fn, want) => check('граф turbo: ' + name, () => {
-    try {
-      fn();
-    } catch (e) {
-      const got = (e && e.message) || String(e);
-      return got === want || 'ожидалось «' + want + '», получено «' + got + '»';
-    }
-    return 'отказа нет, ожидалось «' + want + '»';
-  });
+// pnpm install краснит одну строку «dry-JSON настоящего дерева», а не каждый кейс. Без модуля
+// графа кейсы не гоняются - их называет та же строка.
+if (!G) GRAPH_GATE.blocked.push('синтетические кейсы модуля графа');
+if (G) {
+  const refusedWith = (name, fn, want) => refusedCheck('граф turbo: ' + name, fn, want);
   const what = 'turbo run build --dry=json';
-  const withTempRoot = (files, fn) => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-turbo-'));
-    try {
-      for (const [rel, body] of Object.entries(files)) {
-        fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
-        fs.writeFileSync(path.join(dir, rel), body);
-      }
-      return fn(dir);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  };
   // стаб-корень: обёртка turbo и бинари двух платформ (linux-64 без расширения, windows-64 - .exe)
   const FIXTURE = {
     'node_modules/turbo/package.json': '{"name":"turbo"}',
@@ -2044,6 +2481,23 @@ function graphVerdict(state) {
       G.underNodeModules(path.join(dir, 'store', 'turbo', 'package.json'), repo),
     ]);
     return got === JSON.stringify([true, true]) || 'ожидалось [true,true] (через ссылку, реальный), получено ' + got;
+  }));
+  // законный pnpm virtual-store-dir вне корня (TECH_DEBT 21.10.2026 E0-12L круг 4, `underNodeModules`): модуль под virtualStoreDir из
+  // node_modules/.modules.yaml - под корнем; модуль в постороннем каталоге - нет; .modules.yaml,
+  // который не разбирается, - отказ, а не молча «нет»
+  check('граф turbo: underNodeModules - модуль под virtualStoreDir из .modules.yaml вне корня - под ним, посторонний каталог - нет', () => withTempRoot({
+    'repo/node_modules/.keep': '',
+    'store/.pnpm/turbo/package.json': '{"name":"turbo"}',
+    'other/turbo/package.json': '{"name":"turbo"}',
+  }, (dir) => {
+    const repo = path.join(dir, 'repo');
+    const yaml = 'virtualStoreDir: ' + JSON.stringify(path.join(dir, 'store', '.pnpm')) + '\n';
+    // yaml - пакет репозитория: во временном корне его нет
+    const parseYaml = require(require.resolve('yaml', { paths: [ROOT] })).parse;
+    const at = (rel) => G.underNodeModules(path.join(dir, ...rel.split('/')), repo, { modulesYaml: yaml, parseYaml });
+    const got = JSON.stringify([at('store/.pnpm/turbo/package.json'), at('other/turbo/package.json'), G.underNodeModules(path.join(dir, 'store', '.pnpm', 'turbo', 'package.json'), repo, { modulesYaml: null })]);
+    if (got !== JSON.stringify([true, false, false])) return 'ожидалось [true,false,false] (хранилище, посторонний, без .modules.yaml), получено ' + got;
+    return refusalVerdict(() => G.underNodeModules(path.join(dir, 'other', 'turbo', 'package.json'), repo, { modulesYaml: 'storeDir: x\n', parseYaml }), 'в node_modules/.modules.yaml нет строки virtualStoreDir');
   }));
   refusedWith('платформа без пакета turbo - отказ', () => onFixture({ platform: 'freebsd', arch: 'ia32' }),
     what + ': нет пакета turbo для платформы freebsd-ia32 (пакеты @turbo/<os>-<arch>: windows, darwin, linux x 64, arm64)');
@@ -2148,6 +2602,19 @@ function graphVerdict(state) {
   refusedWith('вход ровно в родителя корня (..) - отказ', () => withInput('../../..'), 'вход ../../.. задачи @sf/b#build вне корня репозитория');
   refusedWith('абсолютный вход задачи пакета - отказ', () => withInput('/etc/x'), 'вход /etc/x задачи @sf/b#build - абсолютный путь, вне корня репозитория');
   refusedWith('вход с буквой диска - отказ', () => withInput('C:\\x.ts'), 'вход C:\\x.ts задачи @sf/b#build - абсолютный путь, вне корня репозитория');
+  refusedWith('вход с буквой диска и прямым слешем - отказ', () => withInput('C:/x.ts'), 'вход C:/x.ts задачи @sf/b#build - абсолютный путь, вне корня репозитория');
+  // имя файла с двоеточием - не буква диска там, где такое имя возможно (TECH_DEBT 21.10.2026
+  // E0-12L круг 4, `inRoot`); на Windows имени с двоеточием нет, и `C:x.ts` - путь от текущего
+  // каталога диска C, вне репозитория
+  check('граф turbo: inRoot - вход a:b.json не на Windows - законное имя файла пакета, не абсолютный путь', () => {
+    const got = G.inRoot('packages/b', 'a:b.json', '@sf/b#build', 'linux');
+    return got === 'packages/b/a:b.json' || 'вход a:b.json на linux: ' + JSON.stringify(got);
+  });
+  check('граф turbo: inRoot - на Windows буква диска без слеша (C:x.ts, a:b.json) - отказ', () => {
+    const bad = ['C:x.ts', 'a:b.json'].map((x) => refusalVerdict(() => G.inRoot('packages/b', x, '@sf/b#build', 'win32'),
+      'вход ' + x + ' задачи @sf/b#build - абсолютный путь, вне корня репозитория')).filter((v) => v !== true);
+    return !bad.length || bad.join('; ');
+  });
   refusedWith('globalCacheInputs вне корня - отказ', () => G.globalReads({ tasks: [], globalCacheInputs: { files: { '../x.json': 'h' } } }),
     'вход ../x.json задачи globalCacheInputs вне корня репозитория');
   for (const field of ['directory', 'command', 'dependencies', 'inputs']) {
@@ -2175,6 +2642,29 @@ function graphVerdict(state) {
     'inputs задачи @sf/a#test:int в turbo.json: ["../vitest.preset.ts"], ожидалось ["../../vitest.preset.ts"] (DECLARED_INPUTS: файлы пакета и корневой vitest.preset.ts, который вызывает каждый vitest.int.config.ts (ADR-0011))');
   refusedWith('скрипт узла без ожидания inputs - отказ', () => G.taskGraph(withTask('@sf/a#build', (t) => Object.assign(t, { taskId: '@sf/a#lint', dependencies: [] })), 'lint'),
     'у задачи @sf/a#lint нет ожидания inputs в DECLARED_INPUTS selftest-graph.js');
+  // inputsGap на графе со скриптом без ожидания - отказ с именем, а не TypeError (TECH_DEBT 21.10.2026 E0-12L круг 3, `inputsGap`)
+  refusedWith('inputsGap: узел скрипта без ожидания в DECLARED_INPUTS - отказ с именем задачи',
+    () => G.inputsGap({ roots: [], nodes: [{ name: '@sf/a#lint', pkg: '@sf/a', dir: 'packages/a', reads: [] }] }, ['packages/a/x.ts'], sample()),
+    'у задачи @sf/a#lint нет ожидания inputs в DECLARED_INPUTS selftest-graph.js');
+  // EXTRA_INPUTS (TECH_DEBT 21.10.2026 E0-12L круг 4, `checkDeclaredInputs`): законное расширение inputs одной задачи проходит, тот же вход
+  // у соседней задачи - отказ; боевой перечень - объект с причиной на каждую задачу
+  check('граф turbo: EXTRA_INPUTS - расширение inputs одной задачи проходит, тот же вход у соседа краснеет', () => {
+    if (!G.EXTRA_INPUTS || typeof G.EXTRA_INPUTS !== 'object') return 'selftest-graph.js не экспортирует EXTRA_INPUTS';
+    const noWhy = Object.entries(G.EXTRA_INPUTS).filter(([, x]) => !x || !Array.isArray(x.inputs) || typeof x.why !== 'string' || !x.why).map(([id]) => id);
+    if (noWhy.length) return 'EXTRA_INPUTS без inputs или причины: ' + noWhy.join(', ');
+    const extraInputs = { '@sf/a#build': { inputs: ['x.json'], why: 'кейс' } };
+    const widened = (id) => withTask(id, (t) => Object.assign(t, { resolvedTaskDefinition: { inputs: ['x.json'] } }));
+    try {
+      G.taskGraph(widened('@sf/a#build'), 'build', { extraInputs });
+    } catch (e) {
+      return 'расширение своей задачи отвергнуто: ' + e.message;
+    }
+    // тот же вход и у своей задачи, и у соседа: свою пропускает расширение, соседа - нет
+    const both = widened('@sf/b#build');
+    both.tasks = both.tasks.map((t) => (t.taskId === '@sf/a#build' ? Object.assign({}, t, { resolvedTaskDefinition: { inputs: ['x.json'] } }) : t));
+    return refusalVerdict(() => G.taskGraph(both, 'build', { extraInputs }),
+      'inputs задачи @sf/b#build в turbo.json: ["x.json"], ожидалось [] (DECLARED_INPUTS: build без inputs: turbo хеширует все файлы пакета, видимые git, - их и читает next build)');
+  });
   // В1: граф turbo не уже манифестов (workspace:-зависимости от корней)
   const manifests = (deps) => Object.fromEntries(Object.entries(deps).map(([name, d]) => [name, { dir: 'packages/' + name.slice(4), pkg: { name, dependencies: d.dependencies, devDependencies: d.devDependencies } }]));
   check('граф turbo: manifestGap - workspace:-зависимости корней (и dev), которых нет в графе, по алфавиту', () => {
@@ -2203,10 +2693,22 @@ function graphVerdict(state) {
     const ws = manifests({ '@sf/a': { dependencies: { '@sf/b': 'workspace:*' } }, '@sf/b': {} });
     const lone = withTask('@sf/a#build', (t) => Object.assign(t, { dependencies: [] }));
     const got = manifestGapBlind(lone, 'build', G.taskGraph(lone, 'build'), ws);
-    const want = 'у графа turbo run build нет узлов кроме корней - детектор разницы с манифестами не построить';
+    const want = 'у графа turbo run build нет узлов кроме корней из замыкания манифестов - детектор разницы с манифестами не построить';
     if (got !== want) return 'ожидалось «' + want + '», получено ' + JSON.stringify(got);
     const ok2 = manifestGapBlind(sample(), 'build', G.taskGraph(sample(), 'build'), ws);
     return ok2 === null || 'на графе с узлом: ' + JSON.stringify(ok2);
+  });
+  // первый некорневой узел пришёл явным dependsOn "@sf/x#build" без манифеста: срез идёт по узлу
+  // из замыкания манифестов, ложного «проба не замечает» нет (TECH_DEBT 21.10.2026 E0-12L круг 3, `manifestGapBlind`)
+  check('граф turbo: детектор разницы с манифестами - узел явного dependsOn вне манифестов не берётся для среза', () => {
+    const dry = sample();
+    dry.tasks = dry.tasks.map((t) => (t.taskId === '@sf/a#build' ? Object.assign({}, t, { dependencies: ['@sf/c#build', '@sf/b#build'] }) : t));
+    const ws = manifests({ '@sf/a': { dependencies: { '@sf/b': 'workspace:*' } }, '@sf/b': {}, '@sf/c': {} });
+    const graph = G.taskGraph(dry, 'build');
+    const first = graph.nodes.find((n) => !n.root);
+    if (!first || first.name !== '@sf/c#build') return 'первый некорневой узел кейса не @sf/c#build: ' + JSON.stringify(first && first.name);
+    const got = manifestGapBlind(dry, 'build', graph, ws);
+    return got === null || 'детектор срезал узел вне манифестов: ' + JSON.stringify(got);
   });
   // В2, $TURBO_DEFAULT$: файлы пакета, видимые git, - во входах узла
   check('граф turbo: inputsGap - файл пакета, видимый git, вне входов узла; вложенный пакет и чужой каталог не считаются', () => {
@@ -2260,6 +2762,53 @@ function graphVerdict(state) {
     const want = 'у графа turbo run build ни у одного узла нет отслеживаемого входа своего пакета - детектор входов не построить';
     return none === want || 'входы узлов вне tracked: ожидалось «' + want + '», получено ' + JSON.stringify(none);
   });
+  // граф только из корневой задачи (каталог '.'): её вход a.ts - вход «своего пакета», как в
+  // inputsGap (G.under), детектор строится (TECH_DEBT 21.10.2026 E0-12L круг 4, `own` в пробе входов)
+  check('граф turbo: детектор входов на графе из одной корневой задачи (каталог .) строится, а не отказ', () => {
+    const dry = { globalCacheInputs: { files: {} }, tasks: [task('//#build', { directory: '', command: 'tsc -b', inputs: { 'a.ts': 'h', 'b.ts': 'h' } })] };
+    const got = inputsGapBlind(dry, 'build', G.taskGraph(dry, 'build'), ['a.ts', 'b.ts']);
+    return got === null || 'на корневой задаче: ' + JSON.stringify(got);
+  });
+  // вход корневой задачи (каталог '.') из вложенного пакета inputsGap не считает её файлом: срез
+  // такого входа дал бы ложное «проба не замечает» - детектор берёт тот же отбор G.ownFiles
+  check('граф turbo: детектор входов не режет у корневой задачи вход вложенного пакета (тот же отбор, что у inputsGap)', () => {
+    const dry = {
+      globalCacheInputs: { files: {} },
+      tasks: [
+        task('//#build', { directory: '', command: 'tsc -b', dependencies: ['@sf/b#build'], inputs: { 'packages/b/src/index.ts': 'h', 'a.ts': 'h' } }),
+        task('@sf/b#build'),
+      ],
+    };
+    const got = inputsGapBlind(dry, 'build', G.taskGraph(dry, 'build'), ['packages/b/src/index.ts', 'a.ts']);
+    return got === null || 'на корневой задаче с входом вложенного пакета: ' + JSON.stringify(got);
+  });
+  // форма задач dry проверяется раз на объект dry (TECH_DEBT 21.10.2026 E0-12L круг 3,
+  // `dryPackages` -> `tasksById`): второй вопрос к тому же снимку не перебирает его задачи, стаб -
+  // новый объект - проверяется сам
+  check('граф turbo: tasksById - форма задач проверяется раз на объект dry, стаб с задачей без taskId - отказ', () => {
+    const base = sample();
+    let reads = 0;
+    const tasks = base.tasks;
+    const dry = Object.assign({}, base);
+    Object.defineProperty(dry, 'tasks', { get: () => { reads++; return tasks; }, enumerable: true });
+    G.rootTasks(dry, 'build');
+    G.rootTasks(dry, 'build');
+    if (reads !== 1) return 'задачи dry перебраны ' + reads + ' раз(а) на двух вопросах к одному снимку';
+    return refusalVerdict(() => G.rootTasks(Object.assign({}, base, { tasks: base.tasks.concat({}) }), 'build'),
+      'задача dry-JSON без taskId - форма dry-JSON turbo неизвестна');
+  });
+  // workspace: только в peerDependencies (Р5 техлида E0-12T; TECH_DEBT 21.10.2026 E0-12L круг 4, peer-only workspace-зависимость): отказ с пакетом,
+  // зависимостью и подсказкой; peer с дублем в devDependencies и peer не workspace: - пропуск
+  check('граф turbo: peerOnly - workspace: только в peerDependencies - отказ с подсказкой; peer + dev и peer не workspace: - нет', () => {
+    const ws = {
+      '@sf/a': { dir: 'packages/a', pkg: { name: '@sf/a', peerDependencies: { '@sf/b': 'workspace:*', react: '^18' } } },
+      '@sf/c': { dir: 'packages/c', pkg: { name: '@sf/c', peerDependencies: { '@sf/b': 'workspace:^' }, devDependencies: { '@sf/b': 'workspace:^' } } },
+      '@sf/b': { dir: 'packages/b', pkg: { name: '@sf/b' } },
+    };
+    const got = JSON.stringify(G.peerOnly(ws));
+    const want = JSON.stringify(['пакет @sf/a: @sf/b (workspace:*) только в peerDependencies - turbo не строит по нему ребро, добавь в devDependencies']);
+    return got === want || 'ожидалось ' + want + ', получено ' + got;
+  });
   refusedWith('manifestGap: workspace:-зависимость вне пакетов dry - отказ',
     () => G.manifestGap(G.taskGraph(sample(), 'build'), manifests({ '@sf/a': { devDependencies: { '@sf/x': 'workspace:*' } }, '@sf/b': {} })),
     'workspace:-зависимость @sf/x пакета @sf/a (devDependencies) вне пакетов dry-JSON');
@@ -2272,7 +2821,9 @@ function graphVerdict(state) {
     if (got !== want) return 'ожидалось ' + want + ', получено ' + got;
     return g.skipped.every((r) => r.why) || 'у исключения нет причины';
   });
-  check('граф turbo: graphSources - корень без ./, у пакета package.json и turbo.json, новый пакет по шаблону (и без пакетов), без повторов', () => {
+  // turbo.jsonc рядом с turbo.json (TECH_DEBT 21.10.2026 E0-12L круг 4, `turbo.jsonc`); `**` - пакет и на первом, и на втором
+  // уровне (TECH_DEBT 21.10.2026 E0-12L круг 3, `patternPackage`)
+  check('граф turbo: graphSources - корень без ./, у пакета package.json, turbo.json и turbo.jsonc, новый пакет по шаблону (** - два уровня, и без пакетов), без повторов', () => {
     const dry = {
       globalCacheInputs: { files: {} },
       tasks: [
@@ -2282,18 +2833,26 @@ function graphVerdict(state) {
       ],
     };
     const got = JSON.stringify(G.graphSources(dry, ['apps/*', './tools/**/', '!apps/x']).map((x) => x.file));
-    const want = JSON.stringify(['package.json', 'pnpm-workspace.yaml', 'turbo.json', 'apps/a/package.json', 'apps/a/turbo.json',
-      'apps/' + G.NEW_SIBLING + '/package.json', 'apps/' + G.NEW_SIBLING + '/turbo.json', 'tools/' + G.NEW_SIBLING + '/package.json', 'tools/' + G.NEW_SIBLING + '/turbo.json']);
+    const N = G.NEW_SIBLING;
+    const three = (dir) => [dir + '/package.json', dir + '/turbo.json', dir + '/turbo.jsonc'];
+    const want = JSON.stringify(['package.json', 'pnpm-workspace.yaml', 'turbo.json', 'turbo.jsonc'].concat(
+      three('apps/a'), three('apps/' + N), three('tools/' + N), three('tools/' + N + '/' + N)));
     return got === want || 'ожидалось ' + want + ', получено ' + got;
   });
   refusedWith('graphSources: шаблон с ? [ ] { } - отказ', () => G.graphSources(sample(), ['apps/{a,b}']),
     'шаблон apps/{a,b} pnpm-workspace.yaml не разбирается пробой (знаки ? [ ] { }) - разбери руками');
-  check('граф turbo: workspacePatterns - список packages pnpm-workspace.yaml', () => {
-    const got = JSON.stringify(G.workspacePatterns('packages:\n  - "apps/*"\n  - \'tools/*\'\n'));
-    return got === JSON.stringify(['apps/*', 'tools/*']) || 'получено ' + got;
-  });
-  refusedWith('workspacePatterns: нет списка строк packages - отказ', () => G.workspacePatterns('packages:\n  - 1\n'),
-    'в pnpm-workspace.yaml нет списка строк packages - шаблоны пакетов workspace неизвестны');
+  // Разбор шаблонов workspace - пакетом yaml: без него отказ снимка (liveSnap зовёт тот же разбор),
+  // и кейсы ниже не гоняются - одна красная строка графа, а не три (TECH_DEBT 21.10.2026 E0-12L круг 4, разбор шаблонов workspace без yaml).
+  {
+    const line = 'граф turbo: workspacePatterns - список packages pnpm-workspace.yaml';
+    check(line, GRAPH_GATE.guard(line, () => {
+      const got = JSON.stringify(G.workspacePatterns('packages:\n  - "apps/*"\n  - \'tools/*\'\n'));
+      return got === JSON.stringify(['apps/*', 'tools/*']) || 'получено ' + got;
+    }));
+    const refused = 'граф turbo: workspacePatterns: нет списка строк packages - отказ';
+    check(refused, GRAPH_GATE.guard(refused, () => refusalVerdict(() => G.workspacePatterns('packages:\n  - 1\n'),
+      'в pnpm-workspace.yaml нет списка строк packages - шаблоны пакетов workspace неизвестны')));
+  }
   check('граф turbo: rootTasks - задачи script с командой, без отказа на пустом списке', () => {
     const got = JSON.stringify([G.rootTasks(sample(), 'build'), G.rootTasks(sample(), 'test:int')]);
     const want = JSON.stringify([[{ name: '@sf/a#build', command: 'next build' }], []]);
@@ -2326,14 +2885,14 @@ function graphVerdict(state) {
   });
   check('граф turbo: отказ снимка - одна строка, пробы графа не гоняются и названы в ней', () => {
     let called = 0;
-    const g = graphGate(() => { throw new Error('boom'); });
+    const g = snapshotGate(() => { throw new Error('boom'); });
     const r = g.guard('проба x', () => { called++; return true; })();
     if (r !== SKIPPED || called) return 'проба графа гонялась без графа (результат ' + String(r) + ', вызовов ' + called + ')';
     const v = graphVerdict(g);
     return v === 'boom; пробы графа не гонялись (1): проба x' || 'строка отказа: ' + JSON.stringify(v);
   });
   check('граф turbo: с графом пробы графа гоняются как есть', () => {
-    const g = graphGate(() => ({ dry: { tasks: [] } }));
+    const g = snapshotGate(() => ({ dry: { tasks: [] } }));
     const r = g.guard('проба x', (a) => a + 1)(1);
     if (r !== 2 || g.blocked.length) return 'проба с графом: результат ' + r + ', не гонялись ' + g.blocked.length;
     const v = graphVerdict(g);
@@ -2390,23 +2949,41 @@ function graphVerdict(state) {
     const got = JSON.stringify(trackedFiles({ spawn: lsFiles('package.json\0.claude\0') }));
     return got === JSON.stringify(['package.json']) || 'получено ' + got;
   });
+  // ENOBUFS - вывод больше maxBuffer, а не «не запустился» (TECH_DEBT 21.10.2026 E0-12L круг 4, `trackedFiles` и ENOBUFS)
+  refusedWith('trackedFiles: вывод git больше maxBuffer (ENOBUFS) - своя причина, не «не запустился»',
+    () => trackedFiles({ spawn: () => ({ pid: 4242, status: null, signal: 'SIGTERM', stdout: '', stderr: '', error: Object.assign(new Error('spawnSync git ENOBUFS'), { code: 'ENOBUFS' }) }) }),
+    'git ls-files: вывод больше maxBuffer (' + LISTING_MAX_BUFFER + ' байт)');
+  // Ссылки выборки судятся по цели, как в близнеце scripts/lib/files.mjs (stat, решение ревью B13
+  // E0-12T): ссылка на каталог и висячая ссылка - не файл. Корень кейса - временный каталог с
+  // настоящими junction (на Windows ссылка на файл требует прав - её кейс не строит).
+  const linkRoot = (fn) => withTempRoot({ 'package.json': '{}', 'dir/x.txt': 'x', 'gone/x.txt': 'x', '.claude/x.txt': 'x' }, (root) => {
+    fs.symlinkSync(path.join(root, 'dir'), path.join(root, 'link-dir'), 'junction');
+    fs.symlinkSync(path.join(root, 'gone'), path.join(root, 'link-gone'), 'junction');
+    fs.rmSync(path.join(root, 'gone'), { recursive: true, force: true });
+    return fn(root);
+  });
+  check('граф turbo: trackedFiles - отслеживаемая ссылка на каталог и висячая ссылка - не в списке (как files.mjs)', () => linkRoot((root) => {
+    const got = JSON.stringify(trackedFiles({ root, spawn: lsFiles('package.json\0link-dir\0link-gone\0') }));
+    return got === JSON.stringify(['package.json']) || 'получено ' + got;
+  }));
   // Близнец trackedFiles с others и trackedFiles из scripts/lib/files.mjs (загружен в дочерний node)
-  // на одном ответе git: одни аргументы git и один список - дубли путей (конфликт) по разу, пропавший
-  // файл и каталог выпадают (E0-12N, К2-6 круга 2; образец - сверка isGone по Р4).
-  check('граф turbo: близнец trackedFiles (others) зовёт git и отбирает файлы как trackedFiles из scripts/lib/files.mjs', () => {
-    const stdout = 'package.json\0package.json\0sf-selftest-gone.ts\0.claude\0package.json\0';
+  // на одном ответе git и одном корне со ссылками: одни аргументы git и один список - дубли путей
+  // (конфликт) по разу, пропавший файл, каталог, ссылка на каталог и висячая ссылка выпадают (E0-12N,
+  // К2-6 круга 2; образец - сверка isGone по Р4).
+  check('граф turbo: близнец trackedFiles (others) зовёт git и отбирает файлы как trackedFiles из scripts/lib/files.mjs (и ссылки)', () => linkRoot((root) => {
+    const stdout = 'package.json\0package.json\0sf-selftest-gone.ts\0.claude\0package.json\0link-dir\0link-gone\0';
     const module = require('url').pathToFileURL(path.join(ROOT, 'scripts', 'lib', 'files.mjs')).href;
     const program = 'const { trackedFiles, LISTING_MAX_BUFFER } = await import(' + JSON.stringify(module) + ');' +
       'let args = null; let maxBuffer = null;' +
       'const spawn = (command, given, options) => { args = [command, ...given]; maxBuffer = options.maxBuffer; return { status: 0, stdout: ' + JSON.stringify(stdout) + ', stderr: "" }; };' +
-      'const got = trackedFiles(' + JSON.stringify(ROOT) + ', { spawn });' +
+      'const got = trackedFiles(' + JSON.stringify(root) + ', { spawn });' +
       'console.log(JSON.stringify({ args, got, maxBuffer, exported: LISTING_MAX_BUFFER }));';
     const r = run(process.execPath, ['--input-type=module', '--eval', program], { cwd: ROOT });
     if (r.error || r.status !== 0) return 'files.mjs не загрузился: ' + String((r.error && r.error.message) || r.stderr).slice(0, 160);
     const original = JSON.parse(String(r.stdout).trim());
     let args = null;
     let maxBuffer = null;
-    const got = trackedFiles({ others: true, spawn: (command, given, options) => { args = [command, ...given]; maxBuffer = options.maxBuffer; return lsFiles(stdout)(); } });
+    const got = trackedFiles({ root, others: true, spawn: (command, given, options) => { args = [command, ...given]; maxBuffer = options.maxBuffer; return lsFiles(stdout)(); } });
     if (original.maxBuffer !== original.exported) {
       return 'files.mjs даёт git maxBuffer ' + original.maxBuffer + ', а LISTING_MAX_BUFFER ' + original.exported;
     }
@@ -2420,32 +2997,52 @@ function graphVerdict(state) {
       return 'список близнеца ' + JSON.stringify(got) + ', у files.mjs ' + JSON.stringify(original.got);
     }
     return { note: original.got.length + ' файл из ' + stdout.split('\0').filter(Boolean).length + ' путей' };
+  }));
+  // «путь под каталогом» - один предикат G.strictlyUnder (решение ревью B3 E0-12T): каталог `..x`
+  // внутри корня - под ним, родитель корня и сам корень - нет
+  check('граф turbo: relUnder - каталог ..x внутри корня под ним, родитель и сам корень - отказ', () => withTempRoot({ 'root/..x/a.ts': 'x', 'out.ts': 'x' }, (dir) => {
+    const base = fs.realpathSync(path.join(dir, 'root'));
+    const got = relUnder(path.join(base, '..x', 'a.ts'), base, 'кейс');
+    if (got !== '..x/a.ts') return 'путь в каталоге ..x: ' + JSON.stringify(got);
+    const bad = [path.join(dir, 'out.ts'), base].map((abs) => refusalVerdict(() => relUnder(abs, base, 'кейс'), 'кейс: путь ' + abs + ' вне ' + base)).filter((v) => v !== true);
+    return !bad.length || bad.join('; ');
+  }));
+  // «вне корня» для путей от корня - один предикат G.outsideRoot (замечание ревью C5 E0-12T): его
+  // берут inRoot, резолв `./`/`../` и join/resolve(repoRoot, …) обхода int-наборов
+  check('граф turbo: outsideRoot - .., ../a и /a вне корня; ..x/a, a/..b и a - внутри', () => {
+    const paths = ['..', '../a', '/a', '..x/a', 'a/..b', 'a'];
+    const got = JSON.stringify(paths.map(G.outsideRoot));
+    const want = JSON.stringify([true, true, true, false, false, false]);
+    return got === want || JSON.stringify(paths) + ': ожидалось ' + want + ', получено ' + got;
   });
 }
 
 /**
  * Файлы, которые git видит в дереве (`git ls-files -z`, пути от корня) и которые есть на диске:
  * удалённый в рабочем дереве файл turbo не хеширует. Для G.inputsGap; git зовёт только
- * самопроверка, модуль графа получает список параметром. git не запустился или упал - исключение.
- * Наличие на диске - stat обычного файла: ENOENT и ENOTDIR (родитель стал файлом) - файла нет,
- * путь стал каталогом - файла нет, иная ошибка (EACCES) - исключение, а не молча выпавший файл.
- * opts - подмена для кейсов: git (имя команды), spawn (вместо run), stat (вместо fs.statSync);
- * others - ещё и новые неигнорируемые файлы (--others --exclude-standard, сверка путей note).
- * С others - близнец trackedFiles из scripts/lib/files.mjs без keep: аргументы git, дедуп путей и
- * отбор файлов сверяет проба «близнец trackedFiles» ниже (правка флагов там без правки здесь - красная),
- * она же - maxBuffer git с LISTING_MAX_BUFFER из files.mjs (К3-6 E0-12N).
+ * самопроверка (помощник git()), модуль графа получает список параметром. git не запустился или
+ * упал - исключение; вывод больше maxBuffer (ENOBUFS) - своя причина, а не «не запустился».
+ * Наличие на диске - stat, как у близнеца trackedFiles из scripts/lib/files.mjs: ссылка судится по
+ * цели - на файл в списке, на каталог и висячая - нет; ENOENT и ENOTDIR (родитель стал файлом) -
+ * файла нет, путь стал каталогом - файла нет, иная ошибка (EACCES) - исключение, а не молча
+ * выпавший файл. opts - подмена для кейсов: root (корень дерева; по умолчанию репозиторий), git
+ * (имя команды), spawn (вместо run), stat (вместо fs.statSync); others - ещё и новые
+ * неигнорируемые файлы (--others --exclude-standard, сверка путей note). С others - близнец trackedFiles из scripts/lib/files.mjs без keep: аргументы git,
+ * дедуп путей и отбор файлов сверяет проба «близнец trackedFiles» выше (правка флагов там без
+ * правки здесь - красная), она же - maxBuffer git с LISTING_MAX_BUFFER из files.mjs (К3-6 E0-12N).
  */
 function trackedFiles(opts) {
   const o = opts || {};
-  const spawn = o.spawn || run;
   const stat = o.stat || fs.statSync;
+  const root = o.root || ROOT;
   const others = o.others ? ['--others', '--exclude-standard'] : [];
-  const r = spawn(o.git || 'git', ['-c', 'core.fsmonitor=false', 'ls-files', '-z', '--cached', ...others], { cwd: ROOT, maxBuffer: LISTING_MAX_BUFFER });
+  const r = git(['ls-files', '-z', '--cached', ...others], { cwd: root, maxBuffer: LISTING_MAX_BUFFER, spawn: o.spawn, bin: o.git });
+  if (r.error && r.error.code === 'ENOBUFS') throw new Error('git ls-files: вывод больше maxBuffer (' + LISTING_MAX_BUFFER + ' байт)');
   if (r.error) throw new Error('git ls-files не запустился: ' + r.error.message);
   if (r.status !== 0) throw new Error('git ls-files: ' + (r.status === null ? 'сигнал ' + r.signal : 'код ' + r.status) + ': ' + String(r.stderr || '').trim());
   const isFile = (f) => {
     try {
-      return stat(path.join(ROOT, f)).isFile();
+      return stat(path.join(root, f)).isFile();
     } catch (e) {
       if (L.isNotFile(e)) return false;
       throw e;
@@ -2456,28 +3053,28 @@ function trackedFiles(opts) {
 }
 
 /**
- * Снимок настоящего дерева для LIVE_GRAPH: dry-JSON, манифесты пакетов dry, шаблоны workspace и
- * файлы, видимые git.
+ * Снимок настоящего дерева для GRAPH_GATE: dry (dry-JSON turbo), ws (манифесты пакетов dry), patterns
+ * (шаблоны pnpm-workspace.yaml), tracked (файлы, видимые git) и int - ленивое поле: обход чтений
+ * int-наборов (liveIntWalk), null до первой пробы, которой он нужен. Корневой package.json - не здесь,
+ * а в rootPkg; ответ дочернего vitest - в VITEST_GATE. Без модуля графа снимка нет: отказ называет
+ * строка графа.
  */
 function liveSnap() {
+  if (!G) throw new Error('модуль графа selftest-graph.js не загружен (строка синтаксиса или require выше)');
   const dry = G.turboDry(GRAPH_SCRIPTS);
   return {
     dry,
     ws: dryManifests(dry),
     patterns: G.workspacePatterns(fs.readFileSync(path.join(ROOT, 'pnpm-workspace.yaml'), 'utf8')),
     tracked: trackedFiles(),
+    int: null,
   };
 }
 
-/** Граф настоящего дерева (graphGate): один снимок на прогон. */
-const LIVE_GRAPH = graphGate(liveSnap);
-
 /**
- * Манифесты пакетов dry: { имя: { dir, pkg } } - workspace:-зависимости для G.manifestGap (граф
- * turbo не уже манифестов) и exports для moduleReads (`@sf/<пакет>/<подпуть>`) в чтениях
- * конфигов int-тестов. Читаются один раз за прогон, в снимке liveSnap. Разбор конфигов ниже (stripJsComments, stringArrayAt,
- * vitestConfigOf, moduleReads, intProbeReads) - остаток ручного разбора до E0-12T (vitest/node
- * и test/imports.ts, решение Р0 техлида 21.10.2026).
+ * Манифесты пакетов dry: { имя: { dir, pkg } } - workspace:-зависимости для G.manifestGap и
+ * G.peerOnly, exports для резолва `@sf/<пакет>[/<подпуть>]` в обходе int-наборов (intModule).
+ * Читаются один раз за прогон, в снимке liveSnap.
  */
 function dryManifests(dry) {
   const ws = {};
@@ -2485,159 +3082,589 @@ function dryManifests(dry) {
   return ws;
 }
 
-/** Исходник без комментариев // и блочных; строки (', ", `) копируются как есть. */
-function stripJsComments(src) {
-  let out = '';
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    if (c === '"' || c === "'" || c === '`') {
-      let j = i + 1;
-      while (j < src.length && src[j] !== c) j += src[j] === '\\' ? 2 : 1;
-      out += src.slice(i, j + 1);
-      i = j;
-    } else if (c === '/' && src[i + 1] === '/') {
-      while (i < src.length && src[i] !== '\n') i++;
-      out += '\n';
-    } else if (c === '/' && src[i + 1] === '*') {
-      const end = src.indexOf('*/', i + 2);
-      i = end === -1 ? src.length : end + 1;
-      out += ' ';
-    } else {
-      out += c;
+/**
+ * Корневой package.json - одно чтение за прогон (TECH_DEBT 21.10.2026 E0-12L круг 3,
+ * `checkRootScriptLines`, `rootScriptExtra`): пробы скриптов корня берут его отсюда. Сбой чтения -
+ * исключение в каждой пробе, которой он нужен (их строки красные с причиной), запомненное, как и
+ * текст. ROOT_PKG_READS - сколько раз файл прочитан с диска: его сверяет проба в конце прогона.
+ */
+let rootPkgMemo = null;
+let ROOT_PKG_READS = 0;
+function rootPkg() {
+  if (!rootPkgMemo) {
+    try {
+      ROOT_PKG_READS++;
+      rootPkgMemo = { value: readJson(path.join(ROOT, 'package.json')) };
+    } catch (e) {
+      rootPkgMemo = { error: e };
     }
   }
+  if (rootPkgMemo.error) throw rootPkgMemo.error;
+  return rootPkgMemo.value;
+}
+
+/**
+ * Конфиги int-наборов у самого vitest (E0-12T, решение техлида Р3 E0-12L): один дочерний
+ * selftest-vitest.mjs на все пары [dir, command] (абсолютный каталог пакета и команда его
+ * test:int). Один путь запуска: startVitest стартует процесс без ожидания, awaitVitest ждёт его
+ * ответ (условный стоп 2 техлида E0-12T: асинхронный старт - секунда ребёнка идёт параллельно
+ * пробам до первой, которой он нужен). Ответ - массив по парам: { dir, config, setupFiles,
+ * globalSetup } (абсолютные пути) или { dir, error } - ошибка пары (нет --config, нет конфига, не
+ * простой вызов vitest) - данные, а не отказ. Отказ, fail-closed (L-028), - vitestAnswer.
+ *
+ * startVitest(pairs, dir, opts): stdout и stderr ребёнка - в файлы каталога dir; opts - подмена
+ * для кейсов: bin (вместо process.execPath), child (вместо VITEST_CHILD), timeoutMs (вместо
+ * VITEST_TIMEOUT_MS), goneMs (вместо VITEST_GONE_MS), spawn и spawnSync (вместо cp.spawn и cp.spawnSync). Процесс, который не
+ * запустился (pid нет - spawn сообщит ошибку только событием, а самопроверка синхронна и цикла
+ * событий до выхода не отдаёт), - сразу отказ «не запустился: <код>»: код - у синхронного повтора
+ * запуска той же программы (--version), повтор запустился - SPAWN_CODE_UNKNOWN; предела отказ не
+ * ждёт. Запущенный ребёнок - в LIVE_CHILDREN до ответа: выход прогона его снимает.
+ */
+function startVitest(pairs, dir, opts) {
+  const o = opts || {};
+  const bin = o.bin || process.execPath;
+  const out = path.join(dir, 'vitest-out.txt');
+  const err = path.join(dir, 'vitest-err.txt');
+  const fdOut = fs.openSync(out, 'w');
+  const fdErr = fs.openSync(err, 'w');
+  let child;
+  try {
+    child = (o.spawn || cp.spawn)(bin, [o.child || VITEST_CHILD].concat(...pairs), { cwd: ROOT, stdio: ['ignore', fdOut, fdErr], windowsHide: true });
+  } finally {
+    fs.closeSync(fdOut);
+    fs.closeSync(fdErr);
+  }
+  const h = { pairs, out, err, child, timeoutMs: o.timeoutMs || VITEST_TIMEOUT_MS, goneMs: o.goneMs === undefined ? VITEST_GONE_MS : o.goneMs, started: performance.now(), spawnError: null };
+  // событие error придёт только после выхода синхронного прогона; без обработчика оно уронило бы
+  // выход процесса
+  child.on('error', () => {});
+  if (child.pid === undefined) {
+    const again = (o.spawnSync || cp.spawnSync)(bin, ['--version'], { cwd: ROOT, stdio: 'ignore', windowsHide: true, timeout: 5000 });
+    h.spawnError = (again.error && again.error.code) || SPAWN_CODE_UNKNOWN;
+    return h;
+  }
+  // процесс прогона не ждёт ребёнка: его ответ забирает awaitVitest, а пробе, которая до него не
+  // дошла, ребёнок не нужен - выход прогона снимает его (killLiveChildren)
+  child.unref();
+  LIVE_CHILDREN.add(child);
+  return h;
+}
+/**
+ * Процесса pid нет в течение ms (монотонные часы, паузы 20 мс; ms 0 - одна сверка): true; жив весь
+ * срок - false. Linux: процесс, вышедший или убитый, пока цикл событий прогона занят (самопроверка
+ * синхронна), - зомби до сбора родителем, и kill(pid, 0) видит его живым; состояние Z в
+ * /proc/<pid>/stat (или файла нет при читаемом /proc/self/stat) - процесса нет (замечание ревью E1
+ * E0-12T). Иначе - kill(pid, 0): ESRCH - нет. Иная ошибка чтения или kill - «жив» (false), не
+ * исключение (решение техлида, круг 3). deps - подмена для кейса: platform, readStat(pid) (текст /proc/<pid>/stat), kill.
+ */
+function pidGone(pid, ms, deps) {
+  const d = Object.assign({ platform: process.platform, readStat: (p) => fs.readFileSync('/proc/' + p + '/stat', 'utf8'), kill: (p, sig) => process.kill(p, sig) }, deps);
+  const readable = (p) => {
+    try {
+      d.readStat(p);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+  const gone = () => {
+    if (d.platform === 'linux') {
+      let stat = '';
+      try {
+        stat = d.readStat(pid);
+      } catch (e) {
+        // иная ошибка - «жив», а не исключение поверх готового ответа (решение техлида, круг 3);
+        // ENOENT - «нет» только при читаемом /proc/self/stat, иначе /proc не смонтирован - ветка kill
+        if (!(e && e.code === 'ENOENT')) return false;
+        if (readable('self')) return true;
+      }
+      // состояние - первое поле после имени программы в скобках (в имени бывают скобки и пробелы)
+      const close = stat.lastIndexOf(')');
+      if (close !== -1 && stat.charAt(close + 2) === 'Z') return true;
+    }
+    try {
+      d.kill(pid, 0);
+    } catch (e) {
+      return Boolean(e && e.code === 'ESRCH');
+    }
+    return false;
+  };
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  const t0 = performance.now();
+  for (;;) {
+    if (gone()) return true;
+    if (performance.now() - t0 >= ms) return false;
+    Atomics.wait(pause, 0, 0, 20);
+  }
+}
+/** Строка выхода дочернего vitest (его обработчик exit пишет её в stdout последней). */
+const VITEST_EXIT_MARK = 'selftest-vitest-exit ';
+/**
+ * Ответ дочернего vitest, запущенного startVitest: синхронное ожидание строки выхода
+ * (VITEST_EXIT_MARK <код>, целая строка; код не целое - отказ) в файле stdout с паузами Atomics.wait по монотонным часам
+ * (performance.now); дальше - конец процесса (pidGone, до h.goneMs: строку выхода пишет его
+ * обработчик exit, процесс ещё жив и держит файлы каталога; не вышел за срок - SIGKILL, не отказ:
+ * ответ уже полон) и сверка формы vitestAnswer. Нет строки выхода за h.timeoutMs -
+ * процесс снимается SIGKILL, отказ «не ответил»; процесс, убитый снаружи до строки выхода, - тот
+ * же отказ по пределу. Не запустился (h.spawnError) - отказ сразу.
+ */
+function awaitVitest(h) {
+  if (h.spawnError) return vitestAnswer({ error: Object.assign(new Error(h.spawnError), { code: h.spawnError }), status: null, signal: null, stdout: '', stderr: '' }, h);
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    const stdout = fs.readFileSync(h.out, 'utf8');
+    // только целые строки: хвост без перевода строки ребёнок, может быть, ещё дописывает
+    const exit = stdout.split(/\r?\n/).slice(0, -1).find((line) => line.startsWith(VITEST_EXIT_MARK));
+    if (exit !== undefined) {
+      if (!pidGone(h.child.pid, h.goneMs)) h.child.kill('SIGKILL');
+      LIVE_CHILDREN.delete(h.child);
+      // код - целое числом без пробелов и знака «+»; иное (обрезанная строка, `1x`) - отказ, а не
+      // Number('') = 0 - успех
+      const text = exit.slice(VITEST_EXIT_MARK.length);
+      if (!/^-?\d+$/.test(text)) throw new Error('selftest-vitest.mjs: строка выхода без целого кода: ' + JSON.stringify(exit));
+      return vitestAnswer({ status: Number(text), signal: null, stdout, stderr: fs.readFileSync(h.err, 'utf8') }, h);
+    }
+    if (performance.now() - h.started > h.timeoutMs) {
+      h.child.kill('SIGKILL');
+      LIVE_CHILDREN.delete(h.child);
+      return vitestAnswer({ status: null, signal: 'SIGKILL', stdout, stderr: '', error: Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' }) }, h);
+    }
+    Atomics.wait(pause, 0, 0, 20);
+  }
+}
+
+/**
+ * Сверка ответа дочернего vitest r ({ error, status, signal, stdout, stderr }) запуска h
+ * (startVitest: pairs, timeoutMs). Отказ: процесс не запустился (код), предел, код не 0, нет ровно
+ * одной строки VITEST_MARK, не JSON, не массив по парам, элемент иной формы или чужого каталога.
+ */
+function vitestAnswer(r, h) {
+  const what = 'selftest-vitest.mjs';
+  const pairs = h.pairs;
+  if (r.error && r.error.code === 'ETIMEDOUT') throw new Error(what + ': не ответил за ' + h.timeoutMs / 1000 + ' с - процесс убит');
+  if (r.error) throw new Error(what + ' не запустился: ' + r.error.code);
+  if (r.status !== 0) {
+    throw new Error(what + ': ' + (r.status === null ? 'сигнал ' + r.signal : 'код ' + r.status) + ': ' + (String(r.stderr || '').trim().slice(0, 200) || 'stderr пуст'));
+  }
+  const stdout = String(r.stdout || '');
+  const lines = stdout.split(/\r?\n/).filter((line) => line.startsWith(VITEST_MARK));
+  if (lines.length !== 1) throw new Error(what + ': в stdout не ровно одна строка «' + VITEST_MARK.trim() + ' <JSON>»: ' + JSON.stringify(stdout.slice(0, 120)));
+  let out;
+  try {
+    out = JSON.parse(lines[0].slice(VITEST_MARK.length));
+  } catch (e) {
+    throw new Error(what + ': ответ не JSON (' + e.message + ')');
+  }
+  if (!Array.isArray(out) || out.length !== pairs.length) throw new Error(what + ': ответ не массив из ' + pairs.length + ' элементов: ' + JSON.stringify(out).slice(0, 120));
+  const strings = (a) => Array.isArray(a) && a.every((s) => typeof s === 'string');
+  out.forEach((x, i) => {
+    const shaped = x && typeof x === 'object' && x.dir === pairs[i][0] &&
+      (typeof x.error === 'string' ? Object.keys(x).length === 2 : typeof x.config === 'string' && strings(x.setupFiles) && strings(x.globalSetup));
+    if (!shaped) throw new Error(what + ': ответ пары ' + (i + 1) + ' (' + pairs[i][0] + ') иной формы: ' + JSON.stringify(x).slice(0, 160));
+  });
   return out;
 }
 
 /**
- * Строки массива по ключу key (`key: ["a", 'b']`) в исходнике конфига без комментариев -
- * setupFiles конфига vitest. Ключа нет, ключ встречается больше одного раза или значение не
- * массив строковых литералов (переменная, spread, вызов, одна строка) - исключение:
- * молчаливый [] или первое из двух вхождений спрятали бы то, что читает гейт.
+ * Входы пробы test:int (решение техлида Р1 E0-12T): файлы, правка которых меняет то, что читает
+ * сама проба, - они обязаны выбирать гейт harness-selftest. Виды чтений графа int-наборов:
+ *   config      - конфиг из --config команды корня графа;
+ *   setup       - модуль setupFiles (после пресета, как его разрешил vitest);
+ *   globalSetup - модуль globalSetup (то же);
+ *   join        - модуль с join/resolve(repoRoot, …): его правка меняет фикстуры;
+ *   fixture     - файл из join/resolve(repoRoot, …);
+ *   manifest    - package.json пакета workspace, чьи exports разрешили спецификатор.
+ * И два файла, которые проба читает всегда (INT_PROBE_STATIC): vitest.preset.ts (его зовёт
+ * каждый конфиг; setupFiles и globalSetup приходят из него) и test/imports.ts (разбор импортов
+ * пробы). Остальное - вид module: транзитивный импорт обхода. Он меняет чтения int-наборов только
+ * новым join(repoRoot, …), обязан лежать под glob test:int (проба сверяет), а harness-selftest на нём
+ * не выбирается - новый join в глубине модуля ловит прогон selftest в CI (ci.yml гоняет его всегда).
  */
-function stringArrayAt(src, key, file) {
-  const code = stripJsComments(src);
-  const hits = code.match(new RegExp('\\b' + key + '\\b', 'g')) || [];
-  if (!hits.length) throw new Error(key + ' в ' + file + ' нет - разбери руками');
-  if (hits.length > 1) throw new Error(key + ' в ' + file + ' встречается ' + hits.length + ' раза - разбери руками');
-  const m = new RegExp('\\b' + key + '\\s*:\\s*\\[([^\\]]*)\\]').exec(code);
-  const STR = /"[^"]*"|'[^']*'|`[^`$]*`/g;
-  if (!m || m[1].replace(STR, '').replace(/[\s,]/g, '') !== '') {
-    throw new Error(key + ' в ' + file + ' не массив строковых литералов - разбери руками');
-  }
-  return (m[1].match(STR) || []).map((s) => s.slice(1, -1));
-}
+const INT_PROBE_INPUT_KINDS = ['config', 'setup', 'globalSetup', 'join', 'fixture', 'manifest'];
+const INT_PROBE_STATIC = ['vitest.preset.ts', 'test/imports.ts'];
 
 /**
- * Файл конфига vitest из команды задачи: значение `--config <файл>` / `--config=<файл>`.
- * Флага нет - исключение: без него vitest берёт vitest.config.*, и проба сверяла бы не тот
- * конфиг, которым гоняется скрипт.
+ * join/resolve(repoRoot, …), который не чтение (решение техлида Р2 E0-12T): точное имя -> причина.
+ * Содержимое этих файлов selftest не читает никогда; прочие - чтение с проверкой наличия.
  */
-function vitestConfigOf(command, owner) {
-  const m = /(?:^|\s)--config(?:=|\s+)(\S+)/.exec(String(command || ''));
-  if (!m) throw new Error('команда ' + owner + ' не называет конфиг через --config: ' + JSON.stringify(command) + ' - разбери руками');
-  return m[1];
-}
-
-/** Чтение файлов пробой (путь от корня): диск или диск с наложенными стаб-файлами. */
-const DISK = {
-  exists: (rel) => fs.existsSync(path.join(ROOT, rel)),
-  read: (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8'),
+const JOINED_NOT_READ = {
+  '.env': 'bootstrapEnv не читает файл под VITEST (packages/config/src/env-file.ts, ветка VITEST в bootstrapEnv)',
 };
+
+/**
+ * Модули, где употребление repoRoot не по форме join/resolve(repoRoot, "<литерал>") разобрано
+ * руками и не чтение фикстуры (решение техлида B5 E0-12T): точный путь модуля от корня -> причина.
+ * В модуле перечня такие употребления не отказ; его литеральные join/resolve - чтение, как везде.
+ * Запись, которую обход настоящего дерева не встретил, - красная (проба «перечень REPO_ROOT_REVIEWED
+ * …»): устаревшая запись молча разрешала бы новое употребление.
+ */
+const REPO_ROOT_REVIEWED = {
+  'packages/config/src/schema.ts': 'resolve(repoRoot, dir) - вычисление MEDIA_DIR из переменной окружения, не чтение фикстуры',
+};
+
+/**
+ * Источник обхода int-наборов (пути от корня): read - текст модуля, isFile - модуль есть,
+ * present - фикстура есть (не absent: ENOENT и ENOTDIR - нет, иная ошибка - исключение).
+ */
+const DISK = {
+  read: (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8'),
+  isFile: (rel) => {
+    try {
+      return fs.statSync(path.join(ROOT, rel)).isFile();
+    } catch (e) {
+      if (L.isNotFile(e)) return false;
+      throw e;
+    }
+  },
+  present: (rel) => !absent(path.join(ROOT, rel)),
+};
+/** Источник DISK с наложенными текстами files ({ путь от корня: текст }) - стабы и кейсы. */
 function overlaySource(files) {
+  const own = (rel) => Object.prototype.hasOwnProperty.call(files, rel);
   return {
-    exists: (rel) => Object.prototype.hasOwnProperty.call(files, rel) || DISK.exists(rel),
-    read: (rel) => (Object.prototype.hasOwnProperty.call(files, rel) ? files[rel] : DISK.read(rel)),
+    read: (rel) => (own(rel) ? files[rel] : DISK.read(rel)),
+    isFile: (rel) => own(rel) || DISK.isFile(rel),
+    present: (rel) => own(rel) || DISK.present(rel),
   };
 }
 
 /**
- * Файлы, которые читает модуль spec, импортированный из каталога fromDir (пути от корня):
- * для `./…` и `../…` - файл от fromDir (спецификатор `.js` - его `.ts` на диске, как в исходниках
- * workspace), для `@sf/<пакет>/<подпуть>` - package.json пакета и файл из exports['./<подпуть>'].
- * Последний элемент - сам модуль. Пакета нет среди пакетов dry, нет строки exports, иная форма
- * спецификатора или файла нет - исключение. who - кто импортирует (в тексте отказа).
+ * Условия exports, которые vitest 2.1.9 (vite 5.4.21, окружение node, режим test) принимает при
+ * импорте пакета workspace из setup и его импортов. Замер E0-12T (Fix 2): пакет-ссылка с exports
+ * из двенадцати условий, по одному снятию выбранного - module, development, node, import, default;
+ * browser, worker, deno, react-native, edge-light, production, require - не принимаются.
  */
-function moduleReads(spec, fromDir, ws, src, who) {
+const VITEST_CONDITIONS = ['module', 'development', 'node', 'import', 'default'];
+/**
+ * Цель exports target: строка как есть; условный объект - первый ключ в порядке ключей объекта из
+ * VITEST_CONDITIONS (как у Node и vite: порядок ключей, а не порядок условий), вложенный объект -
+ * так же; ни одного совпадения или иное - undefined (отказ называет intModule).
+ */
+function exportsCondition(target) {
+  if (typeof target === 'string') return target;
+  if (!target || typeof target !== 'object' || Array.isArray(target)) return undefined;
+  const key = Object.keys(target).find((k) => VITEST_CONDITIONS.includes(k));
+  return key === undefined ? undefined : exportsCondition(target[key]);
+}
+/**
+ * Модуль, который из модуля from (путь от корня) называет спецификатор spec: { file } или
+ * { file, manifest } для пакета workspace; null - конец обхода, не чтение (`node:*`, встроенный
+ * модуль, внешний пакет - имени нет среди пакетов dry). `./`, `../` - от каталога from, `.js` - его
+ * `.ts` на диске, как в исходниках workspace; `<пакет>` и `<пакет>/<подпуть>` (имя из манифестов
+ * dry при любом scope или без него) - файл из exports манифеста пакета dry
+ * (строка или условный объект - exportsCondition; без поля exports корень пакета - main, как у
+ * Node). Отказ с именем: нестроковый спецификатор (DYNAMIC_SPECIFIER), путь вне корня,
+ * абсолютный спецификатор, `#…` (поле imports), `@sf/x` вне пакетов dry, нет строки exports, нет
+ * файла.
+ */
+function intModule(spec, from, ws, src, imports) {
+  if (spec === imports.DYNAMIC_SPECIFIER) throw new Error(from + ': нестроковый спецификатор (' + spec + ') - что грузит модуль, проба не знает');
+  if (spec.startsWith('node:') || require('module').builtinModules.includes(spec)) return null;
   if (spec.startsWith('./') || spec.startsWith('../')) {
-    const rel = path.posix.normalize(fromDir + '/' + spec);
-    if (src.exists(rel)) return [rel];
+    const rel = path.posix.normalize(path.posix.dirname(from) + '/' + spec);
+    if (G.outsideRoot(rel)) throw new Error(from + ': ' + spec + ' - вне корня репозитория');
+    if (src.isFile(rel)) return { file: rel };
     const ts = rel.replace(/\.js$/, '.ts');
-    if (ts !== rel && src.exists(ts)) return [ts];
-    throw new Error(who + ': файла ' + rel + ' нет на диске');
+    if (ts !== rel && src.isFile(ts)) return { file: ts };
+    throw new Error(from + ': файла ' + rel + ' нет на диске');
   }
-  const m = /^(@sf\/[\w-]+)\/(.+)$/.exec(spec);
-  if (!m) throw new Error(who + ': спецификатор ' + spec + ' не разбирается пробой - разбери руками');
-  const dep = ws[m[1]];
-  if (!dep) throw new Error(who + ': ' + m[1] + ' нет среди пакетов dry-JSON turbo');
-  const target = dep.pkg.exports && dep.pkg.exports['./' + m[2]];
-  if (typeof target !== 'string') throw new Error(who + ': у ' + m[1] + ' нет строки exports["./' + m[2] + '"]');
-  const rel = path.posix.normalize(dep.dir + '/' + target);
-  if (!src.exists(rel)) throw new Error(who + ': файла ' + rel + ' (' + spec + ') нет на диске');
-  return [dep.dir + '/package.json', rel];
+  if (spec.startsWith('/') || /^[A-Za-z]:[\\/]/.test(spec) || spec.startsWith('file:')) throw new Error(from + ': абсолютный спецификатор ' + spec + ' - разбери руками');
+  // поле imports пакета (#…) проба не разрешает (замечание ревью E7 E0-12T): молча внешним пакетом
+  // оно увело бы обход мимо модуля workspace
+  if (spec.startsWith('#')) throw new Error(from + ': импорт ' + spec + ' по полю imports пакета - разбери руками');
+  // имя пакета - `@scope/имя` или `имя`, дальше подпуть; пакет workspace - по имени в манифестах dry
+  // при любом scope, не только @sf (замечание ревью E7 E0-12T)
+  const m = /^((?:@[^/]+\/)?[^/]+)(?:\/(.+))?$/.exec(spec);
+  const dep = m && Object.prototype.hasOwnProperty.call(ws, m[1]) ? ws[m[1]] : undefined;
+  if (!dep) {
+    if (spec.startsWith('@sf/')) throw new Error(from + ': ' + (m ? m[1] : spec) + ' нет среди пакетов dry-JSON turbo (вне workspace)');
+    return null;
+  }
+  const key = m[2] ? './' + m[2] : '.';
+  const exp = dep.pkg.exports;
+  const isMap = (x) => Boolean(x) && typeof x === 'object' && !Array.isArray(x);
+  let target;
+  if (typeof exp === 'string') target = key === '.' ? exp : undefined;
+  else if (isMap(exp)) target = Object.keys(exp).some((k) => k.startsWith('.')) ? exp[key] : key === '.' ? exp : undefined;
+  // без поля exports корень пакета - main, как у Node (@sf/core, @sf/contracts); подпуть - отказ ниже
+  else if (exp === undefined && key === '.') target = dep.pkg.main;
+  target = exportsCondition(target);
+  if (typeof target !== 'string') throw new Error(from + ': у ' + m[1] + ' нет строки exports["' + key + '"] (условия ' + VITEST_CONDITIONS.join(', ') + ')' + (exp === undefined && key === '.' ? ' и main' : ''));
+  const file = path.posix.normalize(dep.dir + '/' + target);
+  if (!src.isFile(file)) throw new Error(from + ': файла ' + file + ' (' + spec + ') нет на диске');
+  return { file, manifest: path.posix.join(dep.dir, 'package.json') };
 }
 
 /**
- * Всё, что читает проба test:int сверх входов графа turbo, - и что читают сами int-тесты:
- * конфиг из --config команды корня графа, модули его setupFiles (`./` - от каталога конфига),
- * модуль, из которого setup импортирует testEnvFilePath, и сама фикстура - файл в корне
- * из `join(repoRoot, "<файл>")`. Setup без импорта testEnvFilePath, иная форма
- * testEnvFilePath, нет файла - исключение. ws - dryManifests; roots - корни taskGraph
- * ({ name, dir, command }). Возвращает [{ file, why }] без повторов.
+ * Граф чтений int-наборов (E0-12T; TECH_DEBT 11.10.2026 E0-02A круг 3 - `intProbeReads` и второй
+ * файл окружения, `moduleReads` и транзитивные импорты; 17.10.2026 E0-12A круг 3 - пресет и
+ * globalSetup; 19.10.2026 E0-12D круг 1 - разбор импортов регулярками): по каждому корню entries
+ * ({ name, config, setupFiles, globalSetup } - пути от корня, как их разрешил vitest) - конфиг,
+ * каждый setup и globalSetup и их транзитивные импорты внутри workspace (importSpecifiers из
+ * test/imports.ts, резолв - intModule; `.json` - лист без разбора), а в каждом обойдённом модуле -
+ * употребления repoRoot (repoRootUses, решение техлида B5 E0-12T): join/resolve(repoRoot, …) с
+ * литералами - фикстура, чтение (кроме JOINED_NOT_READ), обязана быть на диске; нелитерал и любое
+ * иное употребление repoRoot - отказ «разбери руками» с модулем и строкой, кроме модулей
+ * REPO_ROOT_REVIEWED. Setup без testEnvFilePath законен; корень без единой фикстуры - отказ (что
+ * читают наборы, проба тогда не знает). Ошибка пары vitest (entry.error) - отказ с именем корня.
+ * Модуль разбирается один раз на вызов. ws - манифесты dry; src - источник; imports - модуль
+ * test/imports.ts; reviewed - перечень модулей, разобранных руками (по умолчанию
+ * REPO_ROOT_REVIEWED). Возвращает { reads, reviewedHit }: reads - [{ file, why, kind, input }] без
+ * повторов (kind - первый вид чтения, INT_PROBE_INPUT_KINDS или module; input - файл - вход пробы
+ * хоть одним видом), reviewedHit - модули перечня, чьё употребление обход встретил.
  */
-function intProbeReads(ws, roots, src) {
+function intProbeWalk(entries, ws, src, imports, reviewed = REPO_ROOT_REVIEWED) {
   const out = new Map();
-  const add = (file, why) => { if (!out.has(file)) out.set(file, why); };
-  const IMPORT = /\bimport\s*\{([^}]*)\}\s*from\s*(["'])([^"']+)\2/g;
-  for (const root of roots) {
-    const cfg = path.posix.normalize(root.dir + '/' + vitestConfigOf(root.command, root.name));
-    if (!src.exists(cfg)) throw new Error('конфига ' + cfg + ' (--config ' + root.name + ') нет на диске');
-    add(cfg, '--config ' + root.name);
-    for (const spec of stringArrayAt(src.read(cfg), 'setupFiles', cfg)) {
-      const files = moduleReads(spec, path.posix.dirname(cfg), ws, src, 'setupFiles ' + root.name);
-      const setup = files[files.length - 1];
-      for (const f of files) add(f, 'setupFiles ' + root.name);
-      const imports = Array.from(stripJsComments(src.read(setup)).matchAll(IMPORT))
-        .filter((m) => m[1].split(',').some((n) => n.trim().split(/\s+/)[0] === 'testEnvFilePath'));
-      if (imports.length !== 1) throw new Error('setup ' + setup + ' не берёт testEnvFilePath одним импортом - разбери руками');
-      const mod = moduleReads(imports[0][3], path.posix.dirname(setup), ws, src, 'setup ' + setup);
-      const pathsFile = mod[mod.length - 1];
-      for (const f of mod) add(f, 'testEnvFilePath для ' + setup);
-      const p = /\bexport\s+const\s+testEnvFilePath\s*=\s*join\(\s*repoRoot\s*,\s*(["'])([^"'/\\]+)\1\s*\)/.exec(stripJsComments(src.read(pathsFile)));
-      if (!p) throw new Error('testEnvFilePath в ' + pathsFile + ' не join(repoRoot, "<файл в корне>") - разбери руками');
-      if (!src.exists(p[2])) throw new Error('фикстуры ' + p[2] + ' (testEnvFilePath в ' + pathsFile + ') нет в корне');
-      add(p[2], 'фикстура testEnvFilePath, ' + setup);
+  const reviewedHit = new Set();
+  const add = (file, kind, why) => {
+    const prev = out.get(file);
+    const input = INT_PROBE_INPUT_KINDS.includes(kind);
+    if (!prev) out.set(file, { file, why, kind, input });
+    else if (input && !prev.input) out.set(file, { file, why, kind, input });
+  };
+  const parsed = new Map();
+  const parse = (mod) => {
+    if (!parsed.has(mod)) {
+      const text = src.read(mod);
+      parsed.set(mod, { uses: imports.repoRootUses(mod, text), specs: imports.importSpecifiers(mod, text) });
+    }
+    return parsed.get(mod);
+  };
+  const byHand = (mod, line, what) => {
+    if (Object.prototype.hasOwnProperty.call(reviewed, mod)) {
+      reviewedHit.add(mod);
+      return;
+    }
+    throw new Error(mod + ':' + line + ': ' + what + ' - что читает модуль, проба не знает; разбери руками (REPO_ROOT_REVIEWED)');
+  };
+  for (const e of entries) {
+    if (e.error) throw new Error(e.name + ': ' + e.error);
+    add(e.config, 'config', '--config ' + e.name);
+    const queue = [];
+    for (const f of e.setupFiles) { add(f, 'setup', 'setupFiles ' + e.name); queue.push(f); }
+    for (const f of e.globalSetup) { add(f, 'globalSetup', 'globalSetup ' + e.name); queue.push(f); }
+    const seen = new Set();
+    let fixtures = 0;
+    while (queue.length) {
+      const mod = queue.shift();
+      if (seen.has(mod)) continue;
+      seen.add(mod);
+      if (mod.endsWith('.json')) continue;
+      const { uses, specs } = parse(mod);
+      for (const use of uses) {
+        if (use.kind !== 'path') {
+          byHand(mod, use.line, 'repoRoot не первым аргументом join/resolve');
+          continue;
+        }
+        const call = use.callee + '(repoRoot, …)';
+        if (use.path === imports.DYNAMIC_SPECIFIER) {
+          byHand(mod, use.line, call + ' с нелитералом');
+          continue;
+        }
+        add(mod, 'join', call + ' в ' + e.name);
+        if (Object.prototype.hasOwnProperty.call(JOINED_NOT_READ, use.path)) continue;
+        // сегменты склеены через '/': абсолютный сегмент (resolve отбрасывает всё до него, join -
+        // нет), обратный слеш и буква диска (Windows) posix-нормализация не разбирает - fail-closed
+        // (замечание ревью E5 E0-12T)
+        if (/\\|\/\/|^\/|(?:^|\/)[A-Za-z]:/.test(use.path)) {
+          byHand(mod, use.line, call + ' с путём ' + JSON.stringify(use.path) + ' (обратный слеш, абсолютный сегмент или буква диска)');
+          continue;
+        }
+        const rel = path.posix.normalize(use.path);
+        if (G.outsideRoot(rel)) throw new Error(mod + ': ' + use.callee + '(repoRoot, "' + use.path + '") - вне корня репозитория');
+        if (!src.present(rel)) throw new Error('фикстуры ' + rel + ' (' + call + ' в ' + mod + ') нет в корне');
+        add(rel, 'fixture', call + ' в ' + mod);
+        fixtures++;
+      }
+      for (const spec of specs) {
+        const hit = intModule(spec, mod, ws, src, imports);
+        if (!hit) continue;
+        if (hit.manifest) add(hit.manifest, 'manifest', 'exports для ' + spec + ' (' + mod + ')');
+        add(hit.file, 'module', 'импорт ' + spec + ' из ' + mod);
+        queue.push(hit.file);
+      }
+    }
+    if (!fixtures) throw new Error('у корня ' + e.name + ' ноль фикстур join(repoRoot, …) в setupFiles, globalSetup и их импортах - что читают наборы, проба не знает');
+  }
+  return { reads: Array.from(out.values()), reviewedHit };
+}
+/** Чтения графа int-наборов (intProbeWalk(...).reads). */
+function intProbeReads(entries, ws, src, imports, reviewed) {
+  return intProbeWalk(entries, ws, src, imports, reviewed).reads;
+}
+
+/**
+ * Путь abs (как его отдал vitest) от каталога base через realpath (base - уже realpath): ссылка
+ * pnpm `node_modules/@sf/config` становится `packages/config`. Путь вне base - исключение с what
+ * (кто спрашивал). «Под каталогом» - один предикат strictlyUnder модуля графа (каталог `..x`
+ * внутри base - под ним). Результат - с `/`.
+ */
+function relUnder(abs, base, what) {
+  const real = fs.realpathSync(abs);
+  if (!G.strictlyUnder(real, base)) throw new Error(what + ': путь ' + abs + ' вне ' + base);
+  return path.relative(base, real).split(path.sep).join('/');
+}
+
+/**
+ * Корни графа roots ({ name, dir, command }) и ответ awaitVitest по ним -> entries intProbeReads
+ * (пути от корня через rel(abs)).
+ */
+function intEntries(roots, results, rel) {
+  return roots.map((root, i) => {
+    const x = results[i];
+    if (x.error) return { name: root.name, error: x.error };
+    return { name: root.name, config: rel(x.config), setupFiles: x.setupFiles.map(rel), globalSetup: x.globalSetup.map(rel) };
+  });
+}
+
+/**
+ * Дочерний vitest пробы test:int - один на прогон (условный стоп 2 техлида E0-12T: второго
+ * процесса нет): корни графа test:int, стаб int-пробы и пары INT_STUB_PAIRS одним запуском.
+ * Стаб - временный каталог (`<dir>/stub`) с конфигом без импортов, setup `./…`, модулем с
+ * join(repoRoot, ".env.test") и globalSetup, который пишет метку. Процесс стартует без ожидания
+ * (startVitest) сразу после снимков графа и test/imports.ts - без них и без зелёной пробы
+ * синтаксиса selftest-vitest.mjs не стартует; ответ разбирает intVitest. Не стартовал (причина
+ * названа: граф, test/imports.ts, синтаксис) или ошибка подготовки - { error }, её назовут пробы,
+ * которым нужен ответ; null не возвращается (замечание ревью E4 E0-12T). gates - подмена для
+ * кейса: { graph, imports } (snapshotGate) и syntax (SYNTAX_OK).
+ */
+function startIntVitest(gates = { graph: GRAPH_GATE, imports: IMPORTS_GATE, syntax: SYNTAX_OK }) {
+  const not = 'дочерний vitest не стартовал: ';
+  if (gates.graph.error !== null) return { error: new Error(not + 'нет графа turbo (' + gates.graph.error + ')') };
+  if (gates.imports.error !== null) return { error: new Error(not + 'test/imports.ts не загружен (' + gates.imports.error + ')') };
+  if (gates.syntax.get('selftest-vitest.mjs') !== true) return { error: new Error(not + 'selftest-vitest.mjs не прошёл пробу синтаксиса') };
+  const dir = tempDir('int-vitest');
+  try {
+    const stub = path.join(dir, 'stub');
+    for (const [rel, body] of Object.entries(INT_STUB_FILES)) {
+      fs.mkdirSync(path.dirname(path.join(stub, rel)), { recursive: true });
+      fs.writeFileSync(path.join(stub, rel), body);
+    }
+    const roots = G.taskGraph(GRAPH_GATE.snap.dry, 'test:int').roots;
+    const keys = Object.keys(INT_STUB_PAIRS);
+    const pairs = roots.map((r) => [path.join(ROOT, r.dir), r.command])
+      .concat([[stub, INT_STUB_COMMAND]], keys.map((k) => [stub, INT_STUB_PAIRS[k]]));
+    return { dir, stub, roots, keys, handle: startVitest(pairs, dir) };
+  } catch (e) {
+    releaseTemp(dir);
+    return { error: e };
+  }
+}
+
+/**
+ * Ответ дочернего vitest (INT_VITEST_START), разобранный один раз за прогон - снимок VITEST_GATE
+ * (ленивый snapshotGate, замечание ревью C10 E0-12T): { live, stub }. live - entries корней графа (пути от корня
+ * через realpath) или ошибка их отображения; stub - стаб int-пробы: entry корня стаба (пути
+ * стаба отображены на G.STUB_DIR - stubUnderGlob и детекторы видят его, как любой стаб-файл),
+ * pairs - ответы пар INT_STUB_PAIRS по ключам как есть, entries - они же как entries
+ * intProbeReads (пути стаба; ошибка пары - { error }), globalRan - метки globalSetup, которые
+ * нашлись (absent: недоступная метка - отказ, а не «нет»), src - наложенный источник с текстами
+ * стаба, files - стаб-файлы от корня, expect - setup, который детектор обязан назвать вне glob.
+ * Каталог стаба снимается после разбора (releaseTemp: сбой снятия не подменяет ответ). Отказ
+ * (не стартовал, не ответил, ответ иной формы) - одна красная строка снимка «дочерний vitest пробы
+ * test:int», пробы, которым нужен ответ, - в её перечне (GateBlocked), а не каскад одинаковых строк.
+ */
+function intVitest() {
+  return VITEST_GATE.take();
+}
+/** Снимок VITEST_GATE: ответ INT_VITEST_START, каталог стаба снимается после разбора. */
+function takeIntVitest() {
+  const start = INT_VITEST_START;
+  try {
+    if (start.error) throw start.error;
+    return readIntVitest(start);
+  } finally {
+    if (start.dir) releaseTemp(start.dir);
+  }
+}
+/** Разбор ответа startIntVitest (каталог стаба ещё на диске) - см. intVitest. */
+function readIntVitest(start) {
+  const results = awaitVitest(start.handle);
+  const n = start.roots.length;
+  let live;
+  try {
+    const realRoot = fs.realpathSync(ROOT);
+    live = { value: intEntries(start.roots, results.slice(0, n), (abs) => relUnder(abs, realRoot, 'корень репозитория')) };
+  } catch (e) {
+    live = { error: e };
+  }
+  const realStub = fs.realpathSync(start.stub);
+  const rel = (abs) => G.STUB_DIR + '/' + relUnder(abs, realStub, 'стаб int-пробы');
+  const name = G.stubTaskId('test:int');
+  const texts = {};
+  for (const [f, body] of Object.entries(INT_STUB_FILES)) texts[G.STUB_DIR + '/' + f] = body;
+  const pairs = {};
+  const entries = {};
+  start.keys.forEach((k, i) => {
+    pairs[k] = results[n + 1 + i];
+    entries[k] = pairs[k].error ? { name, error: pairs[k].error } : intEntries([{ name }], [pairs[k]], rel)[0];
+  });
+  return {
+    live,
+    stub: {
+      entry: intEntries([{ name }], [results[n]], rel)[0],
+      pairs,
+      entries,
+      globalRan: INT_STUB_GLOBAL_MARKS.filter((m) => !absent(path.join(start.stub, m))),
+      src: overlaySource(texts),
+      files: Object.keys(texts),
+      expect: G.STUB_DIR + '/vitest/selftest-setup.ts',
+    },
+  };
+}
+
+/**
+ * Чтения int-наборов на настоящем дереве - ленивое поле снимка GRAPH_GATE (snap.int): один
+ * обход за прогон по ответу intVitest; их сверяют пробы test:int и harness-selftest. Отказ
+ * запоминается тоже. snap.int.reviewedHit - модули REPO_ROOT_REVIEWED, которые обход встретил.
+ */
+function liveIntWalk() {
+  const snap = GRAPH_GATE.snap;
+  if (!snap.int) {
+    try {
+      const live = intVitest().live;
+      if (live.error) throw live.error;
+      snap.int = { value: intProbeWalk(live.value, snap.ws, DISK, IMPORTS_GATE.snap) };
+    } catch (e) {
+      snap.int = { error: e };
     }
   }
-  return Array.from(out, ([file, why]) => ({ file, why }));
+  if (snap.int.error) throw snap.int.error;
+  return snap.int.value;
+}
+/** Чтения int-наборов настоящего дерева (liveIntWalk().reads). */
+function liveIntReads() {
+  return liveIntWalk().reads;
 }
 
-// Чтения пробы test:int на настоящем дереве - один раз за прогон: их сверяют и проба
-// test:int, и проба harness-selftest.
-let liveIntReadsMemo = null;
-function liveIntReads() {
-  if (!liveIntReadsMemo) liveIntReadsMemo = intProbeReads(LIVE_GRAPH.snap.ws, G.taskGraph(LIVE_GRAPH.snap.dry, 'test:int').roots, DISK);
-  return liveIntReadsMemo;
+/** Стаб int-пробы (intVitest().stub). */
+function intProbeStubBase() {
+  return intVitest().stub;
 }
 
 /**
- * Стаб для детектора intProbeReads на G.stubNode: задача test:int с командой в STUB_DIR (вне glob
- * гейта) с ребром от первого корня графа; её конфиг берёт setup из стаб-пакета G.STUB_PACKAGE
- * (exports), setup импортирует testEnvFilePath из соседнего модуля. Возвращает
- * { dry, ws, src, expect, files } - expect: setup-файл, который детектор обязан назвать; files -
- * стаб-файлы (их glob гейта покрывать не должен). Снимок dry и манифесты ws не правятся.
+ * Стаб для детектора чтений int на G.stubNode: задача test:int с командой INT_STUB_COMMAND в
+ * STUB_DIR (вне glob гейта, корень графа рядом с настоящими) и чтения графа int со стабом.
+ * Возвращает { dry, reads, expect, files }: reads - чтения настоящих корней и корня стаба,
+ * expect - setup стаба, который детектор обязан назвать; files - стаб-файлы (их glob гейта
+ * покрывать не должен). Снимок dry не правится.
  */
 function intProbeStub(dry, ws) {
-  const stub = G.stubNode(dry, 'test:int', { command: 'vitest run --config vitest.selftest.config.ts' });
-  const name = G.STUB_PACKAGE;
-  const stubWs = Object.assign({}, ws, { [name]: { dir: G.STUB_DIR, pkg: { name, exports: { './vitest/selftest-setup': './vitest/selftest-setup.ts' } } } });
-  const setup = G.STUB_DIR + '/vitest/selftest-setup.ts';
-  const files = {
-    [G.STUB_DIR + '/vitest.selftest.config.ts']: 'export default { test: { setupFiles: ["' + name + '/vitest/selftest-setup"] } };',
-    [setup]: 'import { testEnvFilePath } from "./selftest-paths.js";\n',
-    [G.STUB_DIR + '/vitest/selftest-paths.ts']: 'export const testEnvFilePath = join(repoRoot, ".env.test");\n',
-  };
-  return { dry: stub, ws: stubWs, src: overlaySource(files), expect: setup, files: Object.keys(files) };
+  const base = intProbeStubBase();
+  const stub = G.stubNode(dry, 'test:int', { command: INT_STUB_COMMAND });
+  const reads = intProbeReads([base.entry], ws, base.src, IMPORTS_GATE.snap).concat(liveIntReads());
+  return { dry: stub, reads, expect: base.expect, files: base.files };
+}
+
+/**
+ * Чтения int-наборов, которых быть не должно (E0-12T; TECH_DEBT 11.10.2026 E0-02A - `scripts/**` и `infra/**` вне glob test:int, вложенные `.env.test`, glob test:int без `infra/**`; Р4 и В1
+ * техлида E0-12M): под scripts/ и infra/ (стек Compose и его гейт наборы не читают) и вложенный
+ * .env.test пакета (testEnvFilePath читает только корневой). Строки `file (why)`.
+ */
+function intForbidden(reads) {
+  return reads
+    .filter((r) => r.file.startsWith('scripts/') || r.file.startsWith('infra/') || (r.file !== '.env.test' && path.posix.basename(r.file) === '.env.test'))
+    .map((r) => r.file + ' (' + r.why + ')');
 }
 
 /**
@@ -2663,26 +3690,34 @@ function stubUnderGlob(runs, gateId, extra) {
 }
 
 /**
- * Детектор разницы графа с манифестами (G.manifestGap) не слепой: граф script без рёбер к первому
- * некорневому узлу graph (G.stubCut) обязан назвать его пакет. У графа нет некорневых узлов -
- * детектор не построить, это отказ, а не пропуск. Строка отказа или null.
+ * Детектор разницы графа с манифестами (G.manifestGap) не слепой: граф script без рёбер к
+ * некорневому узлу graph (G.stubCut) обязан назвать его пакет. Узел для среза - первый некорневой,
+ * чей пакет в замыкании workspace:-зависимостей манифестов от корней (G.manifestClosure): узел,
+ * пришедший явным `dependsOn "@sf/x#build"` без манифеста, разницы с манифестами не даёт, и срез
+ * его давал бы ложное «проба не замечает» (TECH_DEBT 21.10.2026 E0-12L круг 3, `manifestGapBlind`). Таких узлов нет - детектор не
+ * построить, это отказ, а не пропуск. Строка отказа или null.
  */
 function manifestGapBlind(dry, script, graph, ws) {
-  const cut = graph.nodes.find((n) => !n.root);
-  if (!cut) return 'у графа turbo run ' + script + ' нет узлов кроме корней - детектор разницы с манифестами не построить';
+  const closure = G.manifestClosure(graph, ws);
+  const cut = graph.nodes.find((n) => !n.root && closure.has(n.pkg));
+  if (!cut) return 'у графа turbo run ' + script + ' нет узлов кроме корней из замыкания манифестов - детектор разницы с манифестами не построить';
   if (G.manifestGap(G.taskGraph(G.stubCut(dry, cut.name), script), ws).includes(cut.pkg)) return null;
   return 'проба не замечает граф без ' + cut.name + ' (стаб без рёбер к узлу): ' + cut.pkg + ' не назван разницей с манифестами';
 }
 
 /**
  * Детектор G.inputsGap не слепой: граф без одного файла пакета во входах первого узла, у которого
- * такой вход есть и он среди tracked (G.stubWithoutInput), обязан назвать этот файл. Вход только
- * из tracked: turbo хеширует и неотслеживаемые файлы, а inputsGap сверяет лишь tracked - срез
- * нового `??`-файла дал бы ложное «проба не замечает». Строка отказа или null.
+ * такой вход есть и он среди tracked (G.stubWithoutInput), обязан назвать этот файл. «Файл пакета» -
+ * тот же отбор G.ownFiles, что у inputsGap: под каталогом узла (каталог `.` корневой задачи - весь
+ * корень), не во вложенном пакете, не в TRACKED_NOT_HASHED - срез файла, который inputsGap не
+ * считает, дал бы ложное «проба не замечает». Вход только из tracked: turbo хеширует и
+ * неотслеживаемые файлы, а inputsGap сверяет лишь tracked - срез нового `??`-файла дал бы то же
+ * ложное «проба не замечает». Строка отказа или null.
  */
 function inputsGapBlind(dry, script, graph, tracked) {
   const seen = new Set(tracked);
-  const own = (n) => n.reads.map((r) => r.file).filter((f) => f.startsWith(n.dir + '/') && seen.has(f));
+  const dirs = Array.from(G.dryPackages(dry).values());
+  const own = (n) => G.ownFiles(n, n.reads.map((r) => r.file), dirs).filter((f) => seen.has(f));
   const node = graph.nodes.find((n) => own(n).length);
   if (!node) return 'у графа turbo run ' + script + ' ни у одного узла нет отслеживаемого входа своего пакета - детектор входов не построить';
   const file = own(node)[0];
@@ -2697,14 +3732,17 @@ function inputsGapBlind(dry, script, graph, tracked) {
  * globalCacheInputs и чтения opts.liveExtra() (сверх графа, на настоящем дереве) обязаны
  * выбирать гейт; граф не уже манифестов (G.manifestGap). Детекторы не слепые: стаб-узел в
  * STUB_DIR (G.stubNode) обязан дать отказ со своим package.json, стаб глобального входа - со
- * своим файлом, граф без рёбер к первому некорневому узлу (G.stubCut) - разницу с манифестами
- * с его пакетом; при opts.extraStub - и стаб opts.extraStub(dry, ws), чтения которого считает
- * opts.extraReads (его expect обязан попасть в отказ). opts.label - кто читает, с глаголом
- * (в тексте отказа).
+ * своим файлом, граф без рёбер к узлу из замыкания манифестов (G.stubCut) - разницу с манифестами
+ * с его пакетом; при opts.extraStub - и стаб opts.extraStub(dry, ws) ({ dry, reads, expect, files }):
+ * его expect обязан попасть в отказ. Стаб-каталог под glob - первым: это условие детекторов, и
+ * проба стаб-каталога не гоняет весь граф ради него. opts.label - кто читает, с глаголом.
  */
 function checkTurboGraph(script, opts) {
   return ({ gate, runs }) => {
-    const { dry, ws, tracked } = LIVE_GRAPH.snap;
+    const { dry, ws, tracked } = GRAPH_GATE.snap;
+    const s = opts.extraStub ? opts.extraStub(dry, ws) : null;
+    const under = stubUnderGlob(runs, gate.id, s ? s.files : []);
+    if (under) return under;
     const extra = opts.liveExtra ? opts.liveExtra() : [];
     const real = graphOutside(runs, dry, script, extra);
     if (real.outside.length) return G.refusal(opts.label, gate.id, real.outside);
@@ -2718,9 +3756,6 @@ function checkTurboGraph(script, opts) {
     }
     const inputsBlind = inputsGapBlind(dry, script, real.graph, tracked);
     if (inputsBlind) return inputsBlind;
-    const s = opts.extraStub ? opts.extraStub(dry, ws) : null;
-    const under = stubUnderGlob(runs, gate.id, s ? s.files : []);
-    if (under) return under;
     const want = G.STUB_DIR + '/package.json ';
     const stub = graphOutside(runs, G.stubNode(dry, script, { inputs: { 'package.json': 'stub' } }), script, extra);
     if (!stub.outside.some((b) => b.startsWith(want))) return 'проба не замечает узел ' + G.STUB_DIR + ' вне glob ' + gate.id + ' на стабе';
@@ -2730,17 +3765,14 @@ function checkTurboGraph(script, opts) {
     }
     const gapBlind = manifestGapBlind(dry, script, real.graph, ws);
     if (gapBlind) return gapBlind;
-    if (s) {
-      const stubExtra = opts.extraReads(s.ws, G.taskGraph(s.dry, script).roots, s.src);
-      if (!graphOutside(runs, s.dry, script, stubExtra).outside.some((b) => b.startsWith(s.expect + ' '))) {
-        return 'проба не замечает ' + s.expect + ' вне glob ' + gate.id + ' на стабе extraReads';
-      }
+    if (s && !graphOutside(runs, s.dry, script, s.reads).outside.some((b) => b.startsWith(s.expect + ' '))) {
+      return 'проба не замечает ' + s.expect + ' вне glob ' + gate.id + ' на стабе чтений сверх графа';
     }
     const files = real.graph.nodes.reduce((n, x) => n + x.reads.length, 0);
     const skipped = G.globalReads(dry).skipped.map((r) => r.file);
     return {
       note: script + ': корни ' + real.graph.roots.map((r) => r.name).join(', ') + '; узлов ' + real.graph.nodes.length + ', файлов ' + files +
-        (extra.length ? ' и ' + extra.length + ' файлов конфигов' : '') + (skipped.length ? '; не сверяются (HASHED_NOT_READ): ' + skipped.join(', ') : ''),
+        (extra.length ? ' и ' + extra.length + ' чтений сверх графа' : '') + (skipped.length ? '; не сверяются (HASHED_NOT_READ): ' + skipped.join(', ') : ''),
     };
   };
 }
@@ -2781,7 +3813,7 @@ function rootsRefusal(dry, script, want, gateId) {
  */
 function checkRootCommands(script, want) {
   return ({ gate }) => {
-    const dry = LIVE_GRAPH.snap.dry;
+    const dry = GRAPH_GATE.snap.dry;
     const refused = rootsRefusal(dry, script, want, gate.id);
     if (refused) return refused;
     const first = want.roots[0];
@@ -2802,17 +3834,16 @@ function checkRootCommands(script, want) {
  */
 function rootScriptVerdict(pkg, script, expected) {
   const actual = pkg.scripts && pkg.scripts[script];
-  return actual === expected || G.scriptKey(script) + ' в корневом package.json не ' + expected + ': ' + JSON.stringify(actual);
+  return actual === expected || scriptKey(script) + ' в корневом package.json не ' + expected + ': ' + JSON.stringify(actual);
 }
 
 /**
- * Две строки «скрипт корня = ровно expected»: на настоящем package.json и проба отказа -
- * тот же скрипт с лишним флагом обязан краснеть. label - начало названия строки.
+ * Две строки «скрипт корня = ровно expected»: на настоящем package.json (rootPkg - одно чтение за
+ * прогон) и проба отказа - тот же скрипт с лишним флагом обязан краснеть. label - начало названия.
  */
 function checkRootScriptLines(label, script, expected) {
-  check(label + ': ' + G.scriptKey(script) + ' = ' + expected + ' в корневом package.json', () =>
-    rootScriptVerdict(readJson(path.join(ROOT, 'package.json')), script, expected));
-  check(label + ': ' + G.scriptKey(script) + ' с лишним флагом краснеет (проба отказа)', () => {
+  check(label + ': ' + scriptKey(script) + ' = ' + expected + ' в корневом package.json', () => rootScriptVerdict(rootPkg(), script, expected));
+  check(label + ': ' + scriptKey(script) + ' с лишним флагом краснеет (проба отказа)', () => {
     const r = rootScriptVerdict({ scripts: { [script]: expected + ' --passWithNoTests' } }, script, expected);
     return typeof r === 'string' || 'скрипт с лишним флагом принят за ' + expected;
   });
@@ -2820,14 +3851,14 @@ function checkRootScriptLines(label, script, expected) {
 
 /**
  * extra-строка гейта, который гоняет корневой скрипт: cmd гейта - ровно `pnpm <script>`,
- * scripts[script] корневого package.json - ровно expected (rootScriptVerdict).
+ * scripts[script] корневого package.json (rootPkg) - ровно expected (rootScriptVerdict).
  */
 function rootScriptExtra(script, expected) {
   return {
-    name: 'cmd pnpm ' + script + ' и ' + G.scriptKey(script) + ' = ' + expected + ' в корневом package.json',
+    name: 'cmd pnpm ' + script + ' и ' + scriptKey(script) + ' = ' + expected + ' в корневом package.json',
     fn: ({ gate }) => {
       if (gate.cmd !== 'pnpm ' + script) return 'cmd гейта ' + gate.id + ' не pnpm ' + script + ': ' + gate.cmd;
-      return rootScriptVerdict(readJson(path.join(ROOT, 'package.json')), script, expected);
+      return rootScriptVerdict(rootPkg(), script, expected);
     },
   };
 }
@@ -2851,6 +3882,8 @@ checkGateSelection('build', {
     'pnpm-workspace.yaml',
     'pnpm-lock.yaml',
     'turbo.json',
+    // turbo 2.10 читает и turbo.jsonc корня (TECH_DEBT 21.10.2026 E0-12L круг 4, `turbo.jsonc`)
+    'turbo.jsonc',
     'tsconfig.base.json',
   ],
   mustSkip: [
@@ -2872,6 +3905,7 @@ checkGateSelection('build', {
     'infra/docker-compose.yml',
     'scripts/tasks.mjs',
     'xapps/a.ts',
+    'docs/turbo.jsonc',
   ],
   extra: [
     rootScriptExtra('build', 'turbo run build'),
@@ -2888,11 +3922,10 @@ checkGateSelection('build', {
   ],
 });
 
-/** Проба графа test:int: сверх графа - конфиги int-тестов (intProbeReads) и их стаб. */
+/** Проба графа test:int: сверх графа - чтения int-наборов (liveIntReads) и их стаб (intProbeStub). */
 const INT_GRAPH_OPTS = {
   label: 'int-тесты читают',
   liveExtra: liveIntReads,
-  extraReads: intProbeReads,
   extraStub: intProbeStub,
 };
 
@@ -2901,7 +3934,7 @@ const INT_GRAPH_OPTS = {
 // глобальный стаб-вход, и на glob test:int, который выбирает setup int-стаба.
 {
   const name = 'граф turbo: стаб-каталог под glob гейта - отказ с именем STUB_DIR';
-  check(name, LIVE_GRAPH.guard(name, () => {
+  check(name, intGuard(name, () => {
     const gate = { id: 'build-all' };
     const fileUnder = (files) => 'стаб-каталог ' + G.STUB_DIR + ' под glob build-all (' + files.join(', ') + ') - детектор не построить, смени STUB_DIR в selftest-graph.js';
     const all = checkTurboGraph('build', { label: 'сборка читает' })({ gate, runs: () => true });
@@ -2909,7 +3942,7 @@ const INT_GRAPH_OPTS = {
     const runs = (f) => f === G.STUB_GLOBAL || gateProbe('build').runs(f);
     const global = checkTurboGraph('build', { label: 'сборка читает' })({ gate, runs });
     if (global !== fileUnder([G.STUB_GLOBAL])) return 'glob со STUB_GLOBAL: ожидалось «' + fileUnder([G.STUB_GLOBAL]) + '», получено ' + JSON.stringify(global);
-    const setup = intProbeStub(LIVE_GRAPH.snap.dry, LIVE_GRAPH.snap.ws).expect;
+    const setup = intProbeStubBase().expect;
     const intRuns = (f) => f === setup || gateProbe('test:int').runs(f);
     const int = checkTurboGraph('test:int', INT_GRAPH_OPTS)({ gate, runs: intRuns });
     return int === fileUnder([setup]) || 'glob test:int с setup int-стаба: ожидалось «' + fileUnder([setup]) + '», получено ' + JSON.stringify(int);
@@ -2959,8 +3992,11 @@ checkAlwaysScriptGate('test', 'turbo run test test:repo', 'test:repo', 'vitest r
 checkAlwaysScriptGate('typecheck', 'turbo run typecheck typecheck:repo', 'typecheck:repo', 'tsc -p tsconfig.json');
 
 // Int-тесты api, worker, db читают свои пакеты, их зависимости, @sf/config/vitest/setup,
-// корневой vitest.preset.ts (ADR-0011) и корневой .env.test; glob гейта test:int - по факту чтения (docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «Селектор гейта test:int: буква эпика, glob по графу зависимостей или always»).
-// Граф пакетов и корни - у turbo (E0-12L), конфиги int-тестов - intProbeReads.
+// корневой vitest.preset.ts (ADR-0011) и корневой .env.test; glob гейта test:int - по факту
+// чтения (docs/DECISIONS.md 11.10.2026, E0-02A, вопрос «Селектор гейта test:int: буква эпика,
+// glob по графу зависимостей или always»). Граф пакетов и корни - у turbo (E0-12L); конфиги,
+// setupFiles и globalSetup - у vitest (selftest-vitest.mjs), их импорты - test/imports.ts
+// (E0-12T): граф чтений int-наборов - intProbeReads.
 checkGateSelection('test:int', {
   runWhat: 'int-пакетах, их зависимостях, .env.test и корневых конфигах',
   skipWhat: 'web, api-client, вложенных конфигах и docs',
@@ -2983,13 +4019,16 @@ checkGateSelection('test:int', {
     'packages/integrations/tts/src/index.ts',
     '.env.test',
     // Вложенные .env.test int-пакетов выбирает маска пакета: turbo хеширует файл как вход узла
-    // (E0-12M, В1). testEnvFilePath читает только корень; проба чтений - E0-12T.
+    // (E0-12M, В1). Наборы их не читают: testEnvFilePath - только корень, это сверяет проба
+    // «int-наборы не читают scripts/, infra/ и вложенный .env.test» ниже.
     'apps/api/.env.test',
     'packages/db/.env.test',
     'package.json',
     'pnpm-workspace.yaml',
     'pnpm-lock.yaml',
     'turbo.json',
+    // turbo 2.10 читает и turbo.jsonc корня (TECH_DEBT 21.10.2026 E0-12L круг 4, `turbo.jsonc`)
+    'turbo.jsonc',
     'tsconfig.base.json',
     'vitest.preset.ts',
   ],
@@ -3004,7 +4043,7 @@ checkGateSelection('test:int', {
     '.claude/hooks/rules.sf.json',
     // Стек Compose и его гейт int-наборы не читают (E0-12M, решение техлида Р4): адрес стека -
     // из корневого .env.test (testEnvFilePath - только корень), стек перезапускает человек;
-    // проба чтений int-наборов - E0-12T.
+    // что наборы их не читают, сверяет проба «int-наборы не читают …» ниже.
     'infra/docker-compose.yml',
     'infra/docker-compose.app.yml',
     'scripts/check-compose.mjs',
@@ -3014,13 +4053,35 @@ checkGateSelection('test:int', {
     'apps/web/.env.test',
     'xapps/a.ts',
     'docs/apps/api/x.ts',
+    'docs/turbo.jsonc',
   ],
   extra: [
     rootScriptExtra('test:int', 'turbo run test:int --concurrency=1'),
     {
-      name: 'каждый файл графа turbo run test:int (узлы от корней, globalCacheInputs), конфиги --config, setupFiles и фикстура testEnvFilePath под glob',
-      graph: true,
+      name: 'каждый файл графа turbo run test:int (узлы от корней, globalCacheInputs) и граф чтений int-наборов (конфиги --config, setupFiles, globalSetup, их импорты, фикстуры join(repoRoot, …)) под glob',
+      int: true,
       fn: checkTurboGraph('test:int', INT_GRAPH_OPTS),
+    },
+    {
+      // Р4 и В1 техлида E0-12M (TECH_DEBT 11.10.2026 E0-02A - `scripts/**`, `infra/**` и вложенные `.env.test`): граф чтений не заходит в
+      // scripts/, infra/ и вложенный .env.test; имена из mustSkip под scripts/ и infra/ и
+      // вложенные .env.test из mustRun в нём не встречаются; детектор - стаб с join(repoRoot,
+      // "scripts/tasks.mjs") обязан покраснеть.
+      name: 'int-наборы не читают scripts/, infra/ и вложенный .env.test (граф чтений; имена mustSkip и mustRun сверены; проба отказа - стаб с join(repoRoot, "scripts/tasks.mjs"))',
+      int: true,
+      fn: (_probe, spec) => {
+        const reads = liveIntReads();
+        const bad = intForbidden(reads);
+        if (bad.length) return 'int-наборы читают то, на чём гейт не выбирается: ' + bad.join(', ');
+        const files = new Set(reads.map((r) => r.file));
+        const named = spec.mustSkip.filter((f) => /^(?:scripts|infra)\//.test(f)).concat(spec.mustRun.filter((f) => f !== '.env.test' && path.posix.basename(f) === '.env.test'));
+        const read = named.filter((f) => files.has(f));
+        if (read.length) return 'граф чтений int-наборов держит файлы из mustSkip/mustRun, которые наборы не читают: ' + read.join(', ');
+        const planted = intForbidden(intCaseReads({ 'vitest/s.ts': 'import { join } from "node:path";\nconst repoRoot = "";\njoin(repoRoot, ".env.test");\njoin(repoRoot, "scripts/tasks.mjs");\n' }));
+        const want = 'scripts/tasks.mjs (join(repoRoot, …) в ' + G.STUB_DIR + '/vitest/s.ts)';
+        if (planted.join() !== want) return 'проба не замечает чтение scripts/ на стабе: ожидалось «' + want + '», получено ' + JSON.stringify(planted);
+        return { note: reads.length + ' чтений, сверено имён ' + named.length };
+      },
     },
     {
       // состав корней зафиксирован перечнем: пропавший scripts['test:int'] у api, worker или db
@@ -3035,24 +4096,526 @@ checkGateSelection('test:int', {
   ],
 });
 
+/**
+ * Обход int-наборов на наложенном источнике без дочернего vitest (ветки отказа - TECH_DEBT
+ * 11.10.2026 E0-02A круг 3 «у веток throw нет красной посадки»; детектор чтений scripts/): один
+ * корень стаба с setup STUB_DIR/vitest/s.ts. files - { путь от STUB_DIR: текст }; extraWs - пакеты
+ * сверх манифестов dry; rootFiles - тексты по путям от корня; reviewed - перечень модулей,
+ * разобранных руками (по умолчанию REPO_ROOT_REVIEWED). Возвращает intProbeWalk.
+ */
+function intCaseWalk(files, extraWs, rootFiles, reviewed) {
+  const texts = Object.assign({}, rootFiles || {});
+  for (const [f, body] of Object.entries(files)) texts[G.STUB_DIR + '/' + f] = body;
+  const entry = { name: G.stubTaskId('test:int'), config: G.STUB_DIR + '/vitest.selftest.config.mjs', setupFiles: [G.STUB_DIR + '/vitest/s.ts'], globalSetup: [] };
+  return intProbeWalk([entry], Object.assign({}, GRAPH_GATE.snap.ws, extraWs || {}), overlaySource(texts), IMPORTS_GATE.snap, reviewed);
+}
+/** Чтения intCaseWalk. */
+function intCaseReads(files, extraWs, rootFiles) {
+  return intCaseWalk(files, extraWs, rootFiles).reads;
+}
+
+// Ветки отказа графа чтений int-наборов (E0-12T; TECH_DEBT 11.10.2026 E0-02A круг 3 «у веток throw
+// нет красной посадки»; L-020): каждая ждёт точный текст отказа, ветка, заменённая на пропуск,
+// краснит свой кейс. Конфиг и флаги - на ответе дочернего vitest по стабу (одним запуском со
+// стабом, intProbeStubBase), обход - на наложенном источнике.
+{
+  const S = (f) => G ? G.STUB_DIR + '/' + f : f;
+  // want - функция: текст отказа строится от модуля графа, его зовёт только проба под intGuard
+  const intRefused = (name, fn, want) => {
+    const line = 'граф чтений int: ' + name;
+    check(line, intGuard(line, () => refusalVerdict(fn, want())));
+  };
+  const stubName = () => G.stubTaskId('test:int');
+  const refusalOf = (key) => intProbeReads([intProbeStubBase().entries[key]], {}, DISK, IMPORTS_GATE.snap);
+  intRefused('команда без --config - отказ с именем корня', () => refusalOf('noConfig'),
+    () => stubName() + ': команда "vitest run" не называет конфиг через --config или -c');
+  intRefused('конфига из --config нет на диске - отказ', () => refusalOf('missingConfig'),
+    () => stubName() + ': конфига vitest.missing.config.ts (--config команды "vitest run --config vitest.missing.config.ts") нет на диске');
+  intRefused('оператор оболочки в команде (&&) - отказ, команда не разбирается как вызов vitest', () => refusalOf('shell'),
+    () => stubName() + ': команда "vitest run --config vitest.selftest.config.mjs && rm -rf x" - не простой вызов vitest (оператор оболочки в «&&»)');
+  const setupImporting = (spec) => ({ 'vitest/s.ts': 'import "' + spec + '";\nimport { join } from "node:path";\nconst repoRoot = "";\njoin(repoRoot, ".env.test");\n' });
+  intRefused('@sf/x вне пакетов dry - отказ', () => intCaseReads(setupImporting('@sf/selftest-missing/x')),
+    () => S('vitest/s.ts') + ': @sf/selftest-missing нет среди пакетов dry-JSON turbo (вне workspace)');
+  intRefused('нет строки exports для подпути - отказ', () => intCaseReads(setupImporting('@sf/selftest-case/nothing'), { '@sf/selftest-case': { dir: S('case'), pkg: { name: '@sf/selftest-case', exports: { '.': './index.ts' } } } }),
+    () => S('vitest/s.ts') + ': у @sf/selftest-case нет строки exports["./nothing"] (условия ' + VITEST_CONDITIONS.join(', ') + ')');
+  // ОВ1 техлида E0-12T: пакет без поля exports (как @sf/core, @sf/contracts) - корень через main,
+  // как у Node; подпуть у такого пакета и корень без main - отказ с именем
+  const mainOnly = (pkg) => ({ '@sf/selftest-main': { dir: S('main'), pkg: Object.assign({ name: '@sf/selftest-main' }, pkg) } });
+  {
+    const line = 'граф чтений int: пакет без exports - корень @sf/x разрешается через main (модуль и манифест в чтениях)';
+    check(line, intGuard(line, () => {
+      const reads = intCaseReads(Object.assign(setupImporting('@sf/selftest-main'), { 'main/src/index.ts': 'export const x = 1;\n' }), mainOnly({ main: './src/index.ts' }), { '.env.test': 'X=1\n' });
+      const kindOf = (file) => (reads.find((r) => r.file === file) || {}).kind;
+      if (kindOf(S('main/src/index.ts')) !== 'module') return 'модуль main не в чтениях: ' + JSON.stringify(reads.map((r) => r.file));
+      return kindOf(S('main/package.json')) === 'manifest' || 'манифест пакета не в чтениях: ' + JSON.stringify(reads.map((r) => r.file));
+    }));
+  }
+  // Голый спецификатор (замечание ревью E7 E0-12T): `#…` - отказ; имя пакета dry вне @sf (другой
+  // scope, без scope) - пакет workspace, его модуль и манифест в чтениях; имени нет среди пакетов -
+  // внешний пакет, конец обхода
+  intRefused('импорт #… (поле imports) - отказ «разбери руками»', () => intCaseReads(setupImporting('#selftest/x')),
+    () => S('vitest/s.ts') + ': импорт #selftest/x по полю imports пакета - разбери руками');
+  {
+    const line = 'граф чтений int: пакет workspace вне @sf (другой scope и без scope) - модуль и манифест в чтениях, имя не из dry - внешний пакет';
+    check(line, intGuard(line, () => {
+      const pkg = (name, dir) => ({ [name]: { dir: S(dir), pkg: { name, exports: { '.': './i.ts' } } } });
+      const ws = Object.assign(pkg('@selftest/scoped', 'scoped'), pkg('selftest-bare', 'bare'));
+      const setup = { 'vitest/s.ts': 'import "@selftest/scoped";\nimport "selftest-bare";\nimport "selftest-external";\nimport { join } from "node:path";\nconst repoRoot = "";\njoin(repoRoot, ".env.test");\n' };
+      const reads = intCaseReads(Object.assign(setup, { 'scoped/i.ts': '', 'bare/i.ts': '' }), ws, { '.env.test': 'X=1\n' });
+      const files = reads.map((r) => r.kind + ' ' + r.file);
+      const want = ['module ' + S('scoped/i.ts'), 'manifest ' + S('scoped/package.json'), 'module ' + S('bare/i.ts'), 'manifest ' + S('bare/package.json')];
+      const missing = want.filter((w) => !files.includes(w));
+      if (missing.length) return 'нет в чтениях: ' + missing.join(', ') + '; получено ' + JSON.stringify(files);
+      const stray = files.filter((x) => x.includes('selftest-external'));
+      return !stray.length || 'внешний пакет в чтениях: ' + stray.join(', ');
+    }));
+  }
+  // DISK.present - absent, не existsSync (замечание ревью C6/E10 E0-12T): ошибка lstat не ENOENT и не
+  // ENOTDIR (здесь - путь с NUL) - исключение, а не «фикстуры нет»
+  check('граф чтений int: DISK.present - ошибка lstat не ENOENT/ENOTDIR (путь с NUL) - исключение, а не «нет»', () => {
+    try {
+      return 'ответ ' + DISK.present('selftest\0x') + ' вместо исключения';
+    } catch (e) {
+      return (e && e.code === 'ERR_INVALID_ARG_VALUE') || 'иное исключение: ' + ((e && e.message) || String(e));
+    }
+  });
+  intRefused('пакет без exports - подпуть - отказ', () => intCaseReads(setupImporting('@sf/selftest-main/x'), mainOnly({ main: './src/index.ts' })),
+    () => S('vitest/s.ts') + ': у @sf/selftest-main нет строки exports["./x"] (условия ' + VITEST_CONDITIONS.join(', ') + ')');
+  intRefused('пакет без exports и без main - корень - отказ', () => intCaseReads(setupImporting('@sf/selftest-main'), mainOnly({})),
+    () => S('vitest/s.ts') + ': у @sf/selftest-main нет строки exports["."] (условия ' + VITEST_CONDITIONS.join(', ') + ') и main');
+  // Условный exports (замечание ревью C7 E0-12T): первое в порядке ключей условие из набора vitest
+  // (VITEST_CONDITIONS), вложенный объект - так же; ни одного совпавшего - отказ
+  {
+    const line = 'граф чтений int: условный exports - первое по порядку ключей условие vitest (browser мимо, node раньше default, вложенный import, default первым), ни одного - отказ';
+    check(line, intGuard(line, () => {
+      const pkg = (exports) => ({ '@sf/selftest-cond': { dir: S('cond'), pkg: { name: '@sf/selftest-cond', exports } } });
+      const texts = Object.assign(setupImporting('@sf/selftest-cond'), { 'cond/b.ts': '', 'cond/n.ts': '', 'cond/d.ts': '', 'cond/i.ts': '' });
+      const moduleOf = (exports) => intCaseReads(texts, pkg(exports), { '.env.test': 'X=1\n' }).filter((r) => r.kind === 'module').map((r) => r.file);
+      const got = [
+        moduleOf({ browser: './b.ts', node: './n.ts', default: './d.ts' }),
+        moduleOf({ '.': { require: './b.ts', node: { browser: './b.ts', import: './i.ts', default: './d.ts' }, default: './d.ts' } }),
+        moduleOf({ default: './d.ts', node: './n.ts' }),
+      ];
+      const want = [[S('cond/n.ts')], [S('cond/i.ts')], [S('cond/d.ts')]];
+      if (JSON.stringify(got) !== JSON.stringify(want)) return 'ожидалось ' + JSON.stringify(want) + ', получено ' + JSON.stringify(got);
+      return refusalVerdict(() => intCaseReads(texts, pkg({ browser: './b.ts', require: './b.ts' })),
+        S('vitest/s.ts') + ': у @sf/selftest-cond нет строки exports["."] (условия ' + VITEST_CONDITIONS.join(', ') + ')');
+    }));
+  }
+  intRefused('нет файла модуля - отказ', () => intCaseReads(setupImporting('./missing.js')),
+    () => S('vitest/s.ts') + ': файла ' + S('vitest/missing.js') + ' нет на диске');
+  intRefused('относительный импорт вне корня репозитория (../../../x.js) - отказ', () => intCaseReads(setupImporting('../../../x.js')),
+    () => S('vitest/s.ts') + ': ../../../x.js - вне корня репозитория');
+  // абсолютный спецификатор - три формы одной ветки: без неё каждая молча выпала бы из графа как
+  // внешний пакет
+  for (const spec of ['/etc/selftest-x.js', 'C:/selftest-x.js', 'file:///selftest-x.js']) {
+    intRefused('абсолютный спецификатор ' + spec + ' - отказ «разбери руками»', () => intCaseReads(setupImporting(spec)),
+      () => S('vitest/s.ts') + ': абсолютный спецификатор ' + spec + ' - разбери руками');
+  }
+  const withRoot = (...lines) => ({ 'vitest/s.ts': 'import { join, relative, resolve } from "node:path";\nconst repoRoot = "";\n' + lines.join('\n') + '\n' });
+  intRefused('нет фикстуры join(repoRoot, …) - отказ', () => intCaseReads(withRoot('join(repoRoot, "selftest-missing.env");')),
+    () => 'фикстуры selftest-missing.env (join(repoRoot, …) в ' + S('vitest/s.ts') + ') нет в корне');
+  intRefused('join(repoRoot, "../x") вне корня - отказ', () => intCaseReads(withRoot('join(repoRoot, ".env.test");', 'join(repoRoot, "../selftest-x");')),
+    () => S('vitest/s.ts') + ': join(repoRoot, "../selftest-x") - вне корня репозитория');
+  intRefused('ноль фикстур у корня - отказ', () => intCaseReads({ 'vitest/s.ts': 'export const x = 1;\n' }),
+    () => 'у корня ' + stubName() + ' ноль фикстур join(repoRoot, …) в setupFiles, globalSetup и их импортах - что читают наборы, проба не знает');
+  intRefused('нестроковый спецификатор (DYNAMIC_SPECIFIER) - отказ', () => intCaseReads({ 'vitest/s.ts': 'const name = "x";\nawait import(name);\n' }),
+    () => S('vitest/s.ts') + ': нестроковый спецификатор (<dynamic>) - что грузит модуль, проба не знает');
+  // Употребления repoRoot (решение техлида B5 E0-12T): resolve - чтение, как join; нелитерал и
+  // любое иное употребление - отказ с модулем и строкой, кроме модулей REPO_ROOT_REVIEWED.
+  const byHand = (line, what) => () => S('vitest/s.ts') + ':' + line + ': ' + what + ' - что читает модуль, проба не знает; разбери руками (REPO_ROOT_REVIEWED)';
+  intRefused('join(repoRoot, …) с нелитералом - отказ с модулем и строкой', () => intCaseReads(withRoot('const f = "x";', 'join(repoRoot, f);')),
+    byHand(4, 'join(repoRoot, …) с нелитералом'));
+  intRefused('resolve(repoRoot, "<файл>") - чтение: файла нет - отказ', () => intCaseReads(withRoot('resolve(repoRoot, "selftest-missing.json");')),
+    () => 'фикстуры selftest-missing.json (resolve(repoRoot, …) в ' + S('vitest/s.ts') + ') нет в корне');
+  // путь не posix-формы (замечание ревью E5 E0-12T): поздний абсолютный сегмент resolve, обратный
+  // слеш, буква диска - «разбери руками», а не склейка в путь под корнем или мимо outsideRoot
+  for (const [call, joined] of [['resolve(repoRoot, "cfg", "/etc/x")', 'cfg//etc/x'], ['join(repoRoot, "..\\\\x")', '..\\x'], ['join(repoRoot, "C:/x")', 'C:/x'], ['join(repoRoot, "/x")', '/x'], ['join(repoRoot, "a/C:/x")', 'a/C:/x']]) {
+    intRefused(call + ' - отказ «разбери руками»', () => intCaseReads(withRoot('join(repoRoot, ".env.test");', call + ';')),
+      byHand(4, call.slice(0, call.indexOf('(')) + '(repoRoot, …) с путём ' + JSON.stringify(joined) + ' (обратный слеш, абсолютный сегмент или буква диска)'));
+  }
+  intRefused('relative(repoRoot, …) вне перечня - отказ «разбери руками»', () => intCaseReads(withRoot('join(repoRoot, ".env.test");', 'relative(repoRoot, "x");')),
+    byHand(4, 'repoRoot не первым аргументом join/resolve'));
+  intRefused('import { repoRoot as root } - отказ «разбери руками»', () => intCaseReads({ 'vitest/s.ts': 'import { repoRoot as root } from "./selftest-paths.js";\nimport { join } from "node:path";\njoin(root, ".env.test");\n', 'vitest/selftest-paths.ts': 'export const repoRoot = "";\n' }),
+    byHand(1, 'repoRoot не первым аргументом join/resolve'));
+  {
+    const line = 'граф чтений int: модуль из перечня REPO_ROOT_REVIEWED - иное употребление repoRoot не отказ, литеральный join в нём - чтение, попадание записано';
+    check(line, intGuard(line, () => {
+      const reviewed = { [S('vitest/s.ts')]: 'кейс' };
+      const walk = intCaseWalk(withRoot('join(repoRoot, ".env.test");', 'relative(repoRoot, "x");', 'resolve(repoRoot, dir);'), {}, {}, reviewed);
+      if (!walk.reads.some((r) => r.file === '.env.test' && r.kind === 'fixture')) return 'литеральный join модуля перечня не в чтениях: ' + JSON.stringify(walk.reads.map((r) => r.file));
+      return walk.reviewedHit.has(S('vitest/s.ts')) || 'попадание модуля перечня не записано';
+    }));
+  }
+  {
+    // запись перечня, которую обход настоящего дерева не встретил, - красная: устаревшая запись
+    // молча разрешала бы новое употребление repoRoot в своём модуле
+    const line = 'граф чтений int: перечень REPO_ROOT_REVIEWED - у каждой записи причина, каждую встретил обход настоящего дерева (проба отказа - запись без попадания)';
+    check(line, intGuard(line, () => {
+      const noWhy = Object.entries(REPO_ROOT_REVIEWED).filter(([, why]) => typeof why !== 'string' || !why).map(([mod]) => mod);
+      if (noWhy.length) return 'запись без причины: ' + noWhy.join(', ');
+      const hit = liveIntWalk().reviewedHit;
+      const missed = (keys) => keys.filter((mod) => !hit.has(mod));
+      const stale = missed(Object.keys(REPO_ROOT_REVIEWED));
+      if (stale.length) return 'запись перечня без попадания в обходе настоящего дерева: ' + stale.join(', ');
+      const planted = S('selftest-never.ts');
+      return missed(Object.keys(REPO_ROOT_REVIEWED).concat(planted)).join() === planted || 'запись без попадания не названа - сверка слепа';
+    }));
+  }
+  // Р2 техлида E0-12T: join '.env' - не чтение по JOINED_NOT_READ (точное имя, не маска:
+  // '.env.local' - уже чтение и проверка наличия); второй файл окружения (.env.int - TECH_DEBT
+  // 11.10.2026 E0-02A круг 3, `intProbeReads`) - чтение наравне с .env.test; setup без
+  // testEnvFilePath законен, если фикстура есть где-то в обходе.
+  {
+    const line = 'граф чтений int: join(repoRoot, ".env") - не чтение (JOINED_NOT_READ с причиной), ".env.local" - не под исключением, второй файл окружения .env.int - чтение';
+    check(line, intGuard(line, () => {
+      if (typeof JOINED_NOT_READ['.env'] !== 'string' || !JOINED_NOT_READ['.env']) return 'у JOINED_NOT_READ[".env"] нет причины';
+      const joins = (...names) => withRoot(...names.map((n) => 'join(repoRoot, "' + n + '");'));
+      const files = intCaseReads(joins('.env', '.env.test', '.env.int'), {}, { '.env.int': 'X=1\n' }).map((r) => r.file);
+      if (files.includes('.env')) return '.env попал в чтения: ' + JSON.stringify(files);
+      if (!files.includes('.env.test') || !files.includes('.env.int')) return '.env.test и .env.int не оба в чтениях: ' + JSON.stringify(files);
+      const local = refusalVerdict(() => intCaseReads(joins('.env.test', '.env.local')), 'фикстуры .env.local (join(repoRoot, …) в ' + G.STUB_DIR + '/vitest/s.ts) нет в корне');
+      if (local !== true) return '.env.local: ' + local;
+      return { note: '.env - ' + JOINED_NOT_READ['.env'] };
+    }));
+  }
+  // Ответ дочернего vitest по стабу (TECH_DEBT 11.10.2026 E0-02A круг 3 «-c и путь в кавычках»):
+  // конфиг и setup стаба - пути стаба; globalSetup не исполнен; кавычки и --root разобраны.
+  const stubEntry = (dir) => ({ name: stubName(), config: S(dir + 'vitest.selftest.config.mjs'), setupFiles: [S(dir + 'vitest/selftest-setup.ts')], globalSetup: [S(dir + 'vitest/selftest-global.mjs')] });
+  const stubLine = (name, fn) => {
+    const line = 'граф чтений int: дочерний vitest - ' + name;
+    check(line, intGuard(line, fn));
+  };
+  stubLine('конфиг, setupFiles и globalSetup стаба на месте', () => {
+    const want = JSON.stringify(stubEntry(''));
+    return JSON.stringify(intProbeStubBase().entry) === want || 'ожидалось ' + want + ', получено ' + JSON.stringify(intProbeStubBase().entry);
+  });
+  stubLine('globalSetup при чтении конфига не исполнен (меток стаба нет)', () => {
+    const ran = intProbeStubBase().globalRan;
+    return !ran.length || 'globalSetup стаба исполнился при чтении конфига: метки ' + ran.join(', ');
+  });
+  stubLine('-c "конфиг" и -c \'конфиг\' (и с пробелом в имени) - один конфиг стаба', () => {
+    const e = intProbeStubBase().entries;
+    const spaced = Object.assign(stubEntry(''), { config: S('vitest space.config.mjs') });
+    const want = { quoted: stubEntry(''), spacedDouble: spaced, spacedSingle: spaced };
+    const bad = Object.keys(want).filter((k) => JSON.stringify(e[k]) !== JSON.stringify(want[k])).map((k) => INT_STUB_PAIRS[k] + ': ' + JSON.stringify(e[k]));
+    return !bad.length || bad.join('; ');
+  });
+  stubLine('--root: конфиг и setupFiles разрешены от корня из флага, как у настоящего запуска', () => {
+    const want = JSON.stringify({ name: stubName(), config: S('rooted/vitest.selftest.config.mjs'), setupFiles: [S('rooted/vitest/rooted-setup.ts')], globalSetup: [S('rooted/vitest/rooted-global.mjs')] });
+    return JSON.stringify(intProbeStubBase().entries.rooted) === want || 'ожидалось ' + want + ', получено ' + JSON.stringify(intProbeStubBase().entries.rooted);
+  });
+}
+
+/**
+ * Ветки ответа дочернего vitest на боевом пути startVitest/awaitVitest (fail-closed, L-028):
+ * поддельный ребёнок - node-скрипт во временном каталоге, с той же строкой выхода, что у
+ * selftest-vitest.mjs; не запустившийся процесс - программа, которой нет. Все стартуют разом и
+ * ждутся по очереди (один раз за прогон, fakeVitest); каталог снимается после ответов. Ответ по
+ * ключу - { value, ms } или { error, ms, pid } (ms - сколько ждал awaitVitest). Короткий предел
+ * FAKE_VITEST_TIMEOUT_MS - только у ребёнка, который не отвечает никогда (FAKE_TIMEOUT_KEYS): у
+ * прочих - боевой VITEST_TIMEOUT_MS, иначе старт десятка процессов разом на занятой машине дал бы
+ * ложное «не ответил» (замечание ревью C9 E0-12T).
+ */
+const FAKE_VITEST_TIMEOUT_MS = 500;
+const FAKE_TIMEOUT_KEYS = ['hang'];
+const FAKE_PAIRS = [['/a', 'vitest run --config x.ts']];
+const FAKE_EXIT = 'process.on("exit", (c) => process.stdout.write("' + VITEST_EXIT_MARK + '" + c + "\\n"));\n';
+const FAKE_VITEST = {
+  code1: FAKE_EXIT + 'process.stderr.write("boom\\n");\nprocess.exitCode = 1;\n',
+  empty: FAKE_EXIT,
+  notJson: FAKE_EXIT + 'process.stdout.write("' + VITEST_MARK + '{oops\\n");\n',
+  count: FAKE_EXIT + 'process.stdout.write("' + VITEST_MARK + '[]\\n");\n',
+  foreign: FAKE_EXIT + 'process.stdout.write(' + JSON.stringify(VITEST_MARK + JSON.stringify([{ dir: '/b', config: '/b/x.ts', setupFiles: [], globalSetup: [] }]) + '\n') + ');\n',
+  hang: 'setInterval(() => {}, 1000);\n',
+  // строка выхода без целого кода (обрезанная, с хвостом) - отказ, а не код 0
+  exitEmpty: 'process.stdout.write("' + VITEST_EXIT_MARK + '\\n");\n',
+  exitText: 'process.stdout.write("' + VITEST_EXIT_MARK + '1x\\n");\n',
+  ok: FAKE_EXIT + 'process.stdout.write(' + JSON.stringify(VITEST_MARK + JSON.stringify([{ dir: '/a', config: '/a/x.ts', setupFiles: ['/a/s.ts'], globalSetup: [] }]) + '\n') + ');\n',
+};
+let fakeVitestMemo = null;
+function fakeVitest() {
+  if (fakeVitestMemo) return fakeVitestMemo;
+  const dir = tempDir('vitest-fake');
+  const runs = {};
+  try {
+    const sub = (key) => {
+      const d = path.join(dir, key);
+      fs.mkdirSync(d);
+      return d;
+    };
+    for (const [key, body] of Object.entries(FAKE_VITEST)) {
+      const d = sub(key);
+      fs.writeFileSync(path.join(d, 'child.js'), body);
+      runs[key] = startVitest(FAKE_PAIRS, d, { child: path.join(d, 'child.js'), timeoutMs: FAKE_TIMEOUT_KEYS.includes(key) ? FAKE_VITEST_TIMEOUT_MS : undefined });
+    }
+    runs.noSpawn = startVitest(FAKE_PAIRS, sub('noSpawn'), { bin: 'sf-selftest-no-node' });
+    const out = {};
+    for (const [key, h] of Object.entries(runs)) {
+      const t0 = performance.now();
+      try {
+        out[key] = { value: awaitVitest(h), ms: performance.now() - t0 };
+      } catch (e) {
+        out[key] = { error: (e && e.message) || String(e), ms: performance.now() - t0, pid: h.child.pid };
+      }
+    }
+    fakeVitestMemo = out;
+    return out;
+  } finally {
+    releaseTemp(dir);
+  }
+}
+/** Вердикт кейса отказа по ответу fakeVitest()[key]: ровно want или строка с полученным. */
+function fakeRefused(key, want) {
+  const r = fakeVitest()[key];
+  if (r.error === undefined) return 'отказа нет, ожидалось «' + want + '»; ответ ' + JSON.stringify(r.value);
+  return r.error === want || 'ожидалось «' + want + '», получено «' + r.error + '»';
+}
+{
+  const what = 'selftest-vitest.mjs';
+  const line = (name) => 'граф чтений int: ответ vitest (startVitest/awaitVitest) - ' + name;
+  check(line('законный ответ разобран'), () => {
+    const r = fakeVitest().ok;
+    const want = JSON.stringify([{ dir: '/a', config: '/a/x.ts', setupFiles: ['/a/s.ts'], globalSetup: [] }]);
+    return (r.error === undefined && JSON.stringify(r.value) === want) || 'получено ' + JSON.stringify(r);
+  });
+  check(line('вышел с кодом 1 - отказ с кодом и stderr'), () => fakeRefused('code1', what + ': код 1: boom'));
+  check(line('stdout без строки ответа - отказ'), () => fakeRefused('empty', what + ': в stdout не ровно одна строка «selftest-vitest <JSON>»: ' + JSON.stringify(VITEST_EXIT_MARK + '0\n')));
+  check(line('ответ не JSON - отказ'), () => {
+    let why = '';
+    try {
+      JSON.parse('{oops');
+    } catch (e) {
+      why = e.message;
+    }
+    return fakeRefused('notJson', what + ': ответ не JSON (' + why + ')');
+  });
+  check(line('ответ не по числу пар - отказ'), () => fakeRefused('count', what + ': ответ не массив из 1 элементов: []'));
+  check(line('элемент чужого каталога - отказ'), () => fakeRefused('foreign', what + ': ответ пары 1 (/a) иной формы: {"dir":"/b","config":"/b/x.ts","setupFiles":[],"globalSetup":[]}'));
+  check(line('нет строки выхода за предел - отказ, процесс снят SIGKILL'), () => {
+    const verdict = fakeRefused('hang', what + ': не ответил за ' + FAKE_VITEST_TIMEOUT_MS / 1000 + ' с - процесс убит');
+    if (verdict !== true) return verdict;
+    const pid = fakeVitest().hang.pid;
+    return pidGone(pid, VITEST_GONE_MS) || 'процесс ' + pid + ' жив через 2 с после отказа по пределу';
+  });
+  check(line('программа не запустилась - отказ «не запустился: ENOENT» без ожидания предела'), () => {
+    const verdict = fakeRefused('noSpawn', what + ' не запустился: ENOENT');
+    if (verdict !== true) return verdict;
+    const ms = fakeVitest().noSpawn.ms;
+    return ms < 5000 || 'отказ через ' + Math.round(ms) + ' мс - ждал предела';
+  });
+  // замечание ревью C12 E0-12T: Number('') = 0 сделал бы обрезанную строку выхода успехом
+  check(line('строка выхода без кода и с нецелым кодом - отказ «без целого кода»'), () => {
+    const bad = [['exitEmpty', ''], ['exitText', '1x']]
+      .map(([key, code]) => fakeRefused(key, what + ': строка выхода без целого кода: ' + JSON.stringify(VITEST_EXIT_MARK + code)))
+      .filter((v) => v !== true);
+    return !bad.length || bad.join('; ');
+  });
+  // Ветка «pid нет, а повтор той же программы запустился» (замечание ревью C2 E0-12T): подменённые
+  // spawn (ребёнок без pid) и spawnSync (повтор без ошибки) - отказ SPAWN_CODE_UNKNOWN сразу, без
+  // ожидания предела и без kill процесса, которого нет
+  check(line('pid нет, повтор запустился - отказ «не запустился: код ошибки неизвестен» без ожидания предела'), () => {
+    const dir = tempDir('vitest-nopid');
+    try {
+      const killed = [];
+      const fake = { pid: undefined, on: () => fake, unref: () => {}, kill: (sig) => killed.push(sig) };
+      const t0 = performance.now();
+      const h = startVitest(FAKE_PAIRS, dir, { spawn: () => fake, spawnSync: () => ({ status: 0 }), timeoutMs: FAKE_VITEST_TIMEOUT_MS });
+      const verdict = refusalVerdict(() => awaitVitest(h), what + ' не запустился: ' + SPAWN_CODE_UNKNOWN);
+      if (verdict !== true) return verdict;
+      if (killed.length) return 'kill процесса без pid: ' + killed.join(', ');
+      if (LIVE_CHILDREN.has(fake)) return 'процесс без pid в LIVE_CHILDREN';
+      const ms = performance.now() - t0;
+      return ms < FAKE_VITEST_TIMEOUT_MS || 'отказ через ' + Math.round(ms) + ' мс - ждал предела';
+    } finally {
+      releaseTemp(dir);
+    }
+  });
+  // LIVE_CHILDREN (замечание ревью C3 E0-12T): запущенный без ожидания ребёнок - в наборе до ответа,
+  // killLiveChildren снимает его SIGKILL и чистит набор, обработчик exit процесса зовёт её раньше
+  // снятия каталогов реестра (TEMP.dropAll). Набор кейса - свой: общий держит дочерний vitest пробы.
+  check(line('ребёнок без ответа - в LIVE_CHILDREN, killLiveChildren снимает его до снятия каталогов на exit'), () => {
+    const exits = process.listeners('exit');
+    const kill = exits.indexOf(killLiveChildrenOnExit);
+    if (kill === -1) return 'killLiveChildren не в обработчиках exit';
+    if (kill > exits.indexOf(TEMP.dropAll)) return 'killLiveChildren на exit позже TEMP.dropAll';
+    const dir = tempDir('vitest-live');
+    try {
+      fs.writeFileSync(path.join(dir, 'child.js'), FAKE_VITEST.hang);
+      const h = startVitest(FAKE_PAIRS, dir, { child: path.join(dir, 'child.js') });
+      const had = LIVE_CHILDREN.delete(h.child);
+      const own = new Set([h.child]);
+      killLiveChildren(own);
+      if (!had) {
+        h.child.kill('SIGKILL');
+        return 'запущенный ребёнок не в LIVE_CHILDREN';
+      }
+      if (own.size) return 'набор после killLiveChildren не пуст';
+      return pidGone(h.child.pid, VITEST_GONE_MS) || 'процесс ' + h.child.pid + ' жив через 2 с после killLiveChildren';
+    } finally {
+      releaseTemp(dir);
+    }
+  });
+  // Строку выхода пишет обработчик exit ребёнка, процесс ещё жив (замечание ревью E3 E0-12T):
+  // awaitVitest ждёт его конца до снятия из LIVE_CHILDREN и каталога. Ребёнок кейса пишет ответ и
+  // строку выхода сам и живёт ещё 300 мс - после awaitVitest его нет с первой сверки.
+  check(line('строка выхода, процесс ещё жив - awaitVitest ждёт его конца до ответа'), () => {
+    const dir = tempDir('vitest-linger');
+    try {
+      const answer = VITEST_MARK + JSON.stringify([{ dir: '/a', config: '/a/x.ts', setupFiles: [], globalSetup: [] }]) + '\n' + VITEST_EXIT_MARK + '0\n';
+      fs.writeFileSync(path.join(dir, 'child.js'), 'process.stdout.write(' + JSON.stringify(answer) + ');\nsetTimeout(() => {}, 300);\n');
+      const h = startVitest(FAKE_PAIRS, dir, { child: path.join(dir, 'child.js') });
+      try {
+        awaitVitest(h);
+      } catch (e) {
+        return 'ответ ребёнка кейса отвергнут: ' + ((e && e.message) || String(e));
+      }
+      return pidGone(h.child.pid, 0) || 'процесс ' + h.child.pid + ' жив после ответа awaitVitest';
+    } finally {
+      releaseTemp(dir);
+    }
+  });
+  // Linux (замечание ревью E1 E0-12T): процесс-зомби (Z в /proc/<pid>/stat) - нет, хотя kill(pid, 0)
+  // отвечает; файла stat нет - нет; иное состояние - по kill. Источник подменён, процессов нет.
+  check('pidGone: Linux - зомби (Z, имя со скобками и пробелом) и снятый /proc/<pid>/stat - процесса нет, S при живом kill - есть', () => {
+    const alive = () => true;
+    const linux = (readStat) => pidGone(4242, 0, { platform: 'linux', readStat, kill: alive });
+    // нет stat процесса при смонтированном /proc (свой stat читается)
+    const enoent = (p) => {
+      if (p === 'self') return '1 (node) R 0 1';
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    };
+    const got = [linux(() => '4242 (node (x) y) Z 1 4242'), linux(enoent), linux(() => '4242 (node) S 1 4242')];
+    return JSON.stringify(got) === '[true,true,false]' || 'ожидалось [true,true,false] (Z, нет stat, S), получено ' + JSON.stringify(got);
+  });
+  // Решение техлида (круг 3): иная ошибка kill/readStat - «жив», а не исключение поверх готового
+  // ответа; ENOENT без читаемого /proc/self/stat (/proc не смонтирован) - не «нет», ветка kill
+  check('pidGone: kill и readStat с EACCES - «жив» без исключения; ENOENT на всё (/proc нет) при живом kill - «жив»', () => {
+    const fail = (code) => () => {
+      throw Object.assign(new Error(code), { code });
+    };
+    let got;
+    try {
+      got = [
+        pidGone(4242, 0, { platform: 'win32', kill: fail('EACCES') }),
+        pidGone(4242, 0, { platform: 'linux', readStat: fail('EACCES'), kill: () => true }),
+        pidGone(4242, 0, { platform: 'linux', readStat: fail('ENOENT'), kill: () => true }),
+      ];
+    } catch (e) {
+      return 'исключение вместо «жив»: ' + ((e && e.message) || String(e));
+    }
+    return JSON.stringify(got) === '[false,false,false]' || 'ожидалось [false,false,false] (kill EACCES, stat EACCES, нет /proc), получено ' + JSON.stringify(got);
+  });
+  // Решение техлида (круг 3): ребёнок, не вышедший за goneMs после строки выхода, снимается SIGKILL
+  // до снятия из LIVE_CHILDREN; goneMs 0 - без ожидания
+  check(line('строка выхода, процесс не вышел за goneMs - снят SIGKILL'), () => {
+    const dir = tempDir('vitest-stuck');
+    try {
+      const answer = VITEST_MARK + JSON.stringify([{ dir: '/a', config: '/a/x.ts', setupFiles: [], globalSetup: [] }]) + '\n' + VITEST_EXIT_MARK + '0\n';
+      fs.writeFileSync(path.join(dir, 'child.js'), 'process.stdout.write(' + JSON.stringify(answer) + ');\nsetTimeout(() => {}, 1000);\n');
+      const h = startVitest(FAKE_PAIRS, dir, { child: path.join(dir, 'child.js'), goneMs: 0 });
+      try {
+        awaitVitest(h);
+      } catch (e) {
+        return 'ответ ребёнка кейса отвергнут: ' + ((e && e.message) || String(e));
+      }
+      const killed = h.child.killed;
+      pidGone(h.child.pid, VITEST_GONE_MS);
+      return killed === true || 'процесс ' + h.child.pid + ' не снят SIGKILL после строки выхода';
+    } finally {
+      releaseTemp(dir);
+    }
+  });
+}
+// Ветки самого selftest-vitest.mjs, которые harness-selftest.js не вызывает: нечётное число
+// аргументов (до загрузки vitest) и vitest/node, который не грузится (копия модуля и его lib.js вне
+// репозитория, где пакета vitest нет), - ошибка каждой пары в JSON, выход с кодом 0.
+check('selftest-vitest.mjs: нечётное число аргументов - ошибка пары в ответе, без загрузки vitest', () => {
+  const r = run(process.execPath, [VITEST_CHILD, 'a', 'b', 'c'], { cwd: ROOT, timeout: 30000, killSignal: 'SIGKILL' });
+  const want = VITEST_MARK + JSON.stringify([{ dir: 'a', error: 'аргументы - не пары <dir> <command>: 3 слов' }]);
+  const got = String(r.stdout || '').split(/\r?\n/).find((l) => l.startsWith(VITEST_MARK));
+  return (r.status === 0 && got === want) || 'код ' + r.status + ', строка ' + JSON.stringify(got) + ', ожидалась ' + JSON.stringify(want);
+});
+check('selftest-vitest.mjs: vitest/node не загрузился - ошибка каждой пары в ответе, код 0', () => {
+  const dir = tempDir('vitest-alone');
+  try {
+    const copy = path.join(dir, 'selftest-vitest.mjs');
+    fs.copyFileSync(VITEST_CHILD, copy);
+    // модуль берёт isNotFile из соседнего lib.js
+    fs.copyFileSync(path.join(HOOKS, 'lib.js'), path.join(dir, 'lib.js'));
+    const r = run(process.execPath, [copy, 'a', 'vitest run -c x.ts', 'b', 'vitest run -c y.ts'], { cwd: dir, timeout: 30000, killSignal: 'SIGKILL' });
+    const got = String(r.stdout || '').split(/\r?\n/).find((l) => l.startsWith(VITEST_MARK));
+    let out = null;
+    try {
+      out = JSON.parse(String(got).slice(VITEST_MARK.length));
+    } catch (_) {
+      // строки ответа нет или она не JSON - отказ ниже
+    }
+    const prefix = 'vitest/node не загрузился: ';
+    const ok = r.status === 0 && Array.isArray(out) && out.length === 2 && out.every((x, i) => x.dir === ['a', 'b'][i] && typeof x.error === 'string' && x.error.startsWith(prefix));
+    return ok || 'код ' + r.status + ', ответ ' + JSON.stringify(got) + ' ' + String(r.stderr || '').slice(0, 160);
+  } finally {
+    releaseTemp(dir);
+  }
+});
+
 // Пробы графа build и test:int читают не только .claude/**, но и файлы проекта: то, из чего
-// turbo строит граф (корневые package.json, pnpm-workspace.yaml, turbo.json; package.json и
-// turbo.json каждого пакета и нового пакета по каждому шаблону pnpm-workspace.yaml -
-// graphSources), и то, что проба test:int читает сверх графа (конфиги int-тестов, setup,
-// фикстура). Гейт
-// самопроверки обязан выбираться на каждом из них, иначе устаревший glob build или test:int
-// уйдёт молча (docs/DECISIONS.md, 11.10.2026, E0-02A; E0-12L, 21.10.2026). Входы задач turbo
-// (исходники пакетов) пробы не читают - их сверяет сам turbo, а пробы build/test:int сверяют
-// их с glob этих гейтов. next.config.* ни одна проба не читает (граф сборки - у turbo), на нём
-// самопроверка не выбирается.
-// Боевые формы роута (ROUTE_FORMS) читают пробы S14 и пропуска standards в модуле роута - их сверка здесь же (E0-12D).
+// turbo строит граф (корневые package.json, pnpm-workspace.yaml, turbo.json и turbo.jsonc;
+// package.json, turbo.json и turbo.jsonc каждого пакета и нового пакета по каждому шаблону
+// pnpm-workspace.yaml - graphSources), и входы пробы test:int (INT_PROBE_INPUT_KINDS и
+// INT_PROBE_STATIC: конфиги, setupFiles, globalSetup, модули с join(repoRoot, …), фикстуры,
+// vitest.preset.ts, test/imports.ts). Гейт самопроверки обязан выбираться на каждом из них, иначе
+// устаревший glob build или test:int уйдёт молча (docs/DECISIONS.md, 11.10.2026, E0-02A; E0-12L,
+// 21.10.2026; Р1 техлида E0-12T). Транзитивные модули обхода int и входы задач turbo (исходники
+// пакетов) самопроверку не выбирают: их сверяют с glob test:int и build сами пробы этих гейтов;
+// новый join(repoRoot, …) в глубине модуля ловит прогон selftest в CI. next.config.* ни одна
+// проба не читает (граф сборки - у turbo), на нём самопроверка не выбирается. Боевые формы роута
+// (ROUTE_FORMS) читают пробы S14 и пропуска standards в модуле роута - их сверка здесь же (E0-12D).
+/**
+ * Близнец workspaceGlobs (Р4 техлида E0-12T) - под intGuard (int): require(esm) manifest.mjs -
+ * та же граница Node, что у require test/imports.ts (IMPORTS_GATE), а не граф turbo (замечание
+ * ревью E6 E0-12T: под одним GRAPH_GATE на Node ниже границы - лишняя красная ERR_REQUIRE_ESM).
+ */
+const WORKSPACE_TWIN_PROBE = {
+  // Р4 техлида E0-12T: шаблоны workspace пробы (workspacePatterns, пакет yaml) - близнец
+  // workspaceGlobs из scripts/lib/manifest.mjs (ручной разбор): на настоящем
+  // pnpm-workspace.yaml они равны, текст без packages: оба отвергают. На flow-списке
+  // (`packages: [...]`) расхождение известно: workspaceGlobs бросает, workspacePatterns отдаёт
+  // список (TECH_DEBT 23.10.2026 E0-12T «workspaceGlobs - ручной разбор YAML»); кейс фиксирует
+  // его, а не красит; изменилось - строка красная с просьбой снять строку долга.
+  name: 'шаблоны workspace пробы (workspacePatterns, yaml) - как workspaceGlobs из scripts/lib/manifest.mjs: равны на pnpm-workspace.yaml, оба отвергают текст без packages:, расхождение на flow-списке - известное',
+  int: true,
+  fn: () => {
+    const { workspaceGlobs } = require(path.join(ROOT, 'scripts', 'lib', 'manifest.mjs'));
+    const text = fs.readFileSync(path.join(ROOT, 'pnpm-workspace.yaml'), 'utf8');
+    const outcome = (fn, t) => {
+      try {
+        return JSON.stringify(fn(t));
+      } catch (_) {
+        return 'отказ';
+      }
+    };
+    const both = (t) => [outcome(workspaceGlobs, t), outcome(G.workspacePatterns, t)];
+    const [real1, real2] = both(text);
+    if (real1 !== real2) return 'pnpm-workspace.yaml: workspaceGlobs ' + real1 + ', workspacePatterns ' + real2;
+    const none = both('onlyBuiltDependencies:\n  - esbuild\n');
+    if (none.join() !== 'отказ,отказ') return 'текст без packages: - workspaceGlobs ' + none[0] + ', workspacePatterns ' + none[1] + ' (ожидался отказ обоих)';
+    const flow = both('packages: ["apps/*"]\n');
+    if (flow.join() !== 'отказ,["apps/*"]') return 'flow-список: известное расхождение изменилось (workspaceGlobs ' + flow[0] + ', workspacePatterns ' + flow[1] + ') - сверь и сними строку TECH_DEBT «workspaceGlobs - ручной разбор YAML»';
+    return { note: real1 };
+  },
+};
+check('гейт harness-selftest: близнец workspaceGlobs (require(esm) manifest.mjs) - под intGuard, как test/imports.ts', () =>
+  WORKSPACE_TWIN_PROBE.int === true || 'близнец не int - на Node ниже границы require(esm) он красный вместо SKIPPED');
 checkGateSelection('harness-selftest', {
-  runWhat: '.claude/**, файлах, из которых turbo строит граф, файлах, которые читает проба test:int, и путях из note вне when',
-  skipWhat: 'исходниках, lockfile, next.config.*, docs и путях из when и cmd гейтов-владельцев note',
+  runWhat: '.claude/**, файлах, из которых turbo строит граф, входах пробы test:int и путях из note вне when',
+  skipWhat: 'исходниках, lockfile, next.config.*, .env, docs и путях из when и cmd гейтов-владельцев note',
   mustRun: [
     '.claude/hooks/gates.js',
     '.claude/hooks/rules.sf.json',
     '.claude/hooks/selftest-graph.js',
+    '.claude/hooks/selftest-vitest.mjs',
+    '.claude/hooks/selftest-temp.js',
     '.claude/agents/worker.md',
     'package.json',
     'apps/web/package.json',
@@ -3061,16 +4624,23 @@ checkGateSelection('harness-selftest', {
     'packages/integrations/youtube/package.json',
     'pnpm-workspace.yaml',
     'turbo.json',
+    'turbo.jsonc',
     'packages/db/turbo.json',
+    'packages/db/turbo.jsonc',
     'apps/api/turbo.json',
     'apps/web/turbo.json',
-    'apps/' + G.NEW_SIBLING + '/package.json',
-    'packages/integrations/' + G.NEW_SIBLING + '/turbo.json',
+    // новый пакет по шаблону workspace (graphSources): без модуля графа имени нет, и строка
+    // модуля уже красная
+    ...(G ? ['apps/' + G.NEW_SIBLING + '/package.json', 'packages/integrations/' + G.NEW_SIBLING + '/turbo.json', 'apps/' + G.NEW_SIBLING + '/turbo.jsonc'] : []),
     'apps/api/vitest.int.config.ts',
     'apps/worker/vitest.int.config.ts',
     'packages/db/vitest.int.config.ts',
     'packages/config/src/paths.ts',
     'packages/config/vitest/setup.ts',
+    'packages/db/test-support/entry-check/postgres.ts',
+    'packages/db/test-support/entry-check/migrated-stack.ts',
+    'vitest.preset.ts',
+    'test/imports.ts',
     '.env.test',
     'test/container.test.ts',
   ],
@@ -3083,9 +4653,18 @@ checkGateSelection('harness-selftest', {
     'scripts/compose-rules.mjs',
     'scripts/lib/paths.mjs',
     'scripts/lib/files.mjs',
+    // проба-близнец workspacePatterns грузит его (Р4 техлида E0-12T), как files.mjs - близнец trackedFiles
+    'scripts/lib/manifest.mjs',
     'apps/api/.env.test',
+    // join(repoRoot, ".env") - не чтение (JOINED_NOT_READ, Р2 техлида E0-12T)
+    '.env',
     'apps/api/vitest.config.ts',
+    // транзитивные модули обхода int - под glob test:int, не входы пробы (Р1 техлида E0-12T)
     'packages/config/src/index.ts',
+    'packages/config/src/env-file.ts',
+    'packages/db/src/index.ts',
+    'packages/db/test-support/fixture.ts',
+    'test/imports.test.ts',
     'xapps/api/vitest.int.config.ts',
     'docs/apps/api/vitest.int.config.ts',
     'apps/web/src/app/page.tsx',
@@ -3101,6 +4680,7 @@ checkGateSelection('harness-selftest', {
     'xapps/web/package.json',
     'docs/apps/web/package.json',
     'docs/turbo.json',
+    'docs/turbo.jsonc',
     'xapps/api/turbo.json',
     'docs/apps/api/turbo.json',
   ],
@@ -3132,14 +4712,15 @@ checkGateSelection('harness-selftest', {
     {
       // Файл графа вне glob (пакет по шаблону tools/* в pnpm-workspace.yaml, turbo.json пакета)
       // меняет граф turbo, и без этой сверки его правка самопроверку не запускала бы (E0-12L;
-      // TECH_DEBT, строки 11.10.2026 E0-01A «when harness-selftest знает только apps/**, packages/**»
-      // и 11.10.2026 E0-02A «workspacePackages: шаблоны вне apps/, packages/»). Новый пакет по каждому шаблону workspace (graphSources) - и по шаблону без
-      // единого пакета - требует glob на шаблон каталога, а не на перечень сегодняшних пакетов.
+      // TECH_DEBT, строки 11.10.2026 E0-01A «when harness-selftest знает только apps/**,
+      // packages/**» и 11.10.2026 E0-02A «workspacePackages: шаблоны вне apps/, packages/»).
+      // Новый пакет по каждому шаблону workspace (graphSources) - и по шаблону без единого
+      // пакета - требует glob на шаблон каталога, а не на перечень сегодняшних пакетов.
       // Детектор: стаб-пакет и стаб-шаблон G.STUB_PATTERN дают свои G.STUB_SOURCES.
-      name: 'его выбирает каждый файл, из которого turbo строит граф (корневые package.json, pnpm-workspace.yaml, turbo.json; package.json и turbo.json каждого пакета dry и нового пакета по каждому шаблону workspace)',
+      name: 'его выбирает каждый файл, из которого turbo строит граф (корневые package.json, pnpm-workspace.yaml, turbo.json, turbo.jsonc; package.json, turbo.json и turbo.jsonc каждого пакета dry и нового пакета по каждому шаблону workspace)',
       graph: true,
       fn: ({ gate, runs }) => {
-        const { dry, patterns } = LIVE_GRAPH.snap;
+        const { dry, patterns } = GRAPH_GATE.snap;
         const sources = G.graphSources(dry, patterns);
         const bad = G.outsideGlob(runs, sources);
         if (bad.length) return G.refusal('граф turbo читает', gate.id, bad);
@@ -3152,15 +4733,38 @@ checkGateSelection('harness-selftest', {
       },
     },
     {
-      // файлы берутся тем же liveIntReads, что и в пробе test:int: конфиг из --config с любым
-      // именем, setup-модули, модуль testEnvFilePath, фикстура
-      name: 'его выбирает каждый файл, который читает проба test:int сверх графа turbo',
-      graph: true,
+      // Р1 техлида E0-12T: входы пробы test:int (виды INT_PROBE_INPUT_KINDS и INT_PROBE_STATIC)
+      // выбирают самопроверку; транзитивные модули обхода обязаны быть под glob test:int (иначе
+      // их правка не выбирает ни тот гейт, ни этот). Детектор - стаб int-пробы: его входы вне glob.
+      name: 'его выбирает каждый вход пробы test:int (конфиги --config, setupFiles, globalSetup, модули с join(repoRoot, …), фикстуры, манифесты exports, vitest.preset.ts, test/imports.ts); транзитивные модули обхода - под glob test:int',
+      int: true,
       fn: ({ gate, runs }) => {
         const reads = liveIntReads();
-        const bad = G.outsideGlob(runs, reads);
+        const inputs = reads.filter((r) => r.input).concat(INT_PROBE_STATIC.map((file) => ({ file, why: 'вход пробы test:int' })));
+        const bad = G.outsideGlob(runs, inputs);
         if (bad.length) return G.refusal('проба test:int читает', gate.id, bad);
-        return { note: reads.length + ' файлов' };
+        const intRuns = gateProbe('test:int').runs;
+        const deep = G.outsideGlob(intRuns, reads.filter((r) => !r.input));
+        if (deep.length) return 'транзитивные модули обхода int-наборов вне glob test:int: ' + deep.join(', ') + ' - расширь glob test:int';
+        const base = intProbeStubBase();
+        const under = stubUnderGlob(runs, gate.id, base.files);
+        if (under) return under;
+        const stubInputs = intProbeReads([base.entry], GRAPH_GATE.snap.ws, base.src, IMPORTS_GATE.snap).filter((r) => r.input);
+        if (!G.outsideGlob(runs, stubInputs).some((b) => b.startsWith(base.expect + ' '))) return 'проба не замечает вход ' + base.expect + ' вне glob ' + gate.id + ' на стабе';
+        return { note: inputs.length + ' входов, ' + (reads.length - reads.filter((r) => r.input).length) + ' транзитивных модулей' };
+      },
+    },
+    WORKSPACE_TWIN_PROBE,
+    {
+      // Р5 техлида E0-12T (TECH_DEBT 21.10.2026 E0-12L круг 4, peer-only workspace-зависимость): workspace:-пакет только в peerDependencies turbo
+      // не упорядочивает - ребра нет, а сверка с манифестами (DEP_FIELDS) его не видит.
+      name: 'ни у одного пакета dry workspace:-зависимости только в peerDependencies (без дубля в dependencies/devDependencies/optionalDependencies)',
+      graph: true,
+      fn: () => {
+        const ws = GRAPH_GATE.snap.ws;
+        const bad = G.peerOnly(ws);
+        if (bad.length) return bad.join('; ');
+        return { note: Object.keys(ws).length + ' манифестов' };
       },
     },
   ],
@@ -3168,8 +4772,11 @@ checkGateSelection('harness-selftest', {
 
 // Последняя строка графа: отказ снимка (dry-JSON, манифесты, шаблоны workspace, tracked - git ls-files
 // с файлами на диске; сбой git ls-files или stat файла - тоже здесь) называется здесь один раз,
-// с перечнем проб графа, которые без него не гонялись (graphGate).
-check('граф turbo: dry-JSON настоящего дерева (turbo run ' + GRAPH_SCRIPTS.join(' ') + ' --dry=json)', () => graphVerdict(LIVE_GRAPH));
+// с перечнем проб графа, которые без него не гонялись (snapshotGate).
+check('граф turbo: dry-JSON настоящего дерева (turbo run ' + GRAPH_SCRIPTS.join(' ') + ' --dry=json)', () => graphVerdict(GRAPH_GATE));
+// Строка модуля разбора импортов: граница Node или сбой require test/imports.ts - здесь один раз,
+// с перечнем проб, которые без модуля не гонялись.
+check('test/imports.ts: require .ts (Node 22.18+, 23.6+ или 24+) для пробы test:int', () => gateVerdict(IMPORTS_GATE, () => 'Node ' + process.version));
 
 // ------------------------------------------------------------------ 3. шапки агентов и команд
 for (const kind of ['agents', 'commands']) {
@@ -3251,29 +4858,25 @@ check('commit-gate: bash -c обёртка не обходит замок', () =
 });
 /**
  * Временный репозиторий пробы не берёт из настроек машины ничего, что исполняет код, - как в
- * пробе сверки дерева: init без шаблонов (`--template=`), коммит с core.hooksPath на пустой
- * каталог. Иначе глобальный pre-commit красит пробу или исполняется в ней.
+ * пробе сверки дерева: init без шаблонов (`--template=`), коммит через git(…, { isolated }) -
+ * core.hooksPath на пустой каталог, без подписи и fsmonitor. Иначе глобальный pre-commit красит
+ * пробу или исполняется в ней.
  */
 check('commit-gate: isBootstrap - true без коммитов, false после первого', () => {
   const { isBootstrap } = require('./commit-gate.js');
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-boot-'));
-  const noHooks = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-boot-nohooks-'));
+  const tmp = tempDir('boot');
   const env = Object.assign({}, process.env, { GIT_AUTHOR_NAME: 'p', GIT_AUTHOR_EMAIL: 'p@x', GIT_COMMITTER_NAME: 'p', GIT_COMMITTER_EMAIL: 'p@x' });
-  const git = (args) => {
-    const r = run('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=' + noHooks].concat(args), { cwd: tmp, env });
-    if (r.error || r.status !== 0) throw new Error('git ' + args[0] + ': ' + String((r.error && r.error.message) || r.stderr).slice(0, 160));
-  };
+  const inTmp = (args) => gitStrict(args, { cwd: tmp, env, isolated: true });
   try {
-    git(['init', '-q', '--template=', '-b', 'main']);
+    inTmp(['init', '-q', '--template=', '-b', 'main']);
     if (!isBootstrap(tmp)) return 'репозиторий без коммитов не опознан как bootstrap';
     fs.writeFileSync(path.join(tmp, 'a.txt'), 'a');
-    git(['add', 'a.txt']);
-    git(['commit', '-q', '-m', 'chore: init']);
+    inTmp(['add', 'a.txt']);
+    inTmp(['commit', '-q', '-m', 'chore: init']);
     if (isBootstrap(tmp)) return 'репозиторий с коммитом всё ещё bootstrap';
     return true;
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    fs.rmSync(noHooks, { recursive: true, force: true });
+    releaseTemp(tmp);
   }
 });
 check('commit-gate: пропуск не-git команды', () => {
@@ -3302,8 +4905,20 @@ check('standards: замечание на any и console в новом файл�
 /**
  * @sf/runtime (E0-12B, ADR-0012) - код процессов api и worker: console и process.env в его src
  * ловятся так же, как в apps; тесты пакета не ловятся (L-008: отказ и пропуск на боевом пути).
- * Крах standards.js - красный на обеих сторонах, как в standardsCases: код вне 0/2 или HOOK_ERROR.
+ * Крах standards.js - красный на обеих сторонах, как в standardsCases: код вне 0/2 или HOOK_ERROR
+ * (крах внутри L.guard - код 0, и только строка HOOK_ERROR отличает его от пропуска). Вердикт по
+ * ответам хука src и test - runtimeStandardsVerdict; его ветки краха сверяют кейсы на подменённых
+ * ответах (TECH_DEBT 19.10.2026 E0-12D круг 6, проба standards runtime): строка называет крах, а
+ * не «не пойманы».
  */
+function runtimeStandardsVerdict(src, test) {
+  if (src.err.includes(HOOK_ERROR)) return 'src: standards.js упал внутри guard - ' + src.err.slice(0, 160);
+  if (src.code !== 2 || !/S03/.test(src.err) || !/S05/.test(src.err)) return 'console/process.env в src не пойманы: код ' + src.code + ' ' + src.err.slice(0, 160);
+  if (test.code !== 0 && test.code !== 2) return 'тест пакета: standards.js упал, код ' + test.code + ' ' + test.err.slice(0, 160);
+  if (test.err.includes(HOOK_ERROR)) return 'тест пакета: standards.js упал внутри guard - ' + test.err.slice(0, 160);
+  if (/S03|S05/.test(test.err)) return 'тест пакета получил S03/S05: ' + test.err.slice(0, 160);
+  return true;
+}
 check('standards: console и process.env в packages/runtime/src пойманы, в его test - нет', () => {
   const gone = missingDirs(['packages/runtime/src', 'packages/runtime/test']);
   if (gone) return gone;
@@ -3311,16 +4926,22 @@ check('standards: console и process.env в packages/runtime/src пойманы,
   return withScratchTree((tree) => {
     tree.write('packages/runtime/src/zz_selftest_bad.ts', body);
     tree.write('packages/runtime/test/zz_selftest.test.ts', body);
-    const r1 = tree.standards('packages/runtime/src/zz_selftest_bad.ts');
-    const r2 = tree.standards('packages/runtime/test/zz_selftest.test.ts');
-    if (r1.err.includes(HOOK_ERROR)) return 'src: standards.js упал внутри guard - ' + r1.err.slice(0, 160);
-    if (r1.code !== 2 || !/S03/.test(r1.err) || !/S05/.test(r1.err)) return 'console/process.env в src не пойманы: код ' + r1.code + ' ' + r1.err.slice(0, 160);
-    if (r2.code !== 0 && r2.code !== 2) return 'тест пакета: standards.js упал, код ' + r2.code + ' ' + r2.err.slice(0, 160);
-    if (r2.err.includes(HOOK_ERROR)) return 'тест пакета: standards.js упал внутри guard - ' + r2.err.slice(0, 160);
-    if (/S03|S05/.test(r2.err)) return 'тест пакета получил S03/S05: ' + r2.err.slice(0, 160);
-    return true;
+    return runtimeStandardsVerdict(tree.standards('packages/runtime/src/zz_selftest_bad.ts'), tree.standards('packages/runtime/test/zz_selftest.test.ts'));
   });
 });
+check('standards runtime: крах standards.js внутри guard называется крахом - на src (код 0) и на тесте пакета (код 0)', () => {
+  const crash = { code: 0, out: '', err: HOOK_ERROR + ' Error: selftest' };
+  const caught = { code: 2, out: '', err: '[S03] console\n[S05] process.env' };
+  const clean = { code: 0, out: '', err: '' };
+  const got = [runtimeStandardsVerdict(crash, clean), runtimeStandardsVerdict(caught, crash), runtimeStandardsVerdict(caught, clean)];
+  const want = ['src: standards.js упал внутри guard - ' + crash.err, 'тест пакета: standards.js упал внутри guard - ' + crash.err, true];
+  return JSON.stringify(got) === JSON.stringify(want) || 'ожидалось ' + JSON.stringify(want) + ', получено ' + JSON.stringify(got);
+});
+
+/** Текст файла пробы standards: строка line и строка кода после неё - один помощник проб S04, S11, S15, S16. */
+function lineFile(line) {
+  return line + '\nexport const x = 1;\n';
+}
 
 /**
  * Отказ и пропуск одного правила standards на файле rel дерева пробы (L-008). refused / allowed -
@@ -3382,7 +5003,6 @@ check('standards: S04 - вызов search пойман и со словом neve
   const call = ['youtube', 'search', 'list'].join('.');
   const endpoint = ['', 'youtube', 'v3', 'search'].join('/');
   const mark = 'no-search-list: allowed';
-  const file = (line) => line + '\nexport const x = 1;\n';
   const crlf = (line) => line + '\r\nexport const x = 1;\r\n';
   const cr = String.fromCharCode(13);
   const ls = String.fromCharCode(0x2028);
@@ -3412,17 +5032,17 @@ check('standards: S04 - вызов search пойман и со словом neve
     '// ' + mark + cr + 'await ' + call + '();',
     '// ' + mark + ls + 'await ' + call + '();',
     '// ' + mark + ps + 'await ' + call + '();',
-  ].map(file).concat([crlf('await ' + call + '({}); // ' + mark)]);
+  ].map(lineFile).concat([crlf('await ' + call + '({}); // ' + mark)]);
   const allowed = [
     '// never ' + call + ' - ' + mark,
     '    // never ' + call + ' - ' + mark,
     'export const y = 1; // ' + mark,
     'await playlistItems.list({});',
-  ].map(file).concat([crlf('// never ' + call + ' - ' + mark)]);
+  ].map(lineFile).concat([crlf('// never ' + call + ' - ' + mark)]);
   const own = standardsCases('S04', 'packages/integrations/youtube/src/zz_selftest_s04.ts', refused, allowed);
   if (own !== true && typeof own !== 'object') return own;
   for (const rel of ['tools/zz_selftest_s04.mjs', 'test/zz_selftest_s04.test.ts', '.claude/hooks/zz_selftest_s04.js', 'zz_selftest_s04.config.cts']) {
-    const other = standardsCases('S04', rel, [file('await ' + call + '({});')], [file('// never ' + call + ' - ' + mark)]);
+    const other = standardsCases('S04', rel, [lineFile('await ' + call + '({});')], [lineFile('// never ' + call + ' - ' + mark)]);
     if (other !== true && typeof other !== 'object') return rel + ': ' + other;
   }
   return own;
@@ -3440,31 +5060,23 @@ check('standards: S04 на отслеживаемом файле с CRLF - //-с
   const call = ['youtube', 'search', 'list'].join('.');
   const mark = 'no-search-list: allowed';
   const rel = 'packages/integrations/youtube/src/zz_selftest_s04_crlf.ts';
-  const noHooks = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-s04-nohooks-'));
   const env = Object.assign({}, process.env, { GIT_AUTHOR_NAME: 'p', GIT_AUTHOR_EMAIL: 'p@x', GIT_COMMITTER_NAME: 'p', GIT_COMMITTER_EMAIL: 'p@x' });
-  try {
-    return withScratchTree((tree) => {
-      const git = (args) => {
-        const r = run('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=' + noHooks, '-c', 'core.autocrlf=false'].concat(args), { cwd: tree.dir, env });
-        if (r.error || r.status !== 0) throw new Error('git ' + args[0] + ': ' + String((r.error && r.error.message) || r.stderr).slice(0, 160));
-      };
-      tree.write(rel, 'export const x = 1;\n');
-      git(['init', '-q', '--template=', '-b', 'main']);
-      git(['config', 'core.autocrlf', 'false']);
-      git(['add', rel]);
-      git(['commit', '-q', '-m', 'chore: init']);
-      tree.write(rel, '// never ' + call + ' - ' + mark + '\r\nexport const x = 1;\r\n');
-      const passed = tree.standards(rel);
-      if (passed.err.includes(HOOK_ERROR)) return 'standards.js упал внутри guard - ' + passed.err.slice(0, 160);
-      if (passed.err.includes('[S04]')) return 'S04 на //-строке с меткой и CR в конце: ' + passed.err.slice(0, 160);
-      tree.write(rel, 'await ' + call + '({}); // ' + mark + '\r\nexport const x = 1;\r\n');
-      const refused = tree.standards(rel);
-      if (refused.code !== 2 || !refused.err.includes('[S04]')) return 'не пойман S04 на вызове с меткой после кода и CR в конце - код ' + refused.code + ' ' + refused.err.slice(0, 160);
-      return true;
-    });
-  } finally {
-    fs.rmSync(noHooks, { recursive: true, force: true });
-  }
+  return withScratchTree((tree) => {
+    const inTree = (args) => gitStrict(['-c', 'core.autocrlf=false'].concat(args), { cwd: tree.dir, env, isolated: true });
+    tree.write(rel, 'export const x = 1;\n');
+    inTree(['init', '-q', '--template=', '-b', 'main']);
+    inTree(['config', 'core.autocrlf', 'false']);
+    inTree(['add', rel]);
+    inTree(['commit', '-q', '-m', 'chore: init']);
+    tree.write(rel, '// never ' + call + ' - ' + mark + '\r\nexport const x = 1;\r\n');
+    const passed = tree.standards(rel);
+    if (passed.err.includes(HOOK_ERROR)) return 'standards.js упал внутри guard - ' + passed.err.slice(0, 160);
+    if (passed.err.includes('[S04]')) return 'S04 на //-строке с меткой и CR в конце: ' + passed.err.slice(0, 160);
+    tree.write(rel, 'await ' + call + '({}); // ' + mark + '\r\nexport const x = 1;\r\n');
+    const refused = tree.standards(rel);
+    if (refused.code !== 2 || !refused.err.includes('[S04]')) return 'не пойман S04 на вызове с меткой после кода и CR в конце - код ' + refused.code + ' ' + refused.err.slice(0, 160);
+    return true;
+  });
 });
 
 /**
@@ -3522,7 +5134,6 @@ check('lib.js: isGone и isNotFile отвечают как одноимённы�
 check('standards: серверные пакеты в apps/web/src (корень, подпуть, побочный импорт) пойманы S11, вход web - нет', () => {
   const gone = missingDirs(['apps/web/src/lib']);
   if (gone) return gone;
-  const file = (line) => line + '\nexport const x = 1;\n';
   return standardsCases('S11', 'apps/web/src/lib/zz_selftest_s11.ts', [
     'import { withDeadline } from "@sf/runtime";',
     "import { createProbeRedis } from '@sf/runtime/redis';",
@@ -3535,12 +5146,12 @@ check('standards: серверные пакеты в apps/web/src (корень,
     'import "@sf/db";',
     "import '@sf/config/redis-url';",
     'export { createDb } from "@sf/db";',
-  ].map(file), [
+  ].map(lineFile), [
     'import { env } from "@sf/config/server";',
     'import { createServerClient } from "@sf/api-client/server";',
     'import { BuildInfoSchema } from "@sf/contracts";',
     'import "server-only";',
-  ].map(file));
+  ].map(lineFile));
 });
 
 /**
@@ -3562,9 +5173,14 @@ const ROUTE_DEFINITION = [
   'const responses = { ...errorResponses(), [OK_STATUS]: X };',
   'defineRoute(registrar, { method: "GET", url: "/x", responses, schema: { tags: ["x"] } }, handler);',
 ];
-/** Тексты боевых форм роута (ROUTE_FORMS) из репозитория - пропуск в пробах S14 и модуля роута. */
+/**
+ * Тексты боевых форм роута (ROUTE_FORMS) из репозитория - пропуск в пробах S14 и модуля роута;
+ * с диска - один раз за прогон (TECH_DEBT 19.10.2026 E0-12D круг 5, хелпер `file(line)` и `ROUTE_FORMS`).
+ */
+let routeFormsMemo = null;
 function routeFormTexts() {
-  return ROUTE_FORMS.map((form) => fs.readFileSync(path.join(ROOT, form), 'utf8'));
+  if (!routeFormsMemo) routeFormsMemo = ROUTE_FORMS.map((form) => fs.readFileSync(path.join(ROOT, form), 'utf8'));
+  return routeFormsMemo;
 }
 /**
  * Пропуск модуля роута целиком (строка долга :644, E0-12P): вызовы с именами методов экземпляра на
@@ -3661,7 +5277,6 @@ check('standards: S14 ловит defineRoute без ...errorResponses() в ко�
 check('standards: S15 ловит @sf/* кроме @sf/core в packages/contracts, @sf/core и самоимпорт - нет', () => {
   const gone = missingDirs(['packages/contracts/src']);
   if (gone) return gone;
-  const file = (line) => line + '\nexport const x = 1;\n';
   return standardsCases('S15', 'packages/contracts/src/zz_selftest_s15.ts', [
     'import { env } from "@sf/config";',
     'import type { Env } from "@sf/config/server";',
@@ -3677,7 +5292,7 @@ check('standards: S15 ловит @sf/* кроме @sf/core в packages/contracts
     'const db = require("@sf/db");',
     'const n = "a"; const m = await import("@sf/db");',
     "const k = 'it' + \"s\"; export * from '@sf/runtime';",
-  ].map(file), [
+  ].map(lineFile), [
     'import { AppError } from "@sf/core";',
     "const s = \"import { x } from '@sf/db'\";",
     'const t = `export * from "@sf/config"`;',
@@ -3688,12 +5303,11 @@ check('standards: S15 ловит @sf/* кроме @sf/core в packages/contracts
     'export * from "@sf/contracts";',
     'import { z } from "zod";',
     '// import { env } from "@sf/config";',
-  ].map(file));
+  ].map(lineFile));
 });
 check('standards: S16 ловит @sf/* кроме @sf/contracts в packages/api-client, @sf/contracts и самоимпорт - нет', () => {
   const gone = missingDirs(['packages/api-client/src']);
   if (gone) return gone;
-  const file = (line) => line + '\nexport const x = 1;\n';
   return standardsCases('S16', 'packages/api-client/src/zz_selftest_s16.ts', [
     'import { QUEUE_NAMES } from "@sf/core";',
     'import { env } from "@sf/config";',
@@ -3706,7 +5320,7 @@ check('standards: S16 ловит @sf/* кроме @sf/contracts в packages/api-
     'const m = await import("@sf/core");',
     'const env = require("@sf/config");',
     'const n = "a"; const m = await import("@sf/core");',
-  ].map(file), [
+  ].map(lineFile), [
     'import { ErrorBodySchema } from "@sf/contracts";',
     "const s = \"import { x } from '@sf/core'\";",
     "const t = `require('@sf/config')`;",
@@ -3717,7 +5331,7 @@ check('standards: S16 ловит @sf/* кроме @sf/contracts в packages/api-
     "export type { ApiClient } from '@sf/api-client';",
     'import "server-only";',
     ' * import { QUEUE_NAMES } from "@sf/core";',
-  ].map(file));
+  ].map(lineFile));
 });
 /**
  * Пробы Stop- и UserPromptSubmit-хуков. Состояние - L.statePath(), то есть временная папка
@@ -3727,7 +5341,7 @@ check('standards: S16 ловит @sf/* кроме @sf/contracts в packages/api-
 function withProbeState(seed, fn) {
   const statePath = L.statePath();
   if (path.resolve(statePath) === path.resolve(LIVE_STATE)) return 'проба смотрит в боевой .qa-state: ' + statePath;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-tr-'));
+  const dir = tempDir('tr');
   const transcript = path.join(dir, 'transcript.jsonl');
   const state = () => { try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch (_) { return {}; } };
   try {
@@ -3746,7 +5360,7 @@ function withProbeState(seed, fn) {
       say: (text, userTurns) => fs.writeFileSync(transcript, mkTranscript(text, userTurns || 1)),
     });
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    releaseTemp(dir);
   }
 }
 
@@ -3929,7 +5543,7 @@ check('writeState: запись заменяет файл целиком чер�
     const sp = L.statePath();
     const dir = path.dirname(sp);
     const tmpLeft = () => fs.readdirSync(dir).filter((f) => f.endsWith('.tmp'));
-    const link = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-link-')), 'old');
+    const link = path.join(tempDir('link'), 'old');
     try {
       fs.linkSync(sp, link);
       const before = fs.readFileSync(link, 'utf8');
@@ -3947,7 +5561,7 @@ check('writeState: запись заменяет файл целиком чер�
       }
       return true;
     } finally {
-      fs.rmSync(path.dirname(link), { recursive: true, force: true });
+      releaseTemp(path.dirname(link));
     }
   }));
 check('writeState: rename падает EPERM - три попытки, затем запись напрямую, *.tmp нет', () =>
@@ -4084,42 +5698,342 @@ check('gates.js --list отрабатывает', () => {
 });
 
 /**
- * Сверка дерева в последней пробе ловит то, ради чего снимок такой (E0-12D, B8 круга 1):
- * перезапись файла, который уже `M`, и новый файл под .gitignore. Проверяется на временном
- * репозитории теми же repoSnapshot и treeDiff: без изменений разницы нет, после перезаписи
- * `M`-файла и записи в игнорируемый каталог - обе записи названы. Временный репозиторий не
- * берёт ничего из настроек машины, что исполняет код: init без шаблонов (`--template=`, иначе
- * init.templateDir кладёт свои хуки), коммит с core.hooksPath на пустой каталог (иначе
- * глобальный pre-commit красит пробу или исполняется в ней).
+ * Сверка дерева в последней пробе ловит то, ради чего снимок такой (E0-12D, B8 круга 1; E0-12T):
+ * перезапись файла, который уже `M`, новый игнорируемый каталог и новый файл внутри уже
+ * игнорируемого каталога. Проверяется на временном репозитории теми же repoSnapshot и treeDiff:
+ * без изменений разницы нет, после перезаписи `M`-файла, записи в новый игнорируемый каталог и
+ * нового файла рядом со старым в игнорируемом `coverage/` - каждая запись названа. Временный
+ * репозиторий не берёт ничего из настроек машины, что исполняет код: init без шаблонов
+ * (`--template=`, иначе init.templateDir кладёт свои хуки), коммит через git(…, { isolated }).
  */
-check('сверка дерева ловит перезапись M-файла и новый игнорируемый каталог, без изменений - тишина', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-git-'));
-  const noHooks = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-selftest-nohooks-'));
+check('сверка дерева ловит перезапись M-файла, новый игнорируемый каталог, новый файл в уже игнорируемом каталоге и остаток vite *.timestamp-*.mjs, без изменений - тишина', () => {
+  const dir = tempDir('repo');
   try {
-    const git = (args) => {
-      const r = run('git', ['-c', 'user.name=selftest', '-c', 'user.email=selftest@localhost', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', '-c', 'core.hooksPath=' + noHooks].concat(args), { cwd: dir });
-      if (r.error || r.status !== 0) throw new Error('git ' + args[0] + ': ' + String((r.error && r.error.message) || r.stderr).slice(0, 160));
-    };
-    git(['init', '-q', '--template=']);
-    fs.writeFileSync(path.join(dir, '.gitignore'), 'coverage/\n');
+    const inDir = (args) => gitStrict(['-c', 'user.name=selftest', '-c', 'user.email=selftest@localhost', '-c', 'core.autocrlf=false'].concat(args), { cwd: dir, isolated: true });
+    inDir(['init', '-q', '--template=']);
+    // *.timestamp-*.mjs - как в .gitignore репозитория: остаток vite рядом с конфигом (Р3 E0-12T)
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'coverage/\nout/\n*.timestamp-*.mjs\n');
     fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
-    git(['add', '.']);
-    git(['commit', '-q', '-m', 'probe']);
+    inDir(['add', '.']);
+    inDir(['commit', '-q', '-m', 'probe']);
     fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+    fs.mkdirSync(path.join(dir, 'coverage'));
+    fs.writeFileSync(path.join(dir, 'coverage', 'old.txt'), 'old\n');
     const before = repoSnapshot(dir);
     const still = treeDiff(before, repoSnapshot(dir));
     if (still.length) return 'разница без изменений: ' + still.join(', ');
     fs.writeFileSync(path.join(dir, 'a.txt'), 'three\n');
-    fs.mkdirSync(path.join(dir, 'coverage'));
-    fs.writeFileSync(path.join(dir, 'coverage', 'x.txt'), 'x\n');
+    fs.mkdirSync(path.join(dir, 'out'));
+    fs.writeFileSync(path.join(dir, 'out', 'x.txt'), 'x\n');
+    fs.writeFileSync(path.join(dir, 'coverage', 'new.txt'), 'new\n');
+    // стаб дочернего vitest, оставивший файл vite рядом с конфигом в дереве
+    fs.writeFileSync(path.join(dir, 'vitest.int.config.ts.timestamp-1.mjs'), 'x\n');
     const diff = treeDiff(before, repoSnapshot(dir));
-    const missed = ['изменилось содержимое  M a.txt', 'появилось !! coverage/'].filter((line) => !diff.includes(line));
+    const missed = ['изменилось содержимое  M a.txt', 'появилось !! out/x.txt', 'появилось !! coverage/new.txt', 'появилось !! vitest.int.config.ts.timestamp-1.mjs']
+      .filter((line) => !diff.includes(line));
     return missed.length ? 'сверка не видит: ' + missed.join(', ') + ' (видит: ' + (diff.join(', ') || 'ничего') + ')' : { note: diff.length + ' записи' };
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.rmSync(noHooks, { recursive: true, force: true });
+    releaseTemp(dir);
   }
 });
+
+// Отпечаток ссылки (замечание ревью C11 E0-12T): ссылка на файл - sha1 цели, правка цели меняет
+// отпечаток; игнорируемая запись - размер+mtime самой записи. Подмена io: ссылок на файл Windows
+// без прав разработчика не создаёт.
+check('сверка дерева: отпечаток ссылки на файл - sha1 цели (правка цели видна), игнорируемой записи - размер и mtime самой записи', () => {
+  const sha1 = (s) => require('crypto').createHash('sha1').update(Buffer.from(s)).digest('hex');
+  let body = 'one';
+  const io = {
+    lstat: () => ({ isFile: () => false, isSymbolicLink: () => true, size: 7, mtimeMs: 1 }),
+    stat: () => ({ isFile: () => true }),
+    read: () => Buffer.from(body),
+  };
+  const before = snapshotPrint('link.txt', false, io);
+  body = 'two';
+  const after = snapshotPrint('link.txt', false, io);
+  if (before !== sha1('one') || after !== sha1('two')) return 'ссылка на файл: ' + JSON.stringify([before, after]) + ', ожидались sha1 цели ' + JSON.stringify([sha1('one'), sha1('two')]);
+  const ignored = snapshotPrint('link.txt', true, io);
+  return ignored === '7 1' || 'игнорируемая запись: ' + JSON.stringify(ignored) + ', ожидалось "7 1"';
+});
+
+/**
+ * Исключения сверки дерева (ОВ2 техлида E0-12T): на временном репозитории с .gitignore как у
+ * репозитория запись в tasks/x.md, .claude/.qa-state и .claude/.qa-state.<pid>.tmp молчит (пропуск),
+ * а соседние пути - docs/tasks/x.md, tasks.md, .claude/.qa-state.bak, .claude/x.tmp,
+ * .claude/.qa-state.a/b.tmp - названы (охват). У каждой записи перечня - причина.
+ */
+check('сверка дерева: TREE_NOT_COMPARED - tasks/, .claude/.qa-state и его .<pid>.tmp молчат, соседние пути названы, у каждой записи причина', () => {
+  const noWhy = TREE_NOT_COMPARED.filter((x) => typeof x.why !== 'string' || !x.why);
+  if (noWhy.length) return 'запись без причины: ' + JSON.stringify(noWhy);
+  const dir = tempDir('repo');
+  try {
+    const inDir = (args) => gitStrict(['-c', 'user.name=selftest', '-c', 'user.email=selftest@localhost', '-c', 'core.autocrlf=false'].concat(args), { cwd: dir, isolated: true });
+    inDir(['init', '-q', '--template=']);
+    fs.writeFileSync(path.join(dir, '.gitignore'), '/tasks/\n.claude/.qa-state\n.claude/.qa-state.*.tmp\n');
+    inDir(['add', '.']);
+    inDir(['commit', '-q', '-m', 'probe']);
+    const put = (rel) => {
+      fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel), 'x\n');
+    };
+    const before = repoSnapshot(dir);
+    const silent = ['tasks/x.md', '.claude/.qa-state', '.claude/.qa-state.123.tmp'];
+    const named = ['docs/tasks/x.md', 'tasks.md', '.claude/.qa-state.bak', '.claude/x.tmp', '.claude/.qa-state.a/b.tmp'];
+    for (const rel of silent.concat(named)) put(rel);
+    const diff = treeDiff(before, repoSnapshot(dir));
+    const leaked = diff.filter((line) => silent.some((rel) => line.endsWith(' ' + rel)));
+    if (leaked.length) return 'исключение названо: ' + leaked.join(', ');
+    const missed = named.filter((rel) => !diff.some((line) => line.startsWith('появилось ') && line.endsWith(' ' + rel)));
+    return missed.length ? 'сверка не видит: ' + missed.join(', ') + ' (видит: ' + (diff.join(', ') || 'ничего') + ')' : { note: diff.length + ' записей названо, ' + silent.length + ' молчат' };
+  } finally {
+    releaseTemp(dir);
+  }
+});
+
+/**
+ * Полнота копии хуков (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 3, `withScratchTree`): copyHooksTo из временного источника с файлом
+ * иного расширения (x.cjs) и подкаталогом (sub/y.txt) - перечень файлов копии рекурсивно равен
+ * перечню источника.
+ */
+check('дерево пробы: копия хуков полная - x.cjs и sub/y.txt источника на месте, перечни равны', () => {
+  const from = tempDir('hooks-src');
+  const to = tempDir('hooks-copy');
+  try {
+    fs.writeFileSync(path.join(from, 'a.js'), 'a');
+    fs.writeFileSync(path.join(from, 'x.cjs'), 'x');
+    fs.mkdirSync(path.join(from, 'sub'));
+    fs.writeFileSync(path.join(from, 'sub', 'y.txt'), 'y');
+    const want = filesUnder(from);
+    const got = filesUnder(copyHooksTo(to, from));
+    return JSON.stringify(got) === JSON.stringify(want) || 'копия ' + JSON.stringify(got) + ', источник ' + JSON.stringify(want);
+  } finally {
+    releaseTemp(from);
+    releaseTemp(to);
+  }
+});
+
+/** Файлы, чей текст сверяет статический кейс помощника git. */
+const HELPER_SCANNED = ['harness-selftest.js', 'selftest-graph.js'];
+/**
+ * git мимо помощника git() (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «изоляция git в пробах»;
+ * решения ревью B7 и C16 E0-12T): вызов spawn-функции, чей первый аргумент (до запятой) называет
+ * git - литералом (имя в кавычках, `git status` у execSync), именем-переменной (GIT_BIN, gitBin)
+ * или выражением (o.git с запасным именем); сверка - по всему тексту, вызов на нескольких строках
+ * (`run(` и имя строкой ниже) - тот же отказ, номер - строки вызова. Имя программы в кавычках
+ * (GIT_LITERAL) - только в строке GIT_BIN: `const bin = <имя>; run(bin)` ловит эта сверка, а не
+ * первая. Помощник зовёт (o.spawn || run)(o.bin || GIT_BIN, …) - имя функции в скобках, вызова по
+ * имени нет. Остаток слепоты (имя из конкатенации, вызов через ссылку на функцию) - TECH_DEBT E0-12T.
+ */
+const GIT_BYPASS = /\b(?:run|spawn|spawnSync|exec|execSync|execFile|execFileSync)\s*\(\s*(?:[^,)]*[^A-Za-z,)])?git/gi;
+const GIT_LITERAL = /(['"`])git\1/;
+const GIT_BIN_LINE = 'const GIT_BIN = ' + "'gi" + "t';";
+/** Номера строк (с 1), на которых начинается совпадение глобального re по всему тексту text. */
+function textMatches(text, re) {
+  const lines = [];
+  for (const m of text.matchAll(re)) lines.push(text.slice(0, m.index).split('\n').length);
+  return lines;
+}
+check('git: в harness-selftest.js и selftest-graph.js ни одного вызова git мимо помощника git() и имени git в кавычках вне GIT_BIN (проба отказа - литерал, переменная, выражение, execSync, вызов на двух строках, имя в переменной)', () => {
+  const bad = [];
+  for (const f of HELPER_SCANNED) {
+    const text = fs.readFileSync(path.join(HOOKS, f), 'utf8');
+    for (const n of textMatches(text, GIT_BYPASS)) bad.push(f + ':' + n);
+    const lines = text.split(/\r?\n/);
+    for (const n of linesMatching(text, GIT_LITERAL)) if (lines[n - 1].trim() !== GIT_BIN_LINE) bad.push(f + ':' + n + ' (имя в кавычках)');
+  }
+  if (bad.length) return 'git мимо помощника: ' + bad.join(', ');
+  if (linesMatching(fs.readFileSync(__filename, 'utf8'), GIT_LITERAL).length !== 1) return 'строки GIT_BIN нет - сверка имени в кавычках слепа';
+  // имя функции со скобкой и имя программы в кавычках склеиваются здесь, а не в тексте файла: иначе
+  // сверка выше поймала бы сам кейс
+  const call = (name) => name + '(';
+  const q = "'gi" + "t'";
+  const planted = [
+    call('run') + q + ", ['status']);",
+    call('spawn') + 'o.git || ' + q + ", ['ls-files']);",
+    call('run') + 'GIT_BIN, args);',
+    call('execSync') + "'gi" + "t status');",
+    call('run') + '\n  ' + q + ', args);',
+  ];
+  const missed = planted.filter((text) => textMatches(text, GIT_BYPASS).join() !== '1');
+  if (missed.length) return 'вызов git мимо помощника не пойман - сверка слепа: ' + missed.join(' | ');
+  if (!GIT_LITERAL.test('const bin = ' + q + ';')) return 'имя git в переменной не поймано - сверка слепа';
+  const clean = [call('run') + 'process.execPath, [file]);', call('spawn') + 'digits, []);', call('run') + '\n  process.execPath, [file]);'];
+  const caught = clean.filter((text) => textMatches(text, GIT_BYPASS).length);
+  return !caught.length || 'вызов не git принят за git: ' + caught.join(' | ');
+});
+// Текст отказа gitStrict называет подкоманду, а не пары -c впереди (замечание ревью C13 E0-12T)
+check('git: gitStrict - текст отказа называет подкоманду после пар -c', () =>
+  refusalVerdict(() => gitStrict(['-c', 'user.name=selftest', '-c', 'user.email=selftest@localhost', 'commit', '-q'], { spawn: () => ({ status: 1, stderr: 'boom' }) }), 'git commit: boom'));
+/**
+ * Временный каталог мимо помощника tempDir (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «каталоги
+ * sf-selftest-* в %TEMP%»): mkdtempSync - одно место в фабрике реестра (selftest-temp.js), ни
+ * одного в harness-selftest.js и selftest-graph.js.
+ */
+const MKDTEMP_CALL = /\bmkdtempSync\s*\(/;
+check('tempDir: mkdtempSync только в фабрике реестра (одно место в selftest-temp.js, ноль в harness-selftest.js и selftest-graph.js; проба отказа - второй вызов)', () => {
+  const want = { 'selftest-temp.js': 1, 'harness-selftest.js': 0, 'selftest-graph.js': 0 };
+  const bad = Object.entries(want)
+    .map(([f, n]) => [f, n, linesMatching(fs.readFileSync(path.join(HOOKS, f), 'utf8'), MKDTEMP_CALL).length])
+    .filter(([, n, got]) => got !== n)
+    .map(([f, n, got]) => f + ' ' + got + ' (ожидалось ' + n + ')');
+  if (bad.length) return 'mkdtempSync: ' + bad.join(', ');
+  const call = 'mkdtemp' + 'Sync(';
+  const planted = 'const a = fs.' + call + 'x);\nconst b = fs.' + call + 'y);\n';
+  return linesMatching(planted, MKDTEMP_CALL).length === 2 || 'второй вызов mkdtempSync не пойман - сверка слепа';
+});
+/**
+ * Каталоги проб снимает releaseTemp (замечание ревью C4 E0-12T): сбой снятия (EBUSY на Windows) не
+ * подменяет вердикт пробы и не роняет прогон до report(). Голый вызов dropTemp - только в самом
+ * releaseTemp и в кейсе dropTemp с подменой rm: DROP_TEMP_DIRECT - их точные строки (имя склеено,
+ * иначе сверка поймала бы сам перечень).
+ */
+const DROP_TEMP_DIRECT = ['drop' + 'Temp(dir, opts);', 'drop' + 'Temp(box, {'];
+const DROP_TEMP_CALL = /\bdropTemp\(/;
+check('tempDir: каталоги проб снимает releaseTemp - голый dropTemp только в releaseTemp и кейсе подмены rm (проба отказа - вставленный вызов)', () => {
+  const text = fs.readFileSync(__filename, 'utf8');
+  const lines = text.split(/\r?\n/);
+  const bad = linesMatching(text, DROP_TEMP_CALL).filter((n) => !DROP_TEMP_DIRECT.includes(lines[n - 1].trim()));
+  if (bad.length) return 'dropTemp мимо releaseTemp: harness-selftest.js:' + bad.join(', :');
+  const direct = linesMatching(text, DROP_TEMP_CALL).length;
+  if (direct !== DROP_TEMP_DIRECT.length) return 'строк DROP_TEMP_DIRECT в тексте ' + direct + ', в перечне ' + DROP_TEMP_DIRECT.length;
+  const planted = '  } finally {\n    ' + 'drop' + 'Temp(dir);\n  }\n';
+  return linesMatching(planted, DROP_TEMP_CALL).join() === '2' || 'вставленный dropTemp не пойман - сверка слепа';
+});
+
+/**
+ * Обработчик exit реестра (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «каталоги sf-selftest-* в %TEMP%»): каталог реестра, оставленный пробой, которую
+ * прервали process.exit (как report() внутри пробы) или SIGINT -> exit(130) (Ctrl+C), снимается
+ * при выходе процесса, а junction внутри снимается unlink - цель цела. Дочерний node берёт модуль
+ * selftest-temp.js через require (один модуль, без копии исходника); каталоги - внутри временного
+ * каталога этой пробы.
+ */
+check('tempDir: process.exit и SIGINT посреди пробы - каталог реестра снят обработчиком exit, цель junction внутри цела', () => {
+  const box = tempDir('exit');
+  try {
+    const target = path.join(box, 'target');
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, 'keep.txt'), 'keep');
+    const child = (how) => {
+      const code = [
+        'const { makeTempRegistry } = require(' + JSON.stringify(path.join(HOOKS, 'selftest-temp.js')) + ');',
+        'const reg = makeTempRegistry({ fs: require("fs"), os: require("os"), path: require("path"), isNotFile: require(' + JSON.stringify(path.join(HOOKS, 'lib.js')) + ').isNotFile });',
+        'process.on("exit", reg.dropAll);',
+        'process.on("SIGINT", () => process.exit(130));',
+        'const dir = reg.tempDir("child", ' + JSON.stringify(box) + ');',
+        'require("fs").symlinkSync(' + JSON.stringify(target) + ', require("path").join(dir, "link"), "junction");',
+        'process.stdout.write(dir);',
+        how === 'exit' ? 'process.exit(3);' : 'process.emit("SIGINT");',
+        'setTimeout(() => {}, 5000);',
+      ].join('\n');
+      const r = run(process.execPath, ['-e', code], { cwd: ROOT, timeout: 30000, killSignal: 'SIGKILL' });
+      return { code: r.status, dir: String(r.stdout || ''), err: String(r.stderr || '') };
+    };
+    const why = [];
+    for (const [how, want] of [['exit', 3], ['SIGINT', 130]]) {
+      const c = child(how);
+      if (c.code !== want || !c.dir) why.push(how + ': код ' + c.code + ' (ожидался ' + want + '), каталог ' + JSON.stringify(c.dir) + ' ' + c.err.slice(0, 120));
+      else if (!absent(c.dir)) why.push(how + ': каталог реестра остался после выхода: ' + c.dir);
+    }
+    if (absent(path.join(target, 'keep.txt'))) why.push('цель junction удалена вместе с каталогом');
+    return why.length ? why.join('; ') : { note: 'exit 3 и SIGINT 130' };
+  } finally {
+    releaseTemp(box);
+  }
+});
+/**
+ * Снятие ссылок до рекурсивного удаления (L-028; TECH_DEBT 21.10.2026 E0-12L круг 4, `withTempRoot`): на момент вызова rmSync внутри
+ * каталога нет ни одной ссылки - подмена rm смотрит на дерево до удаления.
+ */
+check('tempDir: dropTemp снимает junction unlink до рекурсивного удаления (rmSync не видит ни одной ссылки)', () => {
+  const box = tempDir('links');
+  const target = tempDir('links-target');
+  try {
+    fs.mkdirSync(path.join(box, 'sub'));
+    fs.symlinkSync(target, path.join(box, 'sub', 'link'), 'junction');
+    let seen = null;
+    dropTemp(box, {
+      rm: (dir, opts) => {
+        const links = [];
+        const walk = (d) => {
+          for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+            if (entry.isSymbolicLink()) links.push(path.relative(box, path.join(d, entry.name)));
+            else if (entry.isDirectory()) walk(path.join(d, entry.name));
+          }
+        };
+        walk(dir);
+        seen = links;
+        fs.rmSync(dir, opts);
+      },
+    });
+    if (seen === null) return 'rm не вызван';
+    return !seen.length || 'rmSync получил каталог со ссылками: ' + seen.join(', ');
+  } finally {
+    releaseTemp(box);
+    releaseTemp(target);
+  }
+});
+
+/**
+ * Сбой снятия каталога (EBUSY на Windows) не подменяет итог пробы и не роняет прогон до report()
+ * (решение ревью B12 E0-12T): releaseTemp не бросает, сбой записан в DROP_FAILURES, каталог остаётся
+ * в реестре до снятия обработчиком exit.
+ */
+check('tempDir: releaseTemp - сбой снятия (EBUSY) не исключение, записан в DROP_FAILURES, каталог в реестре', () => {
+  const box = tempDir('busy');
+  const before = DROP_FAILURES.length;
+  try {
+    let got;
+    try {
+      got = releaseTemp(box, { rm: () => { throw Object.assign(new Error('EBUSY: resource busy or locked, rmdir ' + box), { code: 'EBUSY' }); } });
+    } catch (e) {
+      return 'сбой снятия - исключение: ' + ((e && e.message) || String(e));
+    }
+    const noted = DROP_FAILURES.slice(before);
+    if (got !== false || noted.length !== 1 || !noted[0].startsWith(box + ': EBUSY')) return 'ответ ' + got + ', записи ' + JSON.stringify(noted);
+    return TEMP.live.has(box) || 'каталог со сбоем снятия выпал из реестра';
+  } finally {
+    DROP_FAILURES.splice(before);
+    releaseTemp(box);
+  }
+});
+// Отсутствие пути - lstat с кодом, а не existsSync (замечание ревью R1 E0-12T): недоступный путь
+// (EACCES) - исключение, а не «нет».
+check('absent: ENOENT и ENOTDIR - нет, EACCES - исключение, путь на месте - есть', () => {
+  const thrower = (code) => () => { throw Object.assign(new Error(code + ': selftest'), { code }); };
+  const got = [absent('x', thrower('ENOENT')), absent('x', thrower('ENOTDIR')), absent(__filename)];
+  if (JSON.stringify(got) !== JSON.stringify([true, true, false])) return 'ENOENT, ENOTDIR, этот файл: ' + JSON.stringify(got);
+  return refusalVerdict(() => absent('x', thrower('EACCES')), 'EACCES: selftest');
+});
+// Одно чтение корневого package.json за прогон (rootPkg) и один вопрос к gates.js на файл у пробы
+// гейта (gateProbe) - TECH_DEBT 21.10.2026 E0-12L круг 3 и круг 4; сверка - здесь, когда все пробы
+// уже спросили.
+check('мемо прогона: корневой package.json прочитан с диска один раз, gateProbe спрашивает gates.js о файле один раз', () => {
+  if (ROOT_PKG_READS !== 1) return 'корневой package.json прочитан ' + ROOT_PKG_READS + ' раз(а)';
+  const twice = [];
+  let asked = 0;
+  let selected = 0;
+  for (const [id, p] of gateProbes) {
+    asked += p.asked;
+    selected += p.selected;
+    if (p.selected !== p.seen.size) twice.push(id + ': ' + p.selected + ' вызовов selects на ' + p.seen.size + ' файлов');
+  }
+  if (twice.length) return 'gates.js спрошен о файле больше одного раза: ' + twice.join('; ');
+  return asked > selected || 'мемо gateProbe ни разу не сработало (' + asked + ' вопросов, ' + selected + ' вызовов) - сверка слепа';
+});
+
+// Строка снимка VITEST_GATE - после всех проб, которым нужен ответ дочернего vitest: отказ
+// (не стартовал, не ответил, иная форма) - одна строка с перечнем не гонявшихся проб.
+{
+  const line = 'дочерний vitest пробы test:int: ответ selftest-vitest.mjs по корням графа и стабу';
+  check(line, intGuard(line, () => {
+    try {
+      VITEST_GATE.take();
+    } catch (e) {
+      if (!(e instanceof GateBlocked)) throw e;
+    }
+    return gateVerdict(VITEST_GATE, (snap) => (snap.live.error ? 'корни: ' + snap.live.error.message : snap.live.value.length + ' корней') + ', стаб', 'пробы дочернего vitest');
+  }));
+}
 
 // ------------------------------------------------------------------ боевое состояние
 check('боевой .qa-state после проб байт в байт прежний', () => {
@@ -4129,7 +6043,16 @@ check('боевой .qa-state после проб байт в байт преж�
   return 'боевой ' + LIVE_STATE + ' изменился за прогон: ' +
     (LIVE_BYTES === null ? 'не было' : LIVE_BYTES.length + ' байт') + ' -> ' + (now === null ? 'нет' : now.length + ' байт');
 });
-check('пробы не оставили файлов в репозитории: записи git status, их содержимое и игнорируемые записи до и после прогона те же', () => {
+// Каталоги прогона (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «каталоги sf-selftest-* в %TEMP%»): каждый каталог реестра, кроме PROBE_STATE_DIR (его
+// снимает выход процесса), снят своей пробой - не в реестре и не на диске. Каталог хуков git
+// временных репозиториев (noHooksDir) живёт до последней пробы с коммитом - он снимается здесь.
+if (noHooks) releaseTemp(noHooks);
+check('временные каталоги прогона сняты: ни одного каталога реестра на диске, кроме PROBE_STATE_DIR', () => {
+  const left = TEMP.made.filter((d) => d !== PROBE_STATE_DIR && (TEMP.live.has(d) || !absent(d)));
+  if (left.length) return 'остались: ' + left.join(', ') + (DROP_FAILURES.length ? '; сбой снятия: ' + DROP_FAILURES.join('; ') : '');
+  return { note: TEMP.made.length + ' каталогов, все с префиксом ' + TEMP.PREFIX };
+});
+check('пробы не оставили файлов в репозитории: записи git status с содержимым и игнорируемые файлы (кроме node_modules) до и после прогона те же', () => {
   if (!LIVE_TREE) return 'снимок дерева до проб не снят: ' + LIVE_TREE_ERROR;
   const now = repoSnapshot();
   const diff = treeDiff(LIVE_TREE, now);
@@ -4140,7 +6063,7 @@ check('пробы не оставили файлов в репозитории: 
 // ------------------------------------------------------------------ итог
 report();
 
-/** Строки results и счёт; код выхода 1, если красна хоть одна (зовёт и loadGraphModule). */
+/** Строки results и счёт; код выхода 1, если красна хоть одна. */
 function report() {
   let red = 0;
   for (const r of results) {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { DYNAMIC_SPECIFIER, importSpecifiers } from "./imports.js";
+import {
+  DYNAMIC_SPECIFIER,
+  importSpecifiers,
+  repoRootUses,
+} from "./imports.js";
 
 /**
  * The one reader of imports of the root project (`test/imports.ts`): every
@@ -104,4 +108,85 @@ describe("importSpecifiers", () => {
       expect(importSpecifiers("a.ts", text)).toEqual([DYNAMIC_SPECIFIER]);
     },
   );
+});
+
+/**
+ * The uses of `repoRoot` in a module, read the way `harness-selftest` reads
+ * them for the `test:int` gate: every `join(repoRoot, …)` and
+ * `resolve(repoRoot, …)` is a path, every other mention is reported, nothing
+ * that only looks like one counts.
+ */
+describe("repoRootUses", () => {
+  const paths = (text: string): string[] =>
+    repoRootUses("a.ts", text).map((use) =>
+      use.kind === "path" ? `${use.callee} ${use.path}` : `other ${use.line}`,
+    );
+
+  it("reads join and resolve with literals and templates, in order", () => {
+    const text = [
+      'export const rootEnvFilePath = join(repoRoot, ".env");',
+      "export const testEnvFilePath = path.join(repoRoot, `.env.test`);",
+      'const nested = join(repoRoot, "infra", "docker-compose.yml");',
+      'const media = resolve(repoRoot, "data");',
+      'const viaPath = path.resolve(repoRoot, "x.json");',
+    ].join("\n");
+    expect(paths(text)).toEqual([
+      "join .env",
+      "join .env.test",
+      "join infra/docker-compose.yml",
+      "resolve data",
+      "resolve x.json",
+    ]);
+  });
+
+  it("gives the line of each use", () => {
+    const text = ["const a = 1;", "", 'join(repoRoot, ".env");'].join("\n");
+    expect(repoRootUses("a.ts", text)).toEqual([
+      { kind: "path", callee: "join", path: ".env", line: 3 },
+    ]);
+  });
+
+  it.each([
+    "join(repoRoot, name);",
+    "join(repoRoot, `.env.${mode}`);",
+    'join(repoRoot, "infra", name);',
+    "join(repoRoot, ...parts);",
+    "join(repoRoot);",
+    "resolve(repoRoot, dir);",
+  ])("reports a computed part instead of skipping it: %s", (text) => {
+    expect(repoRootUses("a.ts", text)).toEqual([
+      expect.objectContaining({ kind: "path", path: DYNAMIC_SPECIFIER }),
+    ]);
+  });
+
+  it.each([
+    'relative(repoRoot, "x");',
+    'join(dirname(repoRoot), ".env");',
+    '[repoRoot, ".env"].join("/");',
+    "const s = `${repoRoot}/.env`;",
+    'import { repoRoot as root } from "./paths.js";',
+    "const o = { repoRoot };",
+    "use(repoRoot);",
+  ])("reports any other mention of repoRoot: %s", (text) => {
+    expect(paths(text)).toEqual(["other 1"]);
+  });
+
+  it("passes the declaration and the import of repoRoot, and joins from elsewhere", () => {
+    const text = [
+      'import { repoRoot } from "./paths.js";',
+      'export const repoRoot = resolve(here, "../../..");',
+      'join(root, ".env");',
+    ].join("\n");
+    expect(repoRootUses("a.ts", text)).toEqual([]);
+  });
+
+  it("reads no use from a comment or a string", () => {
+    const text = [
+      '// join(repoRoot, ".env.commented");',
+      '/* resolve(repoRoot, ".env.block"); */',
+      "const s = \"join(repoRoot, '.env.string')\";",
+      "const t = `relative(repoRoot, '.env.template')`;",
+    ].join("\n");
+    expect(repoRootUses("a.ts", text)).toEqual([]);
+  });
 });

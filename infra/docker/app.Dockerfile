@@ -21,7 +21,8 @@
 # ships with the package; it throws when imported outside a vitest run, and
 # the masks are not widened to it (decision R1 of E0-12J, docs/DECISIONS.md).
 
-# The one node image of every stage (test/container.test.ts).
+# The one node image of every stage (test/container.test.ts); node:22-alpine is
+# the newest 22.x, at or above the engines floor of package.json (22.18).
 ARG NODE_IMAGE=node:22-alpine
 
 FROM ${NODE_IMAGE} AS base

@@ -243,12 +243,13 @@ describe("ci.yml job ci", () => {
     );
   });
 
-  it("caches the pnpm store through setup-node", () => {
+  it("caches the pnpm store through setup-node, on the newest 22.x", () => {
     const setup = steps.find((step) =>
       step.uses?.startsWith("actions/setup-node@"),
     );
 
     expect(setup?.with?.["node-version"]).toBe(22);
+    expect(setup?.with?.["check-latest"]).toBe(true);
     expect(setup?.with?.cache).toBe("pnpm");
   });
 
@@ -841,7 +842,8 @@ function dockerBuildViolations(text: string): string[] {
   const setup = steps.findIndex(
     (step) =>
       step.uses?.startsWith("actions/setup-node@") === true &&
-      step.with?.["node-version"] === 22,
+      step.with?.["node-version"] === 22 &&
+      step.with?.["check-latest"] === true,
   );
   if (buildx === -1 || buildx > build) {
     problems.push("docker-build: buildx is not set up before the build");
@@ -897,6 +899,7 @@ describe("ci.yml image matrix", () => {
     [",ignore-error=true\n", ",ignore-error=false\n"],
     ["cache-to: type=gha,mode=max,", "cache-to: type=registry,mode=max,"],
     ["uses: docker/build-push-action@v6", "uses: docker/build-push-action@v5"],
+    ["{ node-version: 22, check-latest: true }", "{ node-version: 22 }"],
     ["      - uses: docker/setup-buildx-action@v3\n", ""],
     [
       "          load: true\n",
@@ -923,7 +926,7 @@ describe("ci.yml image matrix", () => {
 
   it("is red when setup-node comes after the build", () => {
     const setup =
-      "      - uses: actions/setup-node@v4\n        with: { node-version: 22 }\n";
+      "      - uses: actions/setup-node@v4\n        with: { node-version: 22, check-latest: true }\n";
     const buildx = "      - uses: docker/setup-buildx-action@v3\n";
     const probe = "      # An image whose install put nothing in place";
     expect(workflow).toContain(`${setup}${buildx}`);

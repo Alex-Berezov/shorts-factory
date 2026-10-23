@@ -2,7 +2,7 @@
   "name": "shorts-factory",
   "private": true,
   "packageManager": "pnpm@9.12.0",
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.18 <23 || >=23.6" },
   "scripts": {
     "tasks": "node scripts/tasks.mjs",
     "dev": "turbo run dev",
