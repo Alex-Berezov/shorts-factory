@@ -711,6 +711,6 @@ function main() {
   }, { failClosed: true });
 }
 
-module.exports = { isBootstrap, gitCalls, commitMessage };
+module.exports = { isBootstrap, gitCalls, commitMessage, matchesAny };
 
 if (require.main === module) main();

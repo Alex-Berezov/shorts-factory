@@ -19,7 +19,7 @@ Write-Host ""
 # --- 0. Node и git ---
 try { $nodeVersion = (& node --version) } catch { throw "Не найден node. Хуки написаны на Node - поставь Node.js 22.18+ (линия 22.x), 23.6+ (линия 23.x) или 24+ (engines в package.json)." }
 Say "node $nodeVersion"
-# Граница Node - как nodeVerdict в harness-selftest.js: 22.18+ в линии 22.x, 23.6+ в линии 23.x, 24+.
+# Граница Node - как nodeVerdict в hooks/selftest-int.js: 22.18+ в линии 22.x, 23.6+ в линии 23.x, 24+.
 function Test-NodeFloor([string]$version) {
     if ($version -notmatch '^v?(\d+)\.(\d+)\.') { return $false }
     $major = [int]$Matches[1]; $minor = [int]$Matches[2]

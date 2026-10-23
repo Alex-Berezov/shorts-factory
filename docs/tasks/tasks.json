@@ -2005,8 +2005,9 @@
       "E0-12T"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-21"
+    "status": "in_progress",
+    "added_at": "2026-10-21",
+    "started_at": "2026-10-23"
   },
   {
     "id": "E0-12V",
@@ -2079,5 +2080,46 @@
     "doc": "TECH_DEBT.md",
     "status": "todo",
     "added_at": "2026-10-22"
+  },
+  {
+    "id": "E0-12AA",
+    "epic": "E0",
+    "title": "harness-selftest: пробы и кейсы группы B (W01/W02/W08 на запись, граф импортов tracker/compose, протокол ребёнка vitest в одном модуле, мемо через opts, один помощник «файл есть», pidGone после SIGKILL, кейс TDZ)",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-12U"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-23"
+  },
+  {
+    "id": "E0-12AB",
+    "epic": "E0",
+    "title": "gates.js: хвосты E0-12M (lastGates по диффу до очереди, матрица вердиктов в одном месте, дубли предиката, мёртвые ветки, --only на чистом дереве, страж exited, проба фона)",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-12U",
+      "E0-12M"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-23"
+  },
+  {
+    "id": "E0-12AC",
+    "epic": "E0",
+    "title": "harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке)",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-12U",
+      "E0-12AA"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-23"
   }
 ]

@@ -343,4 +343,4 @@ M already applied`; `app settings seeded`), отказ - одну строку �
   drizzle-kit 0.28.1 `test/schema-drift-fixture.ts`, копия во временном каталоге, повторный прогон
   после красного, `DRIZZLE_CONFIG` равен `drizzle.config.ts`, копия на другом диске, удаление
   остатков старше `STALE_COPY_MS`, `runEntry`, число запусков = `DRIZZLE_KIT_RUNS`, проба `when` и `timeoutSec` гейта
-  `schema-drift` через `test/gate-choice.ts`), проба гейта в `.claude/hooks/harness-selftest.js`. Решение - `docs/TECH_DEBT.md § E0-12I`, § E0-12S.
+  `schema-drift` через `test/gate-choice.ts`), проба гейта в `.claude/hooks/selftest-gates.js`. Решение - `docs/TECH_DEBT.md § E0-12I`, § E0-12S.
