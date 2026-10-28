@@ -71,6 +71,61 @@ const isMigrate = (step: Step) =>
 const SCHEMA_DRIFT = "node scripts/check-schema-drift.mjs";
 const isSchemaDrift = (step: Step) => step.run === SCHEMA_DRIFT;
 
+/** A step of job ci the order checks expect, under the name a failure gives it. */
+interface NamedStep {
+  name: string;
+  matches: (step: Step) => boolean;
+}
+
+const INSTALL_STEP = "pnpm install --frozen-lockfile";
+const SCHEMA_DRIFT_STEP = `schema drift (${SCHEMA_DRIFT})`;
+
+/** A step whose command is exactly `run`, named by it. */
+const runStep = (run: string): NamedStep => ({
+  name: run,
+  matches: (step) => step.run === run,
+});
+
+/**
+ * The steps of job ci in the order they must run: install, lint, typecheck,
+ * test, the schema drift, the migration, the integration tests, the build.
+ */
+const CI_ORDER: readonly NamedStep[] = [
+  runStep(INSTALL_STEP),
+  runStep("pnpm lint"),
+  runStep("pnpm typecheck"),
+  runStep("pnpm test"),
+  { name: SCHEMA_DRIFT_STEP, matches: isSchemaDrift },
+  { name: "migrate (src/cli/migrate.ts)", matches: isMigrate },
+  runStep("pnpm test:int"),
+  runStep("pnpm build"),
+];
+
+/**
+ * What breaks `expected` in `steps`, by the name of the step: each one that
+ * is missing, or else each one that runs before the step it must follow. An
+ * empty list - every step is there, in order.
+ */
+function stepOrderViolations(
+  steps: readonly Step[],
+  expected: readonly NamedStep[],
+): string[] {
+  const found = expected.map((want) => ({
+    name: want.name,
+    at: steps.findIndex(want.matches),
+  }));
+  const missing = found
+    .filter(({ at }) => at === -1)
+    .map(({ name }) => `ci.yml: job ci has no step "${name}"`);
+  if (missing.length > 0) return missing;
+  return found.flatMap((step, i) => {
+    const before = found[i - 1];
+    return before !== undefined && step.at < before.at
+      ? [`ci.yml: step "${step.name}" runs before "${before.name}"`]
+      : [];
+  });
+}
+
 /** The value of `key` in the top-level `concurrency:` of a text of ci.yml. */
 function workflowValue(
   key: "group" | "cancel-in-progress",
@@ -177,20 +232,20 @@ describe("ci.yml job ci", () => {
   });
 
   it("installs, lints, typechecks, tests, checks the migrations, migrates, runs the integration tests and builds, in that order", () => {
-    const order: ((step: Step) => boolean)[] = [
-      (step) => step.run === "pnpm install --frozen-lockfile",
-      (step) => step.run === "pnpm lint",
-      (step) => step.run === "pnpm typecheck",
-      (step) => step.run === "pnpm test",
-      isSchemaDrift,
-      isMigrate,
-      (step) => step.run === "pnpm test:int",
-      (step) => step.run === "pnpm build",
-    ];
-    const at = order.map((matches) => steps.findIndex(matches));
+    expect(stepOrderViolations(steps, CI_ORDER)).toEqual([]);
+  });
 
-    expect(at).not.toContain(-1);
-    expect([...at].sort((a, b) => a - b)).toEqual(at);
+  it("names the step that is missing or out of order", () => {
+    const withoutLint = steps.filter((step) => step.run !== "pnpm lint");
+    const lint = steps.filter((step) => step.run === "pnpm lint");
+    const lintLast = [...withoutLint, ...lint];
+
+    expect(stepOrderViolations(withoutLint, CI_ORDER)).toEqual([
+      'ci.yml: job ci has no step "pnpm lint"',
+    ]);
+    expect(stepOrderViolations(lintLast, CI_ORDER)).toEqual([
+      'ci.yml: step "pnpm typecheck" runs before "pnpm lint"',
+    ]);
   });
 
   const GateSchema = z.object({ cmd: z.string() });
@@ -271,14 +326,17 @@ describe("ci.yml job ci", () => {
    */
   it("checks that the migrations match the schema", () => {
     const drift = steps.findIndex(isSchemaDrift);
-    const install = runs.indexOf("pnpm install --frozen-lockfile");
-    const integration = runs.indexOf("pnpm test:int");
     const scripts = readManifest("packages/db").scripts ?? {};
     const bypass = `tsx ${DRIZZLE_KIT_BIN} `;
 
-    expect([install, drift, integration]).not.toContain(-1);
-    expect(install).toBeLessThan(drift);
-    expect(drift).toBeLessThan(integration);
+    expect(
+      stepOrderViolations(
+        steps,
+        CI_ORDER.filter(({ name }) =>
+          [INSTALL_STEP, SCHEMA_DRIFT_STEP, "pnpm test:int"].includes(name),
+        ),
+      ),
+    ).toEqual([]);
     const stepMs = (steps[drift]?.["timeout-minutes"] ?? 0) * 60_000;
     expect(stepMs).toBeGreaterThan(DRIZZLE_KIT_RUNS * DRIZZLE_KIT_TIMEOUT_MS);
     expect(STALE_COPY_MS).toBeGreaterThan(stepMs);

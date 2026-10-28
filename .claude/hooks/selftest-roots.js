@@ -7,16 +7,18 @@
  * прогон - rootPkg), гейты с when always, которые гоняют корневой скрипт (checkAlwaysGate,
  * checkAlwaysScriptGate).
  *
- * createRootProbes(ctx, sel) только объявляет: sel - проба выбора гейта (gateProbe, selects из
- * selftest-gates.js) и снимок графа настоящего дерева GRAPH_GATE (selftest-tree-graph.js); строки
- * пишет checkAlwaysScriptGate, когда её зовёт selftest-gates.js.
+ * createRootProbes(ctx, sel, opts) только объявляет: sel - проба выбора гейта (gateProbe, selects из
+ * selftest-gates.js) и снимок графа настоящего дерева GRAPH_GATE (selftest-tree-graph.js); opts -
+ * подмена для кейса: readRootPkg (чтение корневого package.json); строки пишет checkAlwaysScriptGate,
+ * когда её зовёт selftest-gates.js.
  */
 
 const path = require('path');
 
-function createRootProbes(ctx, sel) {
+function createRootProbes(ctx, sel, opts) {
   const { G, ROOT, check, readJson } = ctx;
   const { gateProbe, selects, GRAPH_GATE } = sel;
+  const readRootPkg = (opts && opts.readRootPkg) || (() => readJson(path.join(ROOT, 'package.json')));
   /** Ключ скрипта в тексте отказа: из модуля графа, без модуля - имя скрипта как есть. */
   const scriptKey = (script) => (G ? G.scriptKey(script) : script);
   // Литералы проб отказа склеены из частей: модуль вне weakeningExempt (rules.common.json), и замок
@@ -30,15 +32,14 @@ function createRootProbes(ctx, sel) {
    * Корневой package.json - одно чтение за прогон (TECH_DEBT 21.10.2026 E0-12L круг 3,
    * `checkRootScriptLines`, `rootScriptExtra`): пробы скриптов корня берут его отсюда. Сбой чтения -
    * исключение в каждой пробе, которой он нужен (их строки красные с причиной), запомненное, как и
-   * текст. ROOT_PKG_READS - сколько раз файл прочитан с диска: его сверяет проба в конце прогона.
+   * текст. Источник - readRootPkg (opts): мемо сверяет кейс на подменённом источнике со своим
+   * счётчиком, в рабочем коде счётчика нет (TECH_DEBT 23.10.2026 E0-12T C23).
    */
   let rootPkgMemo = null;
-  let ROOT_PKG_READS = 0;
   function rootPkg() {
     if (!rootPkgMemo) {
       try {
-        ROOT_PKG_READS++;
-        rootPkgMemo = { value: readJson(path.join(ROOT, 'package.json')) };
+        rootPkgMemo = { value: readRootPkg() };
       } catch (e) {
         rootPkgMemo = { error: e };
       }
@@ -165,7 +166,7 @@ function createRootProbes(ctx, sel) {
     checkRootScriptLines('гейт ' + id, repoScript, repoExpected);
   }
 
-  return { rootsRefusal, rootScriptExtra, checkRootCommands, checkAlwaysScriptGate, rootPkgReads: () => ROOT_PKG_READS };
+  return { rootsRefusal, rootScriptExtra, checkRootCommands, checkAlwaysScriptGate, rootPkg };
 }
 
 module.exports = { createRootProbes };

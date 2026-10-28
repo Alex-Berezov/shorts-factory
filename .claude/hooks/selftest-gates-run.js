@@ -5,106 +5,23 @@
  * --only, runGate (предел, снятие дерева, вывод) и gates.js из командной строки (сводка, файлы
  * вывода, сигналы, stdin), фон вызова gates.js в командах. Не хук: модуль самопроверки.
  *
- * При require модуль только объявляет: gateRunner - тело дочернего node проб запуска (ребёнок
- * делает `require(<этот файл>).gateRunner(cfg)`, решение техлида B4 E0-12T для selftest-temp.js),
- * registerGateRunProbes(ctx) пишет строки через check из ctx в прежнем порядке и отдаёт
- * gatesModule - загрузчик gates.js для проб выбора гейтов (только после зелёной пробы require).
+ * При require модуль только объявляет: registerGateRunProbes(ctx) пишет строки через check из ctx в
+ * прежнем порядке и отдаёт gatesModule - загрузчик gates.js для проб выбора гейтов (только после
+ * зелёной пробы require). Тело дочернего node проб запуска - selftest-gate-runner.js (E0-12AA): этот
+ * модуль работает в процессе самопроверки и выходит из процесса только через report() (NO_EXIT_FILES
+ * harness-selftest.js); exit процесса в программах дочерних node собирается из частей (EXIT).
  */
 
-const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
-
-/**
- * Дочерний процесс проб запуска гейтов (gateRunCases): `node -e` берёт функцию require этого модуля
- * (TECH_DEBT 21.10.2026 E0-12M круг 2, исходник функции строкой снят) - вместе с модулем целиком, так что
- * функция берёт cp и fs модуля, как любая другая; при require модуль ничего не исполняет. Все случаи идут параллельно: время пробы - самый
- * долгий случай, а не сумма. cfg.gates - случаи runGate ({ gate, capMs }), cfg.cli - запуски gates.js из
- * командной строки в дереве пробы ({ args, env, capMs }), cfg.watch - внуки ({ pid, hb }): внук пишет свой
- * PID в файл при старте и каждые 100 мс - отметку в файл hb. Жив ли внук после возврата, решает отметка:
- * сдвинулась за cfg.watchMs - жив. Ни зомби на POSIX (он не пишет), ни PID, доставшийся другому процессу на
- * Windows, такой ответ не подделают. Живой внук добивается здесь же по PID (только живой - иначе PID мог бы
- * быть чужим). Каждый случай ограничен capMs: зависший runGate - { hung }, а не зависшая самопроверка.
- */
-function gateRunner(cfg) {
-  const { runGate } = require(cfg.gatesFile);
-  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
-  const read = (f) => {
-    try {
-      return fs.readFileSync(f, 'utf8');
-    } catch (_) {
-      return null;
-    }
-  };
-  const brief = (text) => ({
-    len: text.length,
-    bytes: Buffer.byteLength(text, 'utf8'),
-    replaced: text.indexOf('�') !== -1,
-    head: text.slice(0, 300),
-    tail: text.slice(-700),
-    cut: (/\.\.\. срезано \d+ байт[^\n]*/.exec(text) || [''])[0],
-  });
-  const gateCase = async (k) => {
-    const c = cfg.gates[k];
-    const t = Date.now();
-    let cap;
-    const r = await Promise.race([runGate(c.gate, cfg.dir), new Promise((res) => { cap = setTimeout(() => res(null), c.capMs); })]);
-    clearTimeout(cap);
-    return r ? Object.assign({ code: r.code, ms: Date.now() - t, remnant: r.remnant, manual: r.manual }, brief(r.text)) : { hung: true, ms: Date.now() - t };
-  };
-  const cliCase = (k) =>
-    new Promise((resolve) => {
-      const c = cfg.cli[k];
-      const t = Date.now();
-      // stdinOpen: gates.js получает пайп stdin, который проба не закрывает до его выхода
-      const child = cp.spawn(process.execPath, ['-r', cfg.preload, cfg.cliGates].concat(c.args), {
-        cwd: cfg.dir,
-        env: Object.assign({}, process.env, c.env),
-        stdio: [c.stdinOpen ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      });
-      let out = '';
-      let err = '';
-      let hung = false;
-      child.stdout.on('data', (b) => { out += b; });
-      child.stderr.on('data', (b) => { err += b; });
-      const cap = setTimeout(() => { hung = true; child.kill('SIGKILL'); }, c.capMs);
-      child.on('close', (code, signal) => {
-        clearTimeout(cap);
-        if (child.stdin) child.stdin.destroy();
-        resolve({ code, signal, hung, ms: Date.now() - t, out: out.slice(-6000), err: err.slice(-1500) });
-      });
-    });
-  (async () => {
-    const res = { gates: {}, cli: {}, watch: {} };
-    await Promise.all(
-      Object.keys(cfg.gates).map(async (k) => { res.gates[k] = await gateCase(k); }).concat(
-        Object.keys(cfg.cli).map(async (k) => { res.cli[k] = await cliCase(k); }),
-      ),
-    );
-    const before = {};
-    for (const k of Object.keys(cfg.watch)) before[k] = read(cfg.watch[k].hb);
-    await pause(cfg.watchMs);
-    for (const k of Object.keys(cfg.watch)) {
-      const now = read(cfg.watch[k].hb);
-      const pid = Number(read(cfg.watch[k].pid)) || null;
-      const alive = now !== null && now !== before[k];
-      res.watch[k] = { started: pid !== null, pid, alive };
-      if (alive) {
-        try {
-          process.kill(pid, 'SIGKILL');
-        } catch (_) {
-          // уже вышел - добивать нечего
-        }
-      }
-    }
-    process.stdout.write('probe ' + JSON.stringify(res));
-    process.exit(0);
-  })();
-}
+// имя exit процесса для программ дочерних node - склеено один раз в selftest-children.js (L-042)
+const { PROCESS_EXIT: EXIT } = require('./selftest-children.js');
+// суффикс отметки старта внука - одна строка протокола с gcStartedAt (решение техлида Р9 E0-12AA); при
+// require модуль ничего не исполняет, exit - только в gateRunner дочернего node
+const { STARTED_SUFFIX } = require('./selftest-gate-runner.js');
 
 function registerGateRunProbes(ctx) {
-  const { CLAUDE, HOOKS, ROOT, check, copyHooksTo, git, releaseTemp, repoRules, run, tempDir } = ctx;
+  const { CLAUDE, HOOKS, LIVE_STATE, ROOT, check, copyHooksTo, gitStrict, put, releaseTemp, repoRules, run, tempDir } = ctx;
 
   /**
    * gates.js - модуль для проб и скрипт для человека: main() под require.main === module.
@@ -112,15 +29,15 @@ function registerGateRunProbes(ctx) {
    * безопасно и видно: argv - полный прогон (без --list), список изменённых файлов подменён
    * (L.allChanged - один репозиторий с одним гейтом always), каждый запуск child_process
    * (spawn, spawnSync, exec, execSync, execFile, execFileSync, fork - с shell и без) подменён
-   * счётчиком с пустым ответом, process.exit - записью кода. Без стража main() дошёл бы до
+   * счётчиком с пустым ответом, exit процесса - записью кода. Без стража main() дошёл бы до
    * конца: «прогнал» бы гейт, поставил бы отметку lastGates (markGates - только после
-   * настоящего полного прогона, поэтому --list её не проверял бы) и вызвал бы process.exit.
+   * настоящего полного прогона, поэтому --list её не проверял бы) и вышел бы из процесса.
    * У гейта пробы есть timeoutSec (без него runGate ответил бы «нет предела», не дойдя до cp.spawn),
    * подменённый spawn сразу «завершает» команду, а итог пробы печатается на beforeExit - когда цикл
-   * событий опустел: main() асинхронный, и без стража его запуск, отметка и process.exit идут после
-   * await, позже синхронного конца require (E0-12M, C8).
+   * событий опустел: main() асинхронный, и без стража его запуск, отметка и выход идут после
+   * await, позже синхронного конца require - E0-12M, C8.
    * Ждём код 0, пустой stderr, в stdout ровно строку итога пробы, ноль запусков, ни одного
-   * process.exit и ни одной отметки в состоянии пробы (своя временная папка,
+   * exit процесса и ни одной отметки в состоянии пробы (своя временная папка,
    * SF_HOOK_STATE_DIR). Каждое - своя причина отказа. Положительный контроль: настоящий
    * markGates из diff-hash.js в другой временной папке с тем же SF_HOOK_STATE_DIR ставит
    * отметку, и та же проверка состояния её видит - иначе проба смотрела бы не туда и молчала.
@@ -164,7 +81,7 @@ function registerGateRunProbes(ctx) {
         '    child.stdout.destroy = () => {};',
         '    child.stderr.destroy = () => {};',
         '    child.kill = () => true;',
-        // команда «отработала» сразу: main() без стража дошёл бы до сводки, markGates и process.exit
+        // команда «отработала» сразу: main() без стража дошёл бы до сводки, markGates и exit процесса
         "    setImmediate(() => { child.emit('exit', 0, null); child.emit('close', 0, null); });",
         '    return child;',
         '  };',
@@ -173,12 +90,12 @@ function registerGateRunProbes(ctx) {
         // у гейта есть предел: без него runGate ответил бы «нет предела», не дойдя до cp.spawn
         "L.allChanged = () => [{ repo: { name: 'probe', path: process.cwd() }, rules: { gates: [{ id: 'probe', cmd: 'probe', when: 'always', timeoutSec: 30 }] }, files: ['probe.txt'] }];",
         'let exited = null;',
-        'const exit = process.exit;',
-        'process.exit = (c) => { if (exited === null) exited = c === undefined ? 0 : c; };',
+        'const exit = ' + EXIT + ';',
+        EXIT + ' = (c) => { if (exited === null) exited = c === undefined ? 0 : c; };',
         'process.argv = [process.execPath, ' + JSON.stringify(file) + '];',
         'const g = require(' + JSON.stringify(file) + ');',
         // main() асинхронный: снимок - когда цикл событий опустел, то есть после всего, что main()
-        // успел бы сделать без стража (запуск, отметка, process.exit после await)
+        // успел бы сделать без стража (запуск, отметка, exit процесса после await)
         'let done = false;',
         "process.on('beforeExit', () => {",
         '  if (done) return;',
@@ -198,7 +115,7 @@ function registerGateRunProbes(ctx) {
       if (out !== 'probe ' + m[1]) why.push('main() печатал при загрузке: ' + JSON.stringify(out.slice(0, 80)));
       const calls = Object.keys(seen.launched).map((name) => name + ' x' + seen.launched[name]);
       if (calls.length) why.push('запуски child_process: ' + calls.join(', '));
-      if (seen.exited !== null) why.push('вызван process.exit(' + seen.exited + ')');
+      if (seen.exited !== null) why.push('вызван exit процесса (' + seen.exited + ')');
       if (lastGatesIn(dir) !== null) why.push('поставлена отметка lastGates');
       if (seen.selectGates !== 'function') why.push('selectGates не экспортирован: ' + seen.selectGates);
       if (seen.runGate !== 'function') why.push('runGate не экспортирован: ' + seen.runGate);
@@ -332,23 +249,23 @@ function registerGateRunProbes(ctx) {
     if (!Number.isInteger(grace) || grace <= 0) throw new Error('gates.js не экспортирует limits.KILL_GRACE_MS: ' + JSON.stringify(grace));
     const dir = tempDir('rungate');
     try {
-      const put = (rel, text) => {
-        const p = path.join(dir, ...rel.split('/'));
-        fs.mkdirSync(path.dirname(p), { recursive: true });
-        fs.writeFileSync(p, text);
-        return p;
-      };
       const q = (p) => '"' + p + '"';
       const cmd = (...args) => [process.execPath].concat(args).map(q).join(' ');
-      const sleep = put('bin/sleep.js', 'setTimeout(() => {}, 30000);\n');
-      const gc = put('bin/gc.js', [
+      const sleep = put(dir, 'bin/sleep.js', 'setTimeout(() => {}, 30000);\n');
+      // сон с отметкой старта (T8, TECH_DEBT 21.10.2026 E0-12M круг 3): окно «вернулся за предел + запас»
+      // считается от фактического старта ребёнка, а не от spawn - медленный старт на занятой машине не красит
+      const sleepStarted = path.join(dir, 'started-sleep');
+      const sleepMarked = put(dir, 'bin/sleep-marked.js', 'require("fs").writeFileSync(' + JSON.stringify(sleepStarted) + ', String(Date.now()));\nsetTimeout(() => {}, 30000);\n');
+      const gc = put(dir, 'bin/gc.js', [
         "const fs = require('fs');",
         'const [pidFile, hbFile] = process.argv.slice(2);',
+        // отметка старта - часы ОС внука текстом, до файла PID (gcStartedAt, selftest-gate-runner.js)
+        'fs.writeFileSync(pidFile + ' + JSON.stringify(STARTED_SUFFIX) + ', String(Date.now()));',
         'fs.writeFileSync(pidFile, String(process.pid));',
         'const beat = () => fs.writeFileSync(hbFile, Date.now() + " " + Math.random());',
         'beat();',
         'setInterval(beat, 100);',
-        'setTimeout(() => process.exit(0), 30000);',
+        'setTimeout(() => ' + EXIT + '(0), 30000);',
       ].join('\n'));
       // tree: внук держит вывод, ребёнок спит; orphan: внук держит вывод, ребёнок выходит с кодом 3,
       // как только внук записал свой PID (внук точно был, когда оболочка вышла). На Windows libuv
@@ -356,47 +273,47 @@ function registerGateRunProbes(ctx) {
       // только detached-внук; на POSIX внук остаётся в группе гейта. orphanAway - внук detached на
       // обеих системах (POSIX - своя сессия): снятие группы при выходе оболочки его не достаёт.
       const spawnGc = (opts) => "const c = require('child_process').spawn(process.execPath, process.argv.slice(2), { stdio: 'inherit'" + opts + ' });';
-      const tree = put('bin/tree.js', spawnGc('') + '\nsetTimeout(() => {}, 30000);\n');
-      const exitOnGc = (code) => "const up = setInterval(() => { if (require('fs').existsSync(process.argv[3])) { clearInterval(up); process.exit(" + code + '); } }, 20);';
+      const tree = put(dir, 'bin/tree.js', spawnGc('') + '\nsetTimeout(() => {}, 30000);\n');
+      const exitOnGc = (code) => "const up = setInterval(() => { if (require('fs').existsSync(process.argv[3])) { clearInterval(up); " + EXIT + '(' + code + '); } }, 20);';
       // orphan выходит с 0: зелёный код оболочки при живом остатке - ровно тот случай, где гейт обязан быть красным
-      const orphan = put('bin/orphan.js', [spawnGc(", detached: process.platform === 'win32'"), 'c.unref();', exitOnGc(0)].join('\n'));
-      const orphanAway = put('bin/orphan-away.js', [spawnGc(', detached: true'), 'c.unref();', exitOnGc(3)].join('\n'));
-      const pass = put('bin/pass.js', "console.log('ok');\n");
+      const orphan = put(dir, 'bin/orphan.js', [spawnGc(", detached: process.platform === 'win32'"), 'c.unref();', exitOnGc(0)].join('\n'));
+      const orphanAway = put(dir, 'bin/orphan-away.js', [spawnGc(', detached: true'), 'c.unref();', exitOnGc(3)].join('\n'));
+      const pass = put(dir, 'bin/pass.js', "console.log('ok');\n");
       // короткий красный: одна строка и код 3 - файл вывода пишется и ему (needsLog), не только длинному
-      const failShort = put('bin/fail-short.js', "console.log('short-red-line');\nprocess.exit(3);\n");
+      const failShort = put(dir, 'bin/fail-short.js', "console.log('short-red-line');\n" + EXIT + '(3);\n');
       // красный без вывода: файла нет - пустой ничего не объясняет; длинный зелёный (больше
       // FULL_LIMIT строк, меньше предела памяти) - файл есть: его середина на экране срезана
-      const failSilent = put('bin/fail-silent.js', 'process.exit(3);\n');
-      const longGreen = put('bin/long-green.js', "for (let i = 0; i < 260; i++) console.log('long-green-line-' + i);\n");
+      const failSilent = put(dir, 'bin/fail-silent.js', EXIT + '(3);\n');
+      const longGreen = put(dir, 'bin/long-green.js', "for (let i = 0; i < 260; i++) console.log('long-green-line-' + i);\n");
       // граница FULL_LIMIT (200): ровно 200 строк - целиком на экране и без файла, 201 - срез и файл
-      const linesGreen = (n) => put('bin/green-' + n + '.js', 'for (let i = 0; i < ' + n + "; i++) console.log('edge-line-' + i);\n");
+      const linesGreen = (n) => put(dir, 'bin/green-' + n + '.js', 'for (let i = 0; i < ' + n + "; i++) console.log('edge-line-' + i);\n");
       const green200 = linesGreen(200);
       const green201 = linesGreen(201);
       // читает stdin до конца и выходит 0: без stdin (ignore) конец ввода приходит сразу, с открытым
       // пайпом gates.js (inherit) или своим пайпом (pipe) - никогда, гейт висел бы до предела
-      const stdinRead = put('bin/stdin-read.js', "process.stdin.resume();\nprocess.stdin.on('end', () => { console.log('stdin-end'); process.exit(0); });\n");
+      const stdinRead = put(dir, 'bin/stdin-read.js', "process.stdin.resume();\nprocess.stdin.on('end', () => { console.log('stdin-end'); " + EXIT + "(0); });\n");
       // выходит сам через 1,5 с - после предела 1 с, но в окне ожидания вывода
-      const slow = put('bin/slow.js', 'setTimeout(() => {}, 1500);\n');
+      const slow = put(dir, 'bin/slow.js', 'setTimeout(() => {}, 1500);\n');
       // голова - 11 байт, строка - 511 «ж» и перевод строки (1023 байта): граница головы (1 МиБ) и
       // начало хвоста (последний МиБ) приходятся на второй байт символа
-      const flood = put('bin/flood.js', "process.stdout.write('HEAD-START\\n' + ('ж'.repeat(511) + '\\n').repeat(5 * 1024) + 'TAIL-END!\\n');\n");
-      const split = put('bin/split.js', [
+      const flood = put(dir, 'bin/flood.js', "process.stdout.write('HEAD-START\\n' + ('ж'.repeat(511) + '\\n').repeat(5 * 1024) + 'TAIL-END!\\n');\n");
+      const split = put(dir, 'bin/split.js', [
         "const b = Buffer.from('ПРИВЕТ-ЮНИКОД\\n', 'utf8');",
         'process.stdout.write(b.subarray(0, 1));',
         "setTimeout(() => { process.stderr.write('E\\n'); setTimeout(() => process.stdout.write(b.subarray(1)), 100); }, 100);",
       ].join('\n'));
       // больше 200 строк и больше предела памяти: gates.js пишет файл вывода и срезает середину
-      const floodCli = put('bin/flood-cli.js', "process.stdout.write(('y'.repeat(15) + '\\n').repeat(160 * 1024));\n");
+      const floodCli = put(dir, 'bin/flood-cli.js', "process.stdout.write(('y'.repeat(15) + '\\n').repeat(160 * 1024));\n");
       const marker = path.join(dir, 'marker-rungate');
       const cliMarker = path.join(dir, 'marker-cli');
-      const mark = (m) => put('bin/mark-' + path.basename(m) + '.js', 'require("fs").writeFileSync(' + JSON.stringify(m) + ', "ran");\n');
+      const mark = (m) => put(dir, 'bin/mark-' + path.basename(m) + '.js', 'require("fs").writeFileSync(' + JSON.stringify(m) + ', "ran");\n');
       const watch = {};
       const watchKeys = ['tree', 'orphan', 'afterExit', 'stuck', 'noop'].concat(PROBE_SIGNALS.map(([s]) => s));
       for (const k of watchKeys) watch[k] = { pid: path.join(dir, 'gc-' + k + '.pid'), hb: path.join(dir, 'gc-' + k + '.hb') };
       const withGc = (file, k) => cmd(file, gc, watch[k].pid, watch[k].hb);
       const cap = (sec) => sec * 1000 + grace + 20000;
       const gates = {
-        sleep: { gate: { id: 'probe-sleep', cmd: cmd(sleep), timeoutSec: 1 }, capMs: cap(1) },
+        sleep: { gate: { id: 'probe-sleep', cmd: cmd(sleepMarked), timeoutSec: 1 }, capMs: cap(1) },
         tree: { gate: { id: 'probe-tree', cmd: withGc(tree, 'tree'), timeoutSec: 5 }, capMs: cap(5) },
         orphan: { gate: { id: 'probe-orphan', cmd: withGc(orphan, 'orphan'), timeoutSec: 30 }, capMs: cap(0) },
         pass: { gate: { id: 'probe-pass', cmd: cmd(pass), timeoutSec: 30 }, capMs: cap(0) },
@@ -435,15 +352,16 @@ function registerGateRunProbes(ctx) {
           { id: 'p-green-201', cmd: cmd(green201), when: 'never', timeoutSec: 30 },
         ].concat(PROBE_SIGNALS.map(([s]) => ({ id: 'p-tree-' + s, cmd: withGc(tree, s), when: 'never', timeoutSec: 30 }))),
       }));
-      const init = git(['init', '-q', '--template='], { cwd: dir });
-      if (init.error || init.status !== 0) throw new Error('git init дерева пробы: ' + String((init.error && init.error.message) || init.stderr).slice(0, 160));
-      const preload = put('pre.js', [
+      // git дерева пробы - gitStrict: окружение по белому списку (GIT_DIR родителя init не уводит), отказ с подкомандой
+      gitStrict(['init', '-q', '--template='], { cwd: dir });
+      const preload = put(dir, 'pre.js', [
         "const fs = require('fs');",
         "const cp = require('child_process');",
         'const L = require(' + JSON.stringify(path.join(hooks, 'lib.js')) + ');',
         "const one = process.env.SF_PROBE_CHANGED === 'one';",
         "L.allChanged = () => { if (!one) return []; const repo = L.knownRepos()[0]; return [{ repo, rules: L.rulesFor(repo), files: ['b.txt'] }]; };",
-        'const spy = { groupKills: 0, taskkills: 0, logWrites: [], logDirReads: 0, logUnlinks: 0 };',
+        // leak - переменная окружения самопроверки вне белого списка (envByList) дошла до gates.js
+        "const spy = { groupKills: 0, taskkills: 0, logWrites: [], logDirReads: 0, logUnlinks: 0, leak: process.env.SF_SELFTEST_LEAK || null };",
         'const spyFile = process.env.SF_PROBE_SPY;',
         "if (spyFile) process.on('exit', () => fs.writeFileSync(spyFile, JSON.stringify(spy)));",
         "const failKill = process.env.SF_PROBE_KILL_FAIL === '1';",
@@ -577,13 +495,15 @@ function registerGateRunProbes(ctx) {
       cliCase('killFail', ['--only=p-stuck'], { SF_PROBE_CHANGED: 'none', SF_PROBE_KILL_FAIL: '1' });
       cliCase('killFailClosed', ['--only=p-slow'], { SF_PROBE_CHANGED: 'none', SF_PROBE_KILL_FAIL: '1' });
       cliCase('killNoop', ['--only=p-noop'], { SF_PROBE_CHANGED: 'none', SF_PROBE_KILL_NOOP: '1' });
-      const cfg = { gatesFile: path.join(HOOKS, 'gates.js'), cliGates: path.join(hooks, 'gates.js'), preload, dir, gates, cli, watch, watchMs: 1500 };
-      const code = 'require(' + JSON.stringify(path.join(HOOKS, 'selftest-gates-run.js')) + ').gateRunner(' + JSON.stringify(cfg) + ');';
-      const r = run(process.execPath, ['-e', code], { cwd: dir, timeout: 120000, killSignal: 'SIGKILL' });
+      const cfg = { gatesFile: path.join(HOOKS, 'gates.js'), cliGates: path.join(hooks, 'gates.js'), preload, dir, gates, cli, watch, watchMs: 1500, liveState: LIVE_STATE };
+      const code = 'require(' + JSON.stringify(path.join(HOOKS, 'selftest-gate-runner.js')) + ').gateRunner(' + JSON.stringify(cfg) + ');';
+      // SF_SELFTEST_LEAK - метка окружения ребёнка вне белого списка: до gates.js она доходить не должна
+      const r = run(process.execPath, ['-e', code], { cwd: dir, timeout: 120000, killSignal: 'SIGKILL', env: Object.assign({}, process.env, { SF_SELFTEST_LEAK: 'leak' }) });
       const m = /(?:^|\n)probe (\{.*\})$/.exec(String(r.stdout || ''));
       if (!m) throw new Error('проба запуска гейтов не дошла до итога (код ' + r.status + '): ' + String(r.stderr || r.stdout || (r.error && r.error.message)).slice(0, 200));
       const res = JSON.parse(m[1]);
       res.markerWritten = fs.existsSync(marker);
+      res.sleepStarted = fs.existsSync(sleepStarted) ? Number(fs.readFileSync(sleepStarted, 'utf8')) : null;
       res.cliMarkerWritten = fs.existsSync(cliMarker);
       res.lastGates = {};
       res.spy = {};
@@ -619,11 +539,66 @@ function registerGateRunProbes(ctx) {
     if (x.hung) return 'gates.js не вышел за ' + (x.ms / 1000).toFixed(1) + ' с';
     return 'код ' + x.code + (x.signal ? ' (' + x.signal + ')' : '') + ', stdout …' + JSON.stringify(x.out.slice(-300)) + (x.err ? ', stderr ' + JSON.stringify(x.err.slice(-200)) : '');
   }
+  /**
+   * Окно «вернулся за предел + запас» пробы снятия по пределу (T8, TECH_DEBT 21.10.2026 E0-12M круг 3):
+   * от отметки старта ребёнка (startedAt), а не от вызова runGate - медленный старт на занятой машине не
+   * красит. Ребёнок, снятый до своей отметки (старт node дольше предела), - окно от вызова (x.ms): такой
+   * исход законен (команда снята по пределу), а не отказ «окно не от чего считать» (замечание ревью
+   * E0-12AA). Тот же счёт - у окна вывода внука пробы orphan (отметка - <pid>.started внука, gcStartedAt). { why } - отказ,
+   * { note } - пропуск; x - случай runGate (ms, end), boundMs - предел и запас, who - чей старт.
+   */
+  function limitWindowVerdict(x, startedAt, boundMs, who) {
+    const marked = Number.isFinite(startedAt) && startedAt > 0;
+    const windowMs = marked ? x.end - startedAt : x.ms;
+    const from = marked ? 'после старта ' + who : 'от вызова (' + who + ' без отметки старта)';
+    if (windowMs >= boundMs) return { why: 'вернулся через ' + (windowMs / 1000).toFixed(1) + ' с ' + from + ' - дольше окна и запаса' };
+    return { note: (windowMs / 1000).toFixed(1) + ' с ' + from + ', ' + (x.ms / 1000).toFixed(1) + ' с от вызова' };
+  }
   check('gates.js runGate: команда дольше timeoutSec снята по пределу (код не 0, «снят по пределу», вернулся за предел + запас)', () => {
     const all = gateRunCases();
     const x = all.gates.sleep;
-    if (x.hung || x.code === 0 || !/снят по пределу 1 с/.test(x.tail) || x.ms >= 1000 + all.grace + 8000) return runGateSeen(x);
-    return { note: (x.ms / 1000).toFixed(1) + ' с' };
+    if (x.hung || x.code === 0 || !/снят по пределу 1 с/.test(x.tail)) return runGateSeen(x);
+    const v = limitWindowVerdict(x, all.sleepStarted, 1000 + all.grace + 8000, 'ребёнка');
+    return v.why ? v.why + '; ' + runGateSeen(x) : { note: v.note };
+  });
+  // Окно предела без отметки старта (замечание ревью E0-12AA): ребёнок снят до отметки - окно от вызова,
+  // не отказ; с отметкой - от неё; дольше предела и запаса от того, от чего считается, - отказ
+  check('gates.js runGate: окно предела - от отметки старта ребёнка; без отметки (снят до неё) - от вызова, не отказ; дольше предела и запаса - отказ', () => {
+    const bound = 11000;
+    const got = [
+      limitWindowVerdict({ ms: 3000, end: 10000 }, null, bound, 'ребёнка'),
+      limitWindowVerdict({ ms: 30000, end: 40000 }, 37000, bound, 'ребёнка'),
+      limitWindowVerdict({ ms: 3000, end: 40000 }, 20000, bound, 'ребёнка'),
+      limitWindowVerdict({ ms: 30000, end: 40000 }, null, bound, 'ребёнка'),
+    ].map((v) => (v.why ? 'отказ' : 'пропуск'));
+    return got.join() === 'пропуск,пропуск,отказ,отказ' || 'без отметки в окне, с отметкой в окне, с отметкой за окном, без отметки за окном: ' + got.join(', ');
+  });
+  // Отметка старта внука - текст часов ОС внука, а не mtime файла PID (замечание ревью E0-12AA: часы ФС
+  // с шагом 2 с на exFAT против Date.now()); дочерний node берёт gcStartedAt с его чтением по умолчанию
+  // (readIfPresent), как тело проб запуска: нет файла - null, иной сбой (каталог на месте отметки - EISDIR) -
+  // исключение, а не «внук не жив» (решение техлида Р9 E0-12AA)
+  check('gates.js runGate: отметка старта внука - часы ОС текстом из <pid>.started, а не mtime файла PID (mtime сдвинут - ответ тот же; нет отметки, не число - null; отметка не читается - исключение)', () => {
+    const dir = tempDir('gc-started');
+    try {
+      const pidFile = put(dir, 'gc.pid', '4242');
+      const marked = put(dir, 'gc-marked.pid', '4243');
+      put(dir, 'gc-marked.pid' + STARTED_SUFFIX, '1700000000123');
+      const junk = put(dir, 'gc-junk.pid', '4244');
+      put(dir, 'gc-junk.pid' + STARTED_SUFFIX, 'not a number');
+      const unreadable = put(dir, 'gc-dir.pid', '4245');
+      fs.mkdirSync(unreadable + STARTED_SUFFIX);
+      // mtime файла PID - на сутки раньше отметки: ответ по mtime отличим от ответа по тексту
+      fs.utimesSync(marked, new Date(1699900000000), new Date(1699900000000));
+      const code = 'const { gcStartedAt } = require(' + JSON.stringify(path.join(HOOKS, 'selftest-gate-runner.js')) + ');\n' +
+        'const at = (f) => { try { return gcStartedAt(f); } catch (e) { return (e && e.code) || String(e); } };\n' +
+        'process.stdout.write(JSON.stringify(' + JSON.stringify([pidFile, marked, junk, unreadable]) + '.map(at)));';
+      const r = run(process.execPath, ['-e', code], { cwd: dir });
+      const got = String(r.stdout || '');
+      const want = '[null,1700000000123,null,"EISDIR"]';
+      return got === want || 'нет отметки, отметка, не число, не читается: ' + got + ' (код ' + r.status + ' ' + String(r.stderr || '').slice(0, 120) + '), ожидалось ' + want;
+    } finally {
+      releaseTemp(dir);
+    }
   });
   check('gates.js runGate: снято всё дерево - внук, держащий вывод, мёртв после возврата', () => {
     const all = gateRunCases();
@@ -640,8 +615,11 @@ function registerGateRunProbes(ctx) {
     const all = gateRunCases();
     const x = all.gates.orphan;
     const w = all.watch.orphan;
-    if (x.hung || x.code !== 1 || /снят по пределу/.test(x.tail) || x.ms >= all.grace + 8000) return runGateSeen(x);
+    if (x.hung || x.code !== 1 || /снят по пределу/.test(x.tail)) return runGateSeen(x);
     if (!w.started) return 'внук не стартовал до выхода оболочки (нет файла PID) - проба ничего не доказывает; ' + runGateSeen(x);
+    // окно - от старта внука (отметка <pid>.started, gcStartedAt), а не от spawn оболочки (T8)
+    const v = limitWindowVerdict(x, w.startedAt, all.grace + 8000, 'внука');
+    if (v.why) return v.why + '; ' + runGateSeen(x);
     if (process.platform === 'win32') {
       if (!x.remnant) return 'остаток не помечен (remnant) - сводка не скажет «ОСТАТОК ЖИВ»; ' + runGateSeen(x);
       if (!/вышла с кодом 0, а вывод держал оставшийся от неё процесс[^\n]*на Windows он не снят[^\n]*снять руками/.test(x.tail)) return 'остаток не назван: ' + runGateSeen(x);
@@ -681,6 +659,14 @@ function registerGateRunProbes(ctx) {
     if (x.hung || x.code !== 0) return runGateSeen(x);
     if (x.replaced || x.tail.indexOf('ПРИВЕТ-ЮНИКОД') === -1) return 'символ испорчен: ' + JSON.stringify(x.tail);
     return true;
+  });
+  // Окружение gates.js из командной строки - по белому списку (envByList, как у git проб; замечание ревью
+  // E0-12AA L-030): метка окружения ребёнка проб вне списка до gates.js не доходит, переменные случая - доходят
+  check('gates.js из командной строки: окружение по белому списку - переменная родителя вне списка до gates.js не доходит, переменные случая доходят', () => {
+    const all = gateRunCases();
+    const spy = all.spy.onlyClean;
+    if (!spy) return 'шпион случая onlyClean не записан - SF_PROBE_SPY случая не дошёл до gates.js; ' + cliSeen(all.cli.onlyClean);
+    return spy.leak === null || 'переменная родителя вне белого списка дошла до gates.js: SF_SELFTEST_LEAK=' + spy.leak;
   });
   check('gates.js из командной строки: --only на чистом дереве гонит названный glob-гейт, код 0, прогон частичный', () => {
     const all = gateRunCases();
@@ -1066,4 +1052,4 @@ function registerGateRunProbes(ctx) {
   return { gatesModule };
 }
 
-module.exports = { gateRunner, registerGateRunProbes };
+module.exports = { registerGateRunProbes };

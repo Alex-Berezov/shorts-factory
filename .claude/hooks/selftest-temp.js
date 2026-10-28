@@ -13,11 +13,12 @@
  * Реестр каталогов. deps - { fs, os, path, isNotFile } (isNotFile - L.isNotFile из lib.js).
  *   tempDir(prefix, parent) - каталог `sf-selftest-<prefix>-XXXXXX` в parent (по умолчанию
  *     os.tmpdir()), в реестре: made - все созданные, live - не снятые;
- *   dropTemp(dir, opts) - снятие: ссылки и junction внутри - unlink до рекурсивного удаления
+ *   dropTemp - снятие dir (opts - ниже): ссылки и junction внутри - unlink до рекурсивного удаления
  *     (L-028: удаление по ссылке не должно дойти до её цели, какой бы ни была реализация rmSync),
  *     затем rmSync с повтором (maxRetries: на Windows каталог, который только что держал дочерний
  *     процесс, отвечает EBUSY/EPERM); opts.rm - подмена rmSync для кейса;
- *   dropAll() - снять всё, что в live (обработчик exit; сбой одного каталога не мешает остальным).
+ *   dropAll() - снять всё, что в live (обработчик exit; сбой одного каталога не мешает остальным);
+ *   put(dir, rel, text) - файл пробы dir/rel (rel с «/», каталоги создаются), абсолютный путь.
  * Каталоги, созданные не этим прогоном, реестр не трогает: их может держать параллельный прогон.
  */
 function makeTempRegistry(deps) {
@@ -61,7 +62,15 @@ function makeTempRegistry(deps) {
       }
     }
   };
-  return { PREFIX, made, live, tempDir, dropTemp, dropAll };
+  // файл пробы во временном каталоге: один помощник на все модули (TECH_DEBT 23.10.2026 E0-12U круг 2:
+  // два локальных put) - rel с «/», каталоги создаются, возвращает абсолютный путь
+  const put = (dir, rel, text) => {
+    const p = path.join(dir, ...rel.split('/'));
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, text);
+    return p;
+  };
+  return { PREFIX, made, live, tempDir, dropTemp, dropAll, put };
 }
 
 module.exports = { makeTempRegistry };

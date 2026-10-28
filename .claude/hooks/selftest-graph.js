@@ -163,23 +163,39 @@ function inRoot(dir, input, taskId, platform = process.platform) {
 
 /**
  * Задачи dry по taskId; задача без taskId или без поля из TASK_FIELDS - исключение. Форма
- * проверяется раз на объект dry (TECH_DEBT 21.10.2026 E0-12L круг 3, `dryPackages` -> `tasksById`; круг 4, время прогона): результат в WeakMap по самому
- * объекту; стабы - новые объекты dry и проверяются сами. Объект dry после первого вызова не
- * правится (стабы копируют).
+ * проверяется раз на снимок задач (TECH_DEBT 21.10.2026 E0-12L круг 3, `dryPackages` -> `tasksById`;
+ * круг 4, время прогона): ключ кэша - сам массив dry.tasks (TECH_DEBT 23.10.2026 E0-12T E8). Проверенный
+ * снимок заморожен целиком (массив, задачи и их поля - deepFreeze): push, замена элемента и правка поля
+ * на месте после первого вопроса - TypeError в строгом режиме, а не невидимая кэшу правка (замечание
+ * ревью E0-12AA: сверка элементов на попадании была O(n) и правку полей не видела); попадание - O(1).
+ * Новый массив (dry.tasks = ...concat) - новый ключ, его задачи проверяются заново; стабы - новые
+ * объекты dry.
  */
 const byIdCache = new WeakMap();
 function tasksById(dry) {
-  if (byIdCache.has(dry)) return byIdCache.get(dry);
+  const tasks = dry.tasks;
+  const hit = byIdCache.get(tasks);
+  if (hit) return hit;
   const byId = new Map();
-  for (const t of dry.tasks) {
+  for (const t of tasks) {
     if (!t || typeof t.taskId !== 'string') throw new Error('задача dry-JSON без taskId - форма dry-JSON turbo неизвестна');
     for (const [field, valid] of TASK_FIELDS) {
       if (!valid(t)) throw new Error('у задачи ' + t.taskId + ' нет ' + field + ' - форма dry-JSON turbo неизвестна');
     }
     byId.set(t.taskId, t);
   }
-  byIdCache.set(dry, byId);
+  deepFreeze(tasks);
+  byIdCache.set(tasks, byId);
   return byId;
+}
+
+/** Заморозить value и всё, что в нём лежит (объекты и массивы dry-JSON), в глубину; ответ - value. */
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value)) deepFreeze(v);
+  }
+  return value;
 }
 
 /** taskId задач script с командой (command не <NONEXISTENT>) среди проверенных задач byId. */

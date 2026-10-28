@@ -22,8 +22,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const cp = require('child_process');
 const L = require('./lib.js');
+const CHILDREN_MOD = require('./selftest-children.js');
 
 const HOOKS = __dirname;
 const CLAUDE = path.resolve(HOOKS, '..');
@@ -34,10 +34,10 @@ const ALLOWED_MODELS = new Set(['opus', 'sonnet', 'haiku', 'fable', 'inherit']);
  * Модули самопроверки - один перечень (E0-12U, ревью круга 1): из него строятся HOOK_FILES (проба
  * синтаксиса), NO_EXIT_FILES, HELPER_SCANNED, ожидания сверки mkdtempSync и загрузка модулей; новый
  * модуль, дописанный сюда, попадает под все статические пробы сразу. Порядок - порядок строк
- * синтаксиса и загрузки. Поля:
- *   load - кто его грузит (только SELFTEST_LOADS): 'graph' - цепочка модуля графа G (loadGraphChain,
- *     по порядку перечня), 'gates' - пробы гейтов (loadSelftestModule в разделе 2a), null - этот файл
- *     его не грузит после пробы синтаксиса;
+ * синтаксиса; порядок загрузки цепочки графа - по её require-рёбрам (graphChainOrder). Поля:
+ *   load - кто его грузит (только SELFTEST_LOADS): 'graph' - цепочка модуля графа G (loadGraphChain),
+ *     'gates' - пробы гейтов (assembleGateProbes в разделе 2a), null - этот файл его не грузит после
+ *     пробы синтаксиса;
  *   why - почему load: null (обязательно при null); значения load и why сверяет проба полноты перечня;
  *   exit - почему exit процесса в его тексте законен (тогда файл вне NO_EXIT_FILES); без поля - в них;
  *   mkdtemp - сколько вызовов mkdtempSync ждёт сверка (без поля - ноль).
@@ -48,6 +48,16 @@ const SELFTEST_MODULES = [
   { file: 'selftest-stub.js', load: 'graph' },
   { file: 'selftest-vitest.mjs', load: null, why: 'дочерний процесс vitest/node пробы test:int (startVitest), не require' },
   {
+    file: 'selftest-vitest-protocol.cjs',
+    load: null,
+    why: 'строки протокола дочернего vitest: его берут selftest-int.js и selftest-vitest.mjs, этот файл - нет',
+  },
+  {
+    file: 'selftest-children.js',
+    load: null,
+    why: 'точка запуска детей и набор детей нужны до первой пробы - require в начале файла, до пробы синтаксиса',
+  },
+  {
     file: 'selftest-temp.js',
     load: null,
     why: 'реестр временных каталогов нужен до первой пробы - require в начале файла, до пробы синтаксиса',
@@ -55,17 +65,24 @@ const SELFTEST_MODULES = [
   },
   { file: 'selftest-int.js', load: 'gates' },
   {
-    file: 'selftest-gates-run.js',
-    load: 'gates',
-    exit: 'gateRunner и программы `node -e` пробы запуска - код дочернего процесса: его process.exit - выход ребёнка, а не самопроверки',
+    file: 'selftest-gate-runner.js',
+    load: null,
+    why: 'дочерний node проб запуска gates.js (gateRunner из selftest-gates-run.js); этот файл его не require, selftest-gates-run.js берёт только STARTED_SUFFIX',
+    exit: 'gateRunner - код дочернего процесса: его exit - выход ребёнка с готовым итогом, а не самопроверки',
   },
+  { file: 'selftest-gates-run.js', load: 'gates' },
   { file: 'selftest-tree-graph.js', load: 'gates' },
   { file: 'selftest-roots.js', load: 'gates' },
   { file: 'selftest-int-cases.js', load: 'gates' },
   { file: 'selftest-gates.js', load: 'gates' },
   { file: 'selftest-graph-cases.js', load: 'gates' },
 ];
-/** Допустимые значения поля load перечня SELFTEST_MODULES; опечатка (`'gate'`) роняет прогон TypeError на сборке проб гейтов или графа до report() (код 1, без сводки). */
+/**
+ * Допустимые значения поля load перечня SELFTEST_MODULES. Опечатка (`'gate'`, `'grap'`) - красная
+ * строка пробы полноты перечня (badLoadEntries сверяется до первой загрузки), цепочка графа при ней не
+ * грузится, сборка проб гейтов называет модуль, которого нет (assembleGateProbes), - не TypeError до
+ * report().
+ */
 const SELFTEST_LOADS = ['graph', 'gates', null];
 const HOOK_FILES = [
   'lib.js', 'diff-hash.js', 'standards.js', 'commit-gate.js',
@@ -107,9 +124,13 @@ function outcome(name, fn) {
     return { ok: false, name, note: (e && e.message) || String(e) };
   }
 }
-function check(name, fn) {
+/**
+ * Строка пробы name: итог outcome отдаётся onRow (по умолчанию - в results прогона; кейс берёт свой
+ * приёмник-функцию, как checkGateSelection в selftest-gates.js берёт свой check).
+ */
+function check(name, fn, onRow = (row) => results.push(row)) {
   const r = outcome(name, fn);
-  if (r) results.push(r);
+  if (r) onRow(r);
 }
 
 /**
@@ -185,45 +206,66 @@ function refusalVerdict(fn, want) {
  */
 const LISTING_MAX_BUFFER = 64 * 1024 * 1024;
 
+/*
+ * Состояние проб - во временной папке на весь прогон (SF_HOOK_STATE_DIR, читает только
+ * lib.js:statePath()). Переменная ставится этому процессу до первого дочернего node (проба
+ * синтаксиса) - сюда смотрят L.statePath() в пробах, её наследует каждый дочерний node, - и каждому
+ * хуку в probe(). Боевой путь (LIVE_STATE) - путь состояния lib.js без переопределения; в этом
+ * процессе он закрыт (L.refuseStatePath): statePath, readState и writeState на нём - исключение, а
+ * не запись в состояние сессии. Что ни один дочерний node не получил окружение без переменной или с
+ * боевым каталогом, держит одна точка запуска (LAUNCH, hookStateGuard). Папка убирается на выходе
+ * процесса, в том числе по Ctrl+C (TEMP.dropAll).
+ */
+const LIVE_STATE = L.statePath({});
+L.refuseStatePath(LIVE_STATE);
+
+/**
+ * Запуск дочернего процесса проб - одна точка (решение техлида Р3 E0-12AA): LAUNCH из
+ * selftest-children.js. Дочерний node (хук, gates.js, программа -e, дочерний vitest) - только с
+ * SF_HOOK_STATE_DIR на каталоге состояния проб: окружение opts.env (или этого процесса) без
+ * переменной, с относительным путём или с каталогом боевого .qa-state - исключение, его текст встаёт
+ * в строку пробы, которая так позвала (check). Хук в таком ребёнке писал бы боевое состояние сессии;
+ * запись в боевой .qa-state самой сессией во время прогона - не дело самопроверки (TECH_DEBT
+ * 23.10.2026 E0-12T ОВ2, E0-12U круг 2). child_process мимо этой точки ловит статическая проба
+ * «дочерние процессы». run - синхронный запуск с умолчаниями проб; LAUNCH.spawn - без ожидания
+ * (дочерний vitest).
+ */
+const LAUNCH = CHILDREN_MOD.makeLauncher({ liveState: LIVE_STATE });
 function run(cmd, args, opts) {
-  return cp.spawnSync(cmd, args, Object.assign({ encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, opts || {}));
+  return LAUNCH.spawnSync(cmd, args, Object.assign({ encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, opts || {}));
 }
+const samePath = CHILDREN_MOD.samePath;
 
 /**
  * Реестр временных каталогов прогона (E0-12T, TECH_DEBT 19.10.2026 E0-12D «каталоги sf-selftest-* в
- * %TEMP%»): модуль selftest-temp.js, его же берёт дочерний node пробы обработчика exit.
+ * %TEMP%»): модуль selftest-temp.js (набор детей и тело обработчика exit, которые берёт дочерний node
+ * пробы обработчика exit, - в selftest-children.js).
  */
 const { makeTempRegistry } = require('./selftest-temp.js');
 const TEMP = makeTempRegistry({ fs, os, path, isNotFile: L.isNotFile });
 const tempDir = TEMP.tempDir;
 const dropTemp = TEMP.dropTemp;
+const put = TEMP.put;
 /**
  * Дочерние процессы, запущенные без ожидания (startVitest): выход прогона до их ответа (report()
  * внутри пробы, Ctrl+C) снимает их SIGKILL до снятия каталогов реестра - иначе на Windows каталог с
- * открытыми ими файлами stdout/stderr не снимается (EBUSY) и остаётся в %TEMP%. children - набор
- * (по умолчанию LIVE_CHILDREN; кейс берёт свой).
+ * открытыми ими файлами stdout/stderr не снимается (EBUSY) и остаётся в %TEMP%. killLiveChildren(children)
+ * - набор children (по умолчанию LIVE_CHILDREN; кейс берёт свой). Набор и тело обработчика - в
+ * selftest-children.js (makeChildRegistry): то же тело исполняет дочерний node кейса обработчика exit.
  */
-const LIVE_CHILDREN = new Set();
-function killLiveChildren(children = LIVE_CHILDREN) {
-  for (const child of children) {
-    try {
-      child.kill('SIGKILL');
-    } catch (_) {
-      // выход процесса: ребёнок уже вышел или не запускался
-    }
-  }
-  children.clear();
-}
+const CHILDREN = CHILDREN_MOD.makeChildRegistry();
+const LIVE_CHILDREN = CHILDREN.live;
+const killLiveChildren = CHILDREN.kill;
 // report()/process.exit внутри пробы и Ctrl+C (SIGINT -> exit(130)) минуют finally проб: каталоги
 // реестра снимает выход процесса. Убитый снаружи процесс (TerminateProcess, SIGKILL) обработчиков
 // не зовёт - так остались каталоги пачки 19.10.2026 (файл дела E0-12T, шаг 11).
-// обработчик exit получает код выхода первым аргументом - набор ему не передаётся
-function killLiveChildrenOnExit() {
-  killLiveChildren();
-}
+const killLiveChildrenOnExit = CHILDREN.onExit;
 process.on('exit', killLiveChildrenOnExit);
 process.on('exit', TEMP.dropAll);
 process.on('SIGINT', () => process.exit(130));
+
+const PROBE_STATE_DIR = tempDir('state');
+process.env.SF_HOOK_STATE_DIR = PROBE_STATE_DIR;
 
 /**
  * Снятие каталога, чей сбой не подменяет итог пробы и не роняет прогон до report(): EBUSY/EPERM
@@ -232,7 +274,21 @@ process.on('SIGINT', () => process.exit(130));
  * снимается ещё раз обработчиком exit. opts - как у dropTemp. true - снят.
  */
 const DROP_FAILURES = [];
+/**
+ * Каталоги, которые держит живой ребёнок после отказа снятия (killAndWait, selftest-int.js):
+ * holdTemp(dir, why) - releaseTemp их не снимает и сбоем не пишет (EBUSY на Windows - вторая красная
+ * строка без новой причины); их снимает выход прогона после SIGKILL набора детей, пометку даёт проба
+ * «временные каталоги прогона сняты». unholdTemp(dir) - кейс, который сам снял своего ребёнка.
+ */
+const HELD_TEMP = new Map();
+function holdTemp(dir, why) {
+  HELD_TEMP.set(dir, why);
+}
+function unholdTemp(dir) {
+  HELD_TEMP.delete(dir);
+}
 function releaseTemp(dir, opts) {
+  if (HELD_TEMP.has(dir)) return false;
   try {
     dropTemp(dir, opts);
     return true;
@@ -243,19 +299,27 @@ function releaseTemp(dir, opts) {
 }
 
 /**
- * Пути p нет: lstat отвечает ENOENT или ENOTDIR (L.isNotFile). Иная ошибка (EACCES, EPERM) -
- * исключение, а не «нет»: existsSync глотает любую ошибку, и недоступный файл сошёл бы за
- * отсутствующий (L-027, L-028). lstat - подмена для кейса.
+ * Пути p нет: lstat отвечает ENOENT или ENOTDIR (L.statIfPresent - один помощник «путь есть»
+ * обвязки). Иная ошибка (EACCES, EPERM) - исключение, а не «нет»: existsSync глотает любую ошибку,
+ * и недоступный файл сошёл бы за отсутствующий (L-027, L-028). lstat - подмена для кейса.
  */
 function absent(p, lstat = fs.lstatSync) {
-  try {
-    lstat(p);
-    return false;
-  } catch (e) {
-    if (L.isNotFile(e)) return true;
-    throw e;
-  }
+  return L.statIfPresent(p, lstat) === null;
 }
+
+/**
+ * Текст файла каталога хуков для статических проб - один раз на прогон (замечание ревью E0-12AA: этот
+ * файл и модули перечня перечитывались каждой статической пробой). makeTextMemo(read) - read(путь)
+ * зовётся раз на имя файла; подмена read - кейс мемо.
+ */
+function makeTextMemo(read) {
+  const memo = new Map();
+  return (file) => {
+    if (!memo.has(file)) memo.set(file, read(path.join(HOOKS, file)));
+    return memo.get(file);
+  };
+}
+const scannedText = makeTextMemo((p) => fs.readFileSync(p, 'utf8'));
 
 /** Пустой каталог хуков git на весь прогон: core.hooksPath временных репозиториев проб. */
 let noHooks = null;
@@ -267,38 +331,144 @@ function noHooksDir() {
 /** Имя программы git в помощнике git(); имя в кавычках в другом месте или вызов мимо помощника - красный (кейс ниже). */
 const GIT_BIN = 'git';
 /**
- * Все вызовы git проб selftest (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «изоляция git в пробах», решение техлида Р6): всегда
+ * Каталог p - в живом дереве репозитория (ROOT или под ним); сравнение в форме L.foldPath. Один
+ * признак живого дерева на все модули (ctx.inLiveTree, решение техлида Р9 E0-12AA): выход из корня -
+ * сегмент `..` целиком, каталог `..x` внутри корня - живое дерево.
+ */
+function inLiveTree(p) {
+  const rel = path.relative(L.foldPath(ROOT), L.foldPath(p));
+  return !(rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel));
+}
+/**
+ * Все вызовы git временных репозиториев проб selftest (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «изоляция git в пробах», решение техлида Р6): всегда
  * `-c core.fsmonitor=false` - глобальный fsmonitor - внешняя команда, git исполнил бы её в пробе;
  * opts.isolated - временный репозиторий пробы с коммитом: `-c core.hooksPath=<пустой каталог
  * прогона>` и `-c commit.gpgsign=false` (глобальный pre-commit и подпись машины в пробе не
- * исполняются). opts.cwd, opts.env, opts.maxBuffer - в spawn; opts.spawn и opts.bin - подмена
- * для кейсов. Результат - как у run. Боевые хуки (commit-gate, diff-hash, gates.js) и
- * isolatedGitEnv тестов этим помощником не покрыты (TECH_DEBT, Р6).
+ * исполняются). Окружение - всегда gitProbeEnv(opts.env, opts.baseEnv) (TECH_DEBT 23.10.2026 E0-12U
+ * круг 2, L-030): opts.env - добавка (автор), opts.baseEnv - окружение родителя (подмена для кейса).
+ * opts.cwd, opts.maxBuffer - в spawn; opts.spawn и opts.bin - подмена для кейсов (с подменой spawn
+ * версия git не сверяется). Результат - как у run. cwd в живом дереве (и без cwd - cwd этого процесса
+ * там же) - исключение до запуска: живое дерево зовёт gitLive с конфигом оператора (решение техлида
+ * Р8 E0-12AA). Боевые хуки (commit-gate, diff-hash, gates.js) и isolatedGitEnv тестов этим
+ * помощником не покрыты (TECH_DEBT, Р6).
  */
 function git(args, opts) {
   const o = opts || {};
+  const cwd = o.cwd === undefined ? process.cwd() : o.cwd;
+  if (inLiveTree(cwd)) throw new Error('git ' + args.join(' ').slice(0, 60) + ': cwd ' + cwd + ' в живом дереве - git временных репозиториев идёт с пустым конфигом, живое дерево зовёт gitLive');
+  if (!o.spawn) gitConfigGlobalReady();
   const pre = ['-c', 'core.fsmonitor=false'];
   if (o.isolated) pre.push('-c', 'core.hooksPath=' + noHooksDir(), '-c', 'commit.gpgsign=false');
-  const spawnOpts = {};
-  for (const key of ['cwd', 'env', 'maxBuffer']) if (o[key] !== undefined) spawnOpts[key] = o[key];
+  const spawnOpts = { env: gitProbeEnv(o.env, o.baseEnv) };
+  for (const key of ['cwd', 'maxBuffer']) if (o[key] !== undefined) spawnOpts[key] = o[key];
   return (o.spawn || run)(o.bin || GIT_BIN, pre.concat(args), spawnOpts);
 }
-/** Окружение git временного репозитория пробы: автор и коммитер заданы, глобальный конфиг машины их не подставляет. */
+/**
+ * git по живому дереву репозитория (решение техлида Р8 E0-12AA): снимок дерева (repoSnapshot),
+ * trackedFiles, check-ignore и ls-files проб гейтов. Окружение - этого процесса как есть (конфиг
+ * оператора: core.excludesFile, safe.directory - то же, что видят L.sh gates.js и files.mjs), только
+ * `-c core.fsmonitor=false`. opts.cwd - обязателен и в живом дереве (вне его - исключение); opts.isolated,
+ * opts.env, opts.baseEnv не принимаются (исключение): изоляция - дело git временных репозиториев.
+ * opts.maxBuffer - в spawn; opts.spawn и opts.bin - подмена для кейсов.
+ */
+function gitLive(args, opts) {
+  const o = opts || {};
+  const foreign = ['isolated', 'env', 'baseEnv'].filter((key) => o[key] !== undefined);
+  if (foreign.length) throw new Error('gitLive: ' + foreign.join(', ') + ' не принимается - живое дерево идёт с конфигом оператора, изоляция - у git временных репозиториев');
+  if (typeof o.cwd !== 'string' || !inLiveTree(o.cwd)) throw new Error('gitLive ' + args.join(' ').slice(0, 60) + ': cwd ' + o.cwd + ' вне живого дерева ' + ROOT + ' - временный репозиторий зовёт git/gitStrict');
+  const spawnOpts = { cwd: o.cwd };
+  if (o.maxBuffer !== undefined) spawnOpts.maxBuffer = o.maxBuffer;
+  return (o.spawn || run)(o.bin || GIT_BIN, ['-c', 'core.fsmonitor=false'].concat(args), spawnOpts);
+}
+/** Добавка к окружению git временного репозитория пробы: автор и коммитер заданы, конфиг машины их не подставляет. */
 function gitIdentityEnv() {
-  return Object.assign({}, process.env, { GIT_AUTHOR_NAME: 'p', GIT_AUTHOR_EMAIL: 'p@x', GIT_COMMITTER_NAME: 'p', GIT_COMMITTER_EMAIL: 'p@x' });
+  return { GIT_AUTHOR_NAME: 'p', GIT_AUTHOR_EMAIL: 'p@x', GIT_COMMITTER_NAME: 'p', GIT_COMMITTER_EMAIL: 'p@x' };
+}
+/** Пустой глобальный конфиг git на весь прогон (GIT_CONFIG_GLOBAL проб); снимается в конце, как noHooks (releaseGitDirs). */
+let gitConfigDir = null;
+function emptyGitConfig() {
+  if (!gitConfigDir) {
+    gitConfigDir = tempDir('gitcfg');
+    put(gitConfigDir, 'config', '');
+  }
+  return path.join(gitConfigDir, 'config');
 }
 /**
- * git(args, opts), чей сбой - исключение с подкомандой и stderr: временные репозитории проб.
- * Подкоманда - первый аргумент, который не пара `-c <ключ=значение>` (замечание ревью C13 E0-12T:
- * `-c user.name=…` впереди съедал имя шага).
+ * Каталоги git прогона (noHooks, gitConfigDir) сняты и забыты: git проб после этого берёт новые, а не
+ * путь в снятый каталог (GIT_CONFIG_GLOBAL на удалённый файл - поведение git по версии).
+ */
+function releaseGitDirs() {
+  if (noHooks) releaseTemp(noHooks);
+  noHooks = null;
+  if (gitConfigDir) releaseTemp(gitConfigDir);
+  gitConfigDir = null;
+}
+/**
+ * Окружение git проб: base (окружение родителя) по белому списку (envByList, selftest-children.js:
+ * PATH, системный каталог Windows, домашний, временный, профиль, язык и локаль), конфиги машины
+ * выключены (GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL на пустой файл прогона), extra сверху. GIT_DIR,
+ * GIT_INDEX_FILE, GIT_CONFIG_* родителя в пробу не уходят.
+ */
+function gitProbeEnv(extra, base = process.env) {
+  return CHILDREN_MOD.envByList(base, Object.assign({ GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: emptyGitConfig() }, extra || {}));
+}
+/**
+ * GIT_CONFIG_GLOBAL git понимает с 2.32: старый git молча читал бы глобальный конфиг машины в пробах.
+ * gitVersionVerdict(text) - отказ по выводу `git --version` или null; версия, которую не разобрать, -
+ * отказ (L-028). Сверка - один раз на прогон (gitConfigGlobalReady), до первого git проб; отказ -
+ * исключение в строке той пробы.
+ */
+const GIT_CONFIG_GLOBAL_SINCE = [2, 32];
+function gitVersionVerdict(text) {
+  const m = /^git version (\d+)\.(\d+)/.exec(String(text).trim());
+  if (!m) return 'git --version не разобран: ' + JSON.stringify(String(text).trim().slice(0, 60)) + ' - GIT_CONFIG_GLOBAL проб не на чем держать';
+  const [major, minor] = [Number(m[1]), Number(m[2])];
+  const [needMajor, needMinor] = GIT_CONFIG_GLOBAL_SINCE;
+  if (major > needMajor || (major === needMajor && minor >= needMinor)) return null;
+  return 'git ' + major + '.' + minor + ': GIT_CONFIG_GLOBAL проб нужен git ' + needMajor + '.' + needMinor + '+ - глобальный конфиг машины вернулся бы в пробы молча';
+}
+/**
+ * Сверка версии git один раз: ask() - ответ `git --version` (как у run). Запомнен только разобранный
+ * ответ (пропуск или отказ по версии); сбой запуска (не запустился, код не 0) - исключение без памяти,
+ * следующий git проб спросит снова (замечание ревью E0-12AA: разовый сбой не красит весь прогон).
+ */
+function gitVersionGate(ask) {
+  let verdict;
+  return () => {
+    if (verdict === undefined) {
+      const r = ask();
+      if (r.error || r.status !== 0) throw new Error('git --version: ' + ((r.error && r.error.code) || 'код ' + r.status) + ' - сверка версии повторится на следующем git проб');
+      verdict = gitVersionVerdict(r.stdout);
+    }
+    if (verdict) throw new Error(verdict);
+  };
+}
+// spawn: run - сам помощник git без сверки версии (иначе круг), окружение - то же, что у проб; cwd -
+// временный каталог ОС (вне живого дерева)
+const gitConfigGlobalReady = gitVersionGate(() => git(['--version'], { spawn: run, cwd: os.tmpdir() }));
+/**
+ * git(args, opts), чей сбой - исключение с подкомандой: временные репозитории проб. Окружение - как у
+ * git() (gitProbeEnv). Подкоманда - первый аргумент, который не пара `-c <ключ=значение>` (замечание
+ * ревью C13 E0-12T); одни пары - «нет подкоманды». Текст отказа - класс ошибки (не запустился - ошибки
+ * без pid; прерван - ошибка у запущенного: ETIMEDOUT, ENOBUFS; код выхода или сигнал) и первая строка
+ * stderr до 80 символов с путями временного, домашнего каталога и корня, заменёнными на имя (L-030).
  */
 function gitStrict(args, opts) {
   const r = git(args, opts);
   if (r.error || r.status !== 0) {
     const sub = args.find((a, i) => a !== '-c' && args[i - 1] !== '-c');
-    throw new Error('git ' + String(sub) + ': ' + String((r.error && r.error.message) || r.stderr).slice(0, 160));
+    const code = r.error && (r.error.code || 'ошибка запуска');
+    const kind = r.error ? (r.pid ? 'прерван после запуска (' + code + ')' : 'не запустился (' + code + ')') : r.status === null ? 'сигнал ' + r.signal : 'код ' + r.status;
+    throw new Error('git ' + (sub === undefined ? '(нет подкоманды, только пары -c)' : sub) + ': ' + kind + ': ' + gitStderrLine(r.stderr));
   }
   return r;
+}
+/** Первая строка stderr git до 80 символов; пути временного, домашнего каталога и корня - именами. */
+function gitStderrLine(stderr) {
+  let line = String(stderr || '').split(/\r?\n/).find((l) => l.trim()) || 'stderr пуст';
+  const names = [[ROOT, '<корень>'], [os.tmpdir(), '<TEMP>'], [os.homedir(), '<HOME>']].filter(([p]) => p);
+  for (const [p, name] of names) for (const form of [p, p.split(path.sep).join('/')]) line = line.split(form).join(name);
+  return line.trim().slice(0, 80);
 }
 
 // ------------------------------------------------------------------ 1. синтаксис хуков
@@ -337,18 +507,141 @@ function badLoadEntries(modules) {
     .filter((m) => !SELFTEST_LOADS.includes(m.load) || (m.load === null && !(typeof m.why === 'string' && m.why.trim())))
     .map((m) => m.file);
 }
+/** Записи перечня с неверным load - до первой загрузки модуля: при них цепочка графа не грузится. */
+const BAD_LOAD = badLoadEntries(SELFTEST_MODULES);
 check('модули самопроверки: каждый selftest-* каталога хуков в SELFTEST_MODULES (проба отказа - файл вне перечня)', () => {
   const bad = unlistedSelftest(fs.readdirSync(HOOKS));
   if (bad.length) return 'вне SELFTEST_MODULES: ' + bad.join(', ') + ' - модуль вне перечня не проходит пробы синтаксиса, exit, git и mkdtempSync; допиши его в SELFTEST_MODULES (harness-selftest.js)';
   const sample = unlistedSelftest(['selftest-x.js', 'selftest-y.mjs', 'selftest-z.cjs', 'selftest-graph.js', 'lib.js']);
   if (sample.join() !== 'selftest-x.js,selftest-y.mjs,selftest-z.cjs') return 'файл вне перечня не пойман - сверка слепа: ' + JSON.stringify(sample);
-  const badLoad = badLoadEntries(SELFTEST_MODULES);
-  if (badLoad.length) return 'поле load вне ' + JSON.stringify(SELFTEST_LOADS) + ' или load: null без why: ' + badLoad.join(', ') + ' - опечатка в load роняет прогон TypeError до report(); исправь запись в SELFTEST_MODULES (harness-selftest.js)';
+  if (BAD_LOAD.length) return 'поле load вне ' + JSON.stringify(SELFTEST_LOADS) + ' или load: null без why: ' + BAD_LOAD.join(', ') + ' - модуль с такой записью не грузится (цепочка графа и пробы гейтов не гонялись); исправь запись в SELFTEST_MODULES (harness-selftest.js)';
   const loadSample = badLoadEntries([
     { file: 'a.js', load: 'gate' }, { file: 'b.js', load: null }, { file: 'c.js', load: 'текст причины' },
     { file: 'd.js', load: 'graph' }, { file: 'e.js', load: 'gates' }, { file: 'f.js', load: null, why: 'причина' },
+    { file: 'g.js', load: 'grap' },
   ]);
-  return loadSample.join() === 'a.js,b.js,c.js' || 'неверное поле load не поймано - сверка слепа: ' + JSON.stringify(loadSample);
+  return loadSample.join() === 'a.js,b.js,c.js,g.js' || 'неверное поле load не поймано - сверка слепа: ' + JSON.stringify(loadSample);
+});
+
+/**
+ * Полнота перечня по require-рёбрам (TECH_DEBT 23.10.2026 E0-12U круг 3): маска SELFTEST_FILE не
+ * видит помощника с другим именем, которого грузит модуль самопроверки. Обход - от этого файла и
+ * каждого модуля перечня по require с относительным литералом (в .mjs - ещё import from и вызов
+ * createRequire с ним) и по путям каталога хуков в программах дочернего node
+ * (`JSON.stringify(path.join(HOOKS, '<файл>'))`); хуки HOOK_FILES вне перечня (lib.js, gates.js,
+ * commit-gate.js...) - концы рёбер, их собственные require не обходятся (они законно выходят через
+ * exit). Достигнутый файл вне перечня и не хук - отказ. Разбор - регэксп по тексту (решение техлида
+ * Р2 E0-12AA: AST - E0-12AD), fail-closed (L-028): require с нелитеральным аргументом - отказ, кроме
+ * разобранных форм REQUIRE_NOT_EDGE (у каждой причина; форма, которую обход не встретил, - красная).
+ */
+const REQUIRE_CALL = /\brequire\s*\(|\bcreateRequire\(import\.meta\.url\)\s*\(|\bimport\s*\(/g;
+const IMPORT_FROM = /\b(?:from|import)\s*(['"])([^'"]+)\1/g;
+const REQUIRE_LITERAL = /^\s*(['"`])([^'"`\s+]*)\1\s*\)/;
+const REQUIRE_HOOK_PATH = /^' \+ JSON\.stringify\(path\.join\((?:HOOKS|hooks), '([^']+)'\)\) \+ '\)/;
+const REQUIRE_NOT_EDGE = [
+  { file: 'harness-selftest.js', re: /^path\.join\(HOOKS, file\)\)/, why: 'загрузчик loadSelftestModule: грузит только файлы перечня SELFTEST_MODULES' },
+  { file: 'harness-selftest.js', re: /^' \+ JSON\.stringify\(module\) \+ '\)/, why: 'модуль scripts/lib/*.mjs проекта в дочернем node (pathToFileURL от корня), не каталог хуков' },
+  { file: 'selftest-graph-cases.js', re: /^' \+ JSON\.stringify\(module\) \+ '\)/, why: 'scripts/lib/files.mjs проекта в дочернем node, не каталог хуков' },
+  { file: 'selftest-graph-cases.js', re: /^G\.resolveFrom\('yaml', /, why: 'пакет yaml из node_modules корня (resolveFrom модуля графа)' },
+  { file: 'selftest-graph.js', re: /^resolveFrom\('yaml', /, why: 'пакет yaml из node_modules корня' },
+  { file: 'selftest-turbo.js', re: /^require\.resolve\('yaml', /, why: 'пакет yaml из node_modules корня' },
+  { file: 'selftest-int.js', re: /^path\.join\(ROOT, 'test', 'imports\.ts'\)\)/, why: 'test/imports.ts проекта, не каталог хуков' },
+  { file: 'selftest-int.js', re: /^esm\)/, why: 'текст комментария: require для ESM (require-esm) - механизм Node, а не вызов' },
+  { file: 'selftest-int-cases.js', re: /^name\);\\n/, why: 'текст стаба int-пробы: нестроковый спецификатор (DYNAMIC_SPECIFIER)' },
+  { file: 'selftest-gates.js', re: /^path\.join\(ROOT, 'scripts', 'lib', 'manifest\.mjs'\)\)/, why: 'scripts/lib/manifest.mjs проекта (близнец workspaceGlobs), не каталог хуков' },
+  { file: 'selftest-gates.js', re: /^esm\)/, why: 'текст комментария и имени строки: require для ESM (require-esm) - механизм Node, а не вызов' },
+  { file: 'selftest-gates-run.js', re: /^' \+ JSON\.stringify\(file\) \+ '\)/, why: 'gates.js пробы require в дочернем node - хук HOOK_FILES' },
+  { file: 'selftest-gate-runner.js', re: /^cfg\.gatesFile\)/, why: 'gates.js в дочернем node проб запуска - хук HOOK_FILES' },
+  { file: 'selftest-gate-runner.js', re: /^<этот файл>\)/, why: 'текст комментария' },
+];
+/**
+ * Рёбра текста text модуля хуков file: edges - файлы каталога хуков, которые он грузит (пути без ./);
+ * bad - «<строка>: …» нелитерального require вне REQUIRE_NOT_EDGE и пути вне каталога хуков; hits -
+ * индексы записей REQUIRE_NOT_EDGE, которые встретились.
+ */
+function requireScan(text, file) {
+  const edges = [];
+  const bad = [];
+  const hits = new Set();
+  const lineOf = (i) => text.slice(0, i).split('\n').length;
+  const relative = (spec, at) => {
+    if (spec.startsWith('./') && !spec.slice(2).includes('/') && !spec.includes('..')) edges.push(spec.slice(2));
+    else if (spec.startsWith('.') || spec.startsWith('/') || /^[A-Za-z]:[\\/]/.test(spec)) bad.push(lineOf(at) + ': ' + spec + ' - путь вне каталога хуков');
+  };
+  for (const m of text.matchAll(REQUIRE_CALL)) {
+    const rest = text.slice(m.index + m[0].length);
+    const lit = REQUIRE_LITERAL.exec(rest);
+    if (lit) {
+      relative(lit[2], m.index);
+      continue;
+    }
+    const hook = REQUIRE_HOOK_PATH.exec(rest);
+    if (hook) {
+      edges.push(hook[1]);
+      continue;
+    }
+    const k = REQUIRE_NOT_EDGE.findIndex((x) => x.file === file && x.re.test(rest));
+    if (k !== -1) {
+      hits.add(k);
+      continue;
+    }
+    bad.push(lineOf(m.index) + ': ' + m[0].replace(/\s+/g, '') + rest.slice(0, 40).split('\n')[0] + ' - нелитеральный аргумент, что грузит модуль, обход не знает');
+  }
+  // import from - только в ESM (.mjs): в CommonJS такой текст - строка программы или стаба
+  if (file.endsWith('.mjs')) for (const m of text.matchAll(IMPORT_FROM)) relative(m[2], m.index);
+  return { edges, bad, hits };
+}
+/**
+ * Обход рёбер requireScan от harness-selftest.js и модулей listed в каталоге dir; hooks - хуки
+ * вне перечня (концы рёбер). io - { read, isFile } (подмена для кейса). { bad, hits }: bad - отказы
+ * «<файл>:<строка>: …» и «<файл> -> <файл> вне SELFTEST_MODULES».
+ */
+function selftestReach(dir, listed, hooks, io = { read: (p) => fs.readFileSync(p, 'utf8'), isFile: L.isFilePresent }) {
+  const queue = ['harness-selftest.js'].concat(listed);
+  const seen = new Set();
+  const bad = [];
+  const hits = new Set();
+  while (queue.length) {
+    const f = queue.shift();
+    if (seen.has(f)) continue;
+    seen.add(f);
+    if (!io.isFile(path.join(dir, f))) {
+      bad.push(f + ': файла нет');
+      continue;
+    }
+    const text = io.read(path.join(dir, f));
+    const scan = requireScan(text, f);
+    for (const k of scan.hits) hits.add(k);
+    for (const b of scan.bad) bad.push(f + ':' + b);
+    for (const e of scan.edges) {
+      if (hooks.includes(e)) continue;
+      if (!listed.includes(e) && e !== 'harness-selftest.js') bad.push(f + ' -> ' + e + ' вне SELFTEST_MODULES');
+      queue.push(e);
+    }
+  }
+  return { bad, hits };
+}
+check('модули самопроверки: каждый файл, который грузят этот файл и модули перечня (require-рёбра), - в SELFTEST_MODULES или хук HOOK_FILES (проба отказа - помощник с другим именем, нелитеральный require)', () => {
+  const listed = SELFTEST_MODULES.map((m) => m.file);
+  const hooks = HOOK_FILES.filter((f) => !listed.includes(f));
+  const live = selftestReach(HOOKS, listed, hooks);
+  if (live.bad.length) return 'рёбра вне перечня: ' + live.bad.join('; ') + ' - допиши модуль в SELFTEST_MODULES (harness-selftest.js) или разбери форму в REQUIRE_NOT_EDGE';
+  const stale = REQUIRE_NOT_EDGE.filter((x, k) => !live.hits.has(k)).map((x) => x.file + ' ' + String(x.re));
+  if (stale.length) return 'формы REQUIRE_NOT_EDGE, которых обход не встретил: ' + stale.join(', ') + ' - сними запись';
+  // вызовы склеены из частей: иначе обход поймал бы сам кейс в тексте этого файла
+  const call = (arg) => 'req' + 'uire(' + arg + ');';
+  const planted = {
+    'harness-selftest.js': 'const a = ' + call("'./helper-x.js'") + '\nconst b = ' + call('name') + '\n',
+    'helper-x.js': call("'./lib.js'") + '\n' + call("'../up.js'") + '\n',
+  };
+  const io = { read: (p) => planted[path.basename(p)], isFile: (p) => Object.prototype.hasOwnProperty.call(planted, path.basename(p)) };
+  const got = JSON.stringify(selftestReach('x', [], ['lib.js'], io).bad);
+  const want = JSON.stringify([
+    'harness-selftest.js:2: ' + call('name') + ' - нелитеральный аргумент, что грузит модуль, обход не знает',
+    'harness-selftest.js -> helper-x.js вне SELFTEST_MODULES',
+    'helper-x.js:2: ../up.js - путь вне каталога хуков',
+  ]);
+  return got === want || 'на подменённом каталоге ожидалось ' + want + ', получено ' + got;
 });
 
 /** Строки текста text, на которых re находит совпадение: номера с 1. */
@@ -369,7 +662,7 @@ const NO_EXIT_FILES = SELFTEST_MODULES.filter((m) => !m.exit).map((m) => m.file)
 check(NO_EXIT_FILES.join(', ') + ' не выходят через exit процесса (Р3, B4), вызов exit в тексте - отказ', () => {
   const bad = [];
   for (const f of NO_EXIT_FILES) {
-    for (const n of linesMatching(fs.readFileSync(path.join(HOOKS, f), 'utf8'), EXIT_CALL)) bad.push(f + ':' + n);
+    for (const n of linesMatching(scannedText(f), EXIT_CALL)) bad.push(f + ':' + n);
   }
   if (bad.length) return 'exit процесса: ' + bad.join(', ');
   return linesMatching('const a = 1;\nprocess' + '.exit(0);\n', EXIT_CALL).join() === '2' || 'вызов exit в тексте не пойман - сверка слепа';
@@ -377,7 +670,7 @@ check(NO_EXIT_FILES.join(', ') + ' не выходят через exit проц�
 
 /**
  * Модуль самопроверки file (каталог хуков) грузится после пробы синтаксиса (её результат -
- * SYNTAX_OK), как gates.js - после пробы require (gatesModuleSafe). Синтаксическая ошибка - красная
+ * SYNTAX_OK), как gates.js - после пробы require, gatesModuleSafe. Синтаксическая ошибка - красная
  * строка синтаксиса, исключение при загрузке - одна строка `<file> загружается require`; в обоих
  * случаях null: пробы модуля не гоняются (их называет своя строка), остальные пробы идут.
  */
@@ -396,45 +689,98 @@ function loadSelftestModule(file) {
  * если загрузились нижние: без любого G = null - пробы графа не гоняются (строка «граф turbo: dry-JSON
  * настоящего дерева» называет их), остальные пробы идут. Имена экспортов цепочки не пересекаются
  * (E0-12U, решение техлида B3 после круга 3): имя, которое уже отдал модуль ниже, - строка
- * `<файл> загружается require` и G = null, а не тихое затенение раннего экспорта поздним.
+ * `<файл> загружается require` и G = null, а не тихое затенение раннего экспорта поздним. Порядок
+ * загрузки - по require-рёбрам цепочки (graphChainOrder), не по порядку записей перечня (TECH_DEBT
+ * 23.10.2026 E0-12U круг 2): перестановка записей грузит так же. Запись перечня с неверным load
+ * (BAD_LOAD) - цепочка не грузится: G = null, причину называет проба полноты перечня.
  */
-const G = loadGraphChain();
-function loadGraphChain() {
+const G = graphChainOnRun();
+function graphChainOnRun() {
+  if (BAD_LOAD.length) return null;
+  const r = loadGraphChain(SELFTEST_MODULES, loadSelftestModule, hookRequireEdges);
+  if (r.error) fail(r.error.file + ' загружается require', r.error.note);
+  return r.merged;
+}
+/** Файлы каталога хуков, которые file грузит require с относительным литералом (requireScan). */
+function hookRequireEdges(file) {
+  return requireScan(scannedText(file), file).edges;
+}
+/** Файлы files в порядке загрузки: каждый - после файлов files, которые он грузит (edgesOf); круг - исключение. */
+function graphChainOrder(files, edgesOf) {
+  const order = [];
+  const state = new Map();
+  const visit = (f, trail) => {
+    if (state.get(f) === 'done') return;
+    if (state.get(f) === 'open') throw new Error('круг require в цепочке модуля графа: ' + trail.concat(f).join(' -> '));
+    state.set(f, 'open');
+    for (const d of edgesOf(f)) if (files.includes(d)) visit(d, trail.concat(f));
+    state.set(f, 'done');
+    order.push(f);
+  };
+  for (const f of files) visit(f, []);
+  return order;
+}
+/**
+ * Цепочка модуля графа из модулей modules с load: 'graph': load(file) - модуль или null (не
+ * загрузился - его строка уже названа), edgesOf(file) - его require-рёбра. { merged } - замороженное
+ * объединение экспортов или null; error - { file, note } строки `<файл> загружается require`
+ * (пересечение имён экспортов, круг рёбер). modules, load и edgesOf - параметры для кейсов.
+ */
+function loadGraphChain(modules, load, edgesOf) {
+  const files = modules.filter((x) => x.load === 'graph').map((x) => x.file);
+  let order;
+  try {
+    order = graphChainOrder(files, edgesOf);
+  } catch (e) {
+    return { merged: null, error: { file: files.join(', '), note: (e && e.message) || String(e) } };
+  }
   const merged = {};
   const owner = {};
-  for (const m of SELFTEST_MODULES.filter((x) => x.load === 'graph')) {
-    const mod = loadSelftestModule(m.file);
-    if (!mod) return null;
+  for (const file of order) {
+    const mod = load(file);
+    if (!mod) return { merged: null };
     const clash = Object.keys(mod).filter((k) => Object.prototype.hasOwnProperty.call(owner, k));
     if (clash.length) {
-      fail(m.file + ' загружается require', 'экспорт ' + clash.map((k) => k + ' (уже из ' + owner[k] + ')').join(', ') +
-        ' - имена экспортов цепочки модуля графа пересекаются, поздний затенил бы ранний в G; переименуй экспорт');
-      return null;
+      return {
+        merged: null,
+        error: {
+          file,
+          note: 'экспорт ' + clash.map((k) => k + ' (уже из ' + owner[k] + ')').join(', ') +
+            ' - имена экспортов цепочки модуля графа пересекаются, поздний затенил бы ранний в G; переименуй экспорт',
+        },
+      };
     }
-    for (const k of Object.keys(mod)) owner[k] = m.file;
+    for (const k of Object.keys(mod)) owner[k] = file;
     Object.assign(merged, mod);
   }
-  return Object.freeze(merged);
+  return { merged: Object.freeze(merged) };
 }
+// Порядок загрузки цепочки - по рёбрам (TECH_DEBT 23.10.2026 E0-12U круг 2): перечень с записями
+// цепочки в обратном порядке грузит её в том же порядке и с теми же экспортами
+check('модуль графа: цепочка грузится по require-рёбрам (turbo -> graph -> stub) при любом порядке записей перечня', () => {
+  if (!G) return 'модуль графа не загружен - порядок не сверить (причину называет строка загрузки или полноты перечня)';
+  const seen = [];
+  const r = loadGraphChain(SELFTEST_MODULES.slice().reverse(), (file) => {
+    seen.push(file);
+    return loadSelftestModule(file);
+  }, hookRequireEdges);
+  const want = ['selftest-turbo.js', 'selftest-graph.js', 'selftest-stub.js'];
+  if (JSON.stringify(seen) !== JSON.stringify(want)) return 'порядок загрузки ' + JSON.stringify(seen) + ', ожидался ' + JSON.stringify(want);
+  const keys = (o) => JSON.stringify(Object.keys(o || {}).sort());
+  return keys(r.merged) === keys(G) || 'экспорты при обратном порядке записей: ' + keys(r.merged);
+});
+// Ветка B3 (TECH_DEBT 23.10.2026 E0-12U после Fix 3): имя экспорта, которое уже отдал нижний модуль
+// цепочки, - отказ с именем экспорта и модулем-владельцем; модули - объекты-заглушки
+check('модуль графа: имя экспорта, уже отданное нижним модулем цепочки, - отказ с именем (при любом порядке записей)', () => {
+  const mods = { 'a.js': { x: 1, y: 2 }, 'b.js': { y: 3 } };
+  const edges = (f) => (f === 'b.js' ? ['a.js'] : []);
+  const want = JSON.stringify({ merged: null, error: { file: 'b.js', note: 'экспорт y (уже из a.js) - имена экспортов цепочки модуля графа пересекаются, поздний затенил бы ранний в G; переименуй экспорт' } });
+  const bad = [[{ file: 'a.js', load: 'graph' }, { file: 'b.js', load: 'graph' }], [{ file: 'b.js', load: 'graph' }, { file: 'a.js', load: 'graph' }]]
+    .map((modules) => JSON.stringify(loadGraphChain(modules, (f) => mods[f], edges)))
+    .filter((got) => got !== want);
+  return !bad.length || 'ожидалось ' + want + ', получено ' + bad.join(' | ');
+});
 
-/*
- * Состояние проб - во временной папке на весь прогон (SF_HOOK_STATE_DIR, читает только
- * lib.js:statePath()). Переменная ставится и этому процессу - сюда смотрят L.statePath()
- * в пробах, - и каждому хуку в probe(). Боевой путь считается без переопределения извне;
- * его байты (или null, если файла нет) снимаются до первой пробы, и последняя проба
- * сравнивает их с текущими. Папка убирается на выходе процесса, в том числе по Ctrl+C.
- */
-delete process.env.SF_HOOK_STATE_DIR;
-const LIVE_STATE = path.resolve(L.statePath());
-function liveBytes() {
-  try {
-    return fs.readFileSync(LIVE_STATE);
-  } catch (e) {
-    if (L.isGone(e)) return null;
-    throw e;
-  }
-}
-const LIVE_BYTES = liveBytes();
 /**
  * Снимок рабочего дерева до первой пробы: последняя проба сверяет с ним текущий. Файлы проб
  * живут во временных каталогах (tempDir, withScratchTree), и любая разница - проба, которая пишет
@@ -451,12 +797,14 @@ const LIVE_BYTES = liveBytes();
  * Правка руками или другой процесс в то же время (IDE, turbo daemon) даёт ту же красную строку -
  * тогда перезапуск; пути, которые пишет сессия во время фонового прогона (.qa-state, файлы дела),
  * treeDiff не сравнивает - именованный перечень TREE_NOT_COMPARED (ОВ2 E0-12T).
- * root - корень рабочего дерева (по умолчанию репозиторий; проба сверки берёт временный).
+ * root - корень рабочего дерева (по умолчанию репозиторий - gitLive с конфигом оператора, решение
+ * техлида Р8 E0-12AA; проба сверки берёт временный - git).
  * Возвращает Map<запись, отпечаток>; сбой git - исключение (его ловит проба, не верхний уровень).
  */
 function repoSnapshot(root = ROOT) {
+  const call = inLiveTree(root) ? gitLive : git;
   const listing = (args) => {
-    const r = git(args, { cwd: root, maxBuffer: LISTING_MAX_BUFFER });
+    const r = call(args, { cwd: root, maxBuffer: LISTING_MAX_BUFFER });
     if (r.error || r.status !== 0) throw new Error('git ' + args[0] + ': ' + String((r.error && r.error.message) || r.stderr || 'код ' + r.status).slice(0, 160));
     return String(r.stdout).split('\0');
   };
@@ -507,9 +855,10 @@ function snapshotPrint(abs, ignored, io) {
  * причина. Ни glob, ни regex: новая запись - новая строка здесь, с причиной и кейсом в пробе сверки.
  */
 const TREE_NOT_COMPARED = [
-  { path: '.claude/.qa-state', why: 'боевое состояние хуков сессии: пишут Stop- и PostToolUse-хуки во время фонового прогона; пробы сверяет строка «боевой .qa-state байт в байт»' },
+  { path: '.claude/.qa-state', why: 'боевое состояние хуков сессии: пишут Stop- и PostToolUse-хуки во время фонового прогона; что пробы туда не пишут, держит run (hookStateGuard, решение техлида Р3 E0-12AA)' },
   { prefix: '.claude/.qa-state.', suffix: '.tmp', why: 'временный файл атомарной записи .qa-state (lib.js: <путь>.<pid>.tmp) тех же хуков сессии' },
   { prefix: 'tasks/', why: 'файлы дела: их пишет оркестратор и агенты, пока идут гейты; пробы в tasks/ не пишут' },
+  { path: '.claude/.task-current', why: 'путь к файлу дела текущей задачи: его пишет оркестратор (/auto, /task), пока идут гейты; пробы его не пишут' },
 ];
 /** Путь rel (от корня) под записью TREE_NOT_COMPARED: точное равенство, префикс, префикс+суффикс. */
 function treeNotCompared(rel) {
@@ -543,9 +892,6 @@ try {
 } catch (e) {
   LIVE_TREE_ERROR = (e && e.message) || String(e);
 }
-// каталог состояния проб живёт до выхода процесса: его снимает обработчик exit реестра (TEMP.dropAll)
-const PROBE_STATE_DIR = tempDir('state');
-process.env.SF_HOOK_STATE_DIR = PROBE_STATE_DIR;
 
 /**
  * Запуск хука с JSON на stdin (hooksDir - каталог хуков, по умолчанию боевой; extraEnv -
@@ -591,11 +937,7 @@ function withScratchTree(fn) {
     const abs = (rel) => path.join(dir, ...rel.split('/'));
     return fn({
       dir,
-      write: (rel, body) => {
-        fs.mkdirSync(path.dirname(abs(rel)), { recursive: true });
-        fs.writeFileSync(abs(rel), body);
-        return abs(rel);
-      },
+      write: (rel, body) => put(dir, rel, body),
       standards: (rel) => probe('standards.js', { tool_input: { file_path: abs(rel) } }, dir, hooks, { CLAUDE_HOOK_DEBUG: '1' }),
     });
   } finally {
@@ -690,9 +1032,11 @@ const ROUTE_FORMS = ['apps/api/src/routes/health/index.ts', 'apps/api/src/routes
  * дерева (selftest-tree-graph.js), корни и корневые скрипты (selftest-roots.js), int-проба прогона
  * (selftest-int-cases.js), выбор гейтов (selftest-gates.js), синтетические кейсы модулей графа
  * (selftest-graph-cases.js). Каждый грузится после пробы синтаксиса (loadSelftestModule) и получает
- * ctx параметром: замороженная общая инфраструктура прогона - одни results, реестр temp,
- * LIVE_CHILDREN, SYNTAX_OK и G на все модули (свой реестр или набор в модуле оставил бы каталоги и
- * детей мимо проверок в конце прогона). Модули друг друга не require. Сборка - в двух местах: этот
+ * ctx параметром: замороженная общая инфраструктура прогона - одни results, вид реестра temp без
+ * dropTemp - tempView, точка запуска детей - run и spawn, LIVE_CHILDREN, SYNTAX_OK и G на все модули
+ * (свой реестр или набор в модуле оставил бы каталоги и детей мимо проверок в конце прогона). Модули
+ * проб гейтов друг друга не require; общие модули без состояния прогона (selftest-children.js,
+ * selftest-vitest-protocol.cjs) берут через require. Сборка - в двух местах: этот
  * файл грузит модули, зовёт registerGateRunProbes и createIntProbe и передаёт остальные модули
  * registerGateProbes (selftest-gates.js) в deps; их фабрики (createTreeGraph, createIntRun,
  * createRootProbes, registerGraphCases) зовёт selftest-gates.js в точках прогона, где стоят их строки:
@@ -701,34 +1045,84 @@ const ROUTE_FORMS = ['apps/api/src/routes/health/index.ts', 'apps/api/src/routes
  * Модуль не загрузился - его строка синтаксиса или require и одна строка «пробы гейтов:
  * модули самопроверки загружены» с перечнем не гонявшихся проб; остальной selftest идёт.
  */
+/**
+ * Вид реестра temp для модулей - только то, что они читают: dropAll (кейс порядка обработчиков exit).
+ * Без dropTemp - TECH_DEBT 23.10.2026 E0-12U круг 2: каталоги проб снимает releaseTemp.
+ */
+const tempView = Object.freeze({ dropAll: TEMP.dropAll });
 const ctx = Object.freeze({
-  L, HOOKS, CLAUDE, ROOT, G, SYNTAX_OK, SKIPPED, LISTING_MAX_BUFFER, LIVE_CHILDREN, TEMP, ROUTE_FORMS,
+  L, HOOKS, CLAUDE, ROOT, G, SYNTAX_OK, SKIPPED, LISTING_MAX_BUFFER, LIVE_CHILDREN, LIVE_STATE, tempView, ROUTE_FORMS,
   results, check, outcome, snapshotGate, gateVerdict, refusedCheck, refusalVerdict,
-  run, git, tempDir, releaseTemp, absent, readJson, copyHooksTo, killLiveChildren, killLiveChildrenOnExit,
+  run, spawn: LAUNCH.spawn, git, gitStrict, gitLive, inLiveTree, tempDir, put, releaseTemp, holdTemp, unholdTemp, dropFailures: () => DROP_FAILURES.length, absent, readJson, copyHooksTo,
+  killLiveChildren, killLiveChildrenOnExit,
   repoRules,
 });
-const GATE_FILES = SELFTEST_MODULES.filter((m) => m.load === 'gates').map((m) => m.file);
-const GATE_MODULES = new Map(GATE_FILES.map((file) => [file, loadSelftestModule(file)]));
-const gateModule = (file) => GATE_MODULES.get(file);
-const GATE_RUN = gateModule('selftest-gates-run.js') ? gateModule('selftest-gates-run.js').registerGateRunProbes(ctx) : null;
-const GATES = GATE_RUN && GATE_FILES.every((file) => gateModule(file))
-  ? gateModule('selftest-gates.js').registerGateProbes(ctx, {
-    int: gateModule('selftest-int.js').createIntProbe(ctx),
-    gateRun: GATE_RUN,
-    treeGraph: gateModule('selftest-tree-graph.js'),
-    roots: gateModule('selftest-roots.js'),
-    intCases: gateModule('selftest-int-cases.js'),
-    cases: gateModule('selftest-graph-cases.js'),
-  })
-  : null;
-if (!GATE_RUN || !GATES) {
-  const missing = GATE_FILES.filter((file) => !gateModule(file));
-  const blocked = [];
-  if (!GATE_RUN) blocked.push('пробы запуска gates.js (selftest-gates-run.js)');
-  blocked.push('пробы выбора гейтов, путей note, графа turbo, корней и int-пробы (' + GATE_FILES.filter((file) => file !== 'selftest-gates-run.js').join(', ') + ')');
-  blocked.push('мемо прогона и ответ дочернего vitest в конце прогона');
-  fail('пробы гейтов: модули самопроверки загружены', 'не загружены: ' + missing.join(', ') + '; не гонялись: ' + blocked.join('; '));
+/**
+ * Модули сборки проб гейтов по ключам deps - из всего перечня по имени, а не из отобранных по load
+ * (TECH_DEBT 23.10.2026 E0-12U после Fix 3): модуль с опечаткой в load не загружен и назван строкой
+ * сборки, а не TypeError до report().
+ */
+const GATE_DEPS = {
+  run: 'selftest-gates-run.js',
+  int: 'selftest-int.js',
+  treeGraph: 'selftest-tree-graph.js',
+  roots: 'selftest-roots.js',
+  intCases: 'selftest-int-cases.js',
+  gates: 'selftest-gates.js',
+  cases: 'selftest-graph-cases.js',
+};
+/**
+ * Сборка проб гейтов: modules - перечень, load(file) - модуль или null, c - ctx. Модуль GATE_DEPS
+ * грузится, только если его запись в modules - load: 'gates'; иначе или при сбое загрузки он в missing.
+ * { gateRun, gates, missing, unwired }: unwired - модули с load: 'gates' вне GATE_DEPS (их не зовёт
+ * никто). Параметры - для кейса на подменённом перечне.
+ */
+function assembleGateProbes(modules, load, c) {
+  const declared = modules.filter((m) => m.load === 'gates').map((m) => m.file);
+  const files = Object.values(GATE_DEPS);
+  const loaded = new Map(files.map((file) => [file, declared.includes(file) ? load(file) : null]));
+  const mod = (key) => loaded.get(GATE_DEPS[key]);
+  const missing = files.filter((file) => !loaded.get(file));
+  const unwired = declared.filter((file) => !files.includes(file));
+  const gateRun = mod('run') ? mod('run').registerGateRunProbes(c) : null;
+  const gates = gateRun && !missing.length
+    ? mod('gates').registerGateProbes(c, {
+      int: mod('int').createIntProbe(c),
+      gateRun,
+      treeGraph: mod('treeGraph'),
+      roots: mod('roots'),
+      intCases: mod('intCases'),
+      cases: mod('cases'),
+    })
+    : null;
+  return { gateRun, gates, missing, unwired };
 }
+const GATE_ASSEMBLY = assembleGateProbes(SELFTEST_MODULES, loadSelftestModule, ctx);
+const GATE_RUN = GATE_ASSEMBLY.gateRun;
+const GATES = GATE_ASSEMBLY.gates;
+if (!GATE_RUN || !GATES) {
+  const blocked = [];
+  if (!GATE_RUN) blocked.push('пробы запуска gates.js (' + GATE_DEPS.run + ')');
+  blocked.push('пробы выбора гейтов, путей note, графа turbo, корней и int-пробы (' + Object.values(GATE_DEPS).filter((file) => file !== GATE_DEPS.run).join(', ') + ')');
+  blocked.push('ответ дочернего vitest в конце прогона');
+  fail('пробы гейтов: модули самопроверки загружены', 'не загружены (сбой загрузки или load не \'gates\' в SELFTEST_MODULES): ' + GATE_ASSEMBLY.missing.join(', ') + '; не гонялись: ' + blocked.join('; '));
+}
+if (GATE_ASSEMBLY.unwired.length) fail('пробы гейтов: каждый модуль с load: \'gates\' собран', 'не в GATE_DEPS (harness-selftest.js): ' + GATE_ASSEMBLY.unwired.join(', '));
+// Опечатка load (TECH_DEBT 23.10.2026 E0-12U после Fix 3): перечень, где selftest-int.js - 'gate', а
+// selftest-tree-graph.js - 'grap', собирается без исключения - оба названы, пробы гейтов не собраны
+check('пробы гейтов: опечатка load в перечне (\'gate\', \'grap\') - модули названы строкой сборки, а не TypeError до report()', () => {
+  const typo = SELFTEST_MODULES.map((m) => (m.file === GATE_DEPS.int ? Object.assign({}, m, { load: 'gate' }) : m.file === GATE_DEPS.treeGraph ? Object.assign({}, m, { load: 'grap' }) : m));
+  const stub = { registerGateRunProbes: () => ({ stub: true }), registerGateProbes: () => { throw new Error('сборка без модулей'); }, createIntProbe: () => ({}) };
+  let got;
+  try {
+    got = assembleGateProbes(typo, () => stub, ctx);
+  } catch (e) {
+    return 'исключение вместо строки: ' + ((e && e.message) || String(e));
+  }
+  const want = JSON.stringify({ gates: null, missing: [GATE_DEPS.int, GATE_DEPS.treeGraph] });
+  const seen = JSON.stringify({ gates: got.gates, missing: got.missing });
+  return seen === want || 'ожидалось ' + want + ', получено ' + seen;
+});
 
 
 // ------------------------------------------------------------------ 3. шапки агентов и команд
@@ -881,43 +1275,86 @@ check('commitGate.weakeningExempt - ровно ожидаемый перечен
  * harness-selftest.js - не deny; та же строка в конце selftest-gates.js (вне исключений) - deny,
  * отказ называет его с номером строки и не называет исключённый файл. Литерал склеен: иначе его
  * поймал бы замок на этом файле.
+ *
+ * Сторона пропуска засчитывается только по разобранному решению (TECH_DEBT 23.10.2026 E0-12U после
+ * Fix 3): код 0, stdout пуст или JSON с решением allow/без решения, нет HOOK_ERROR; падение хука (код не
+ * 0, stdout не JSON, исключение внутри guard) - отказ пробы, а не пропуск. Замок печатает один пример
+ * на файл и правило (break в checkWeakenings остаётся, решение техлида Р4 E0-12AA): проба сверяет
+ * номер своей строки, и W02 выше неё в том же файле - отказ «проба неопределима», а не ложный красный.
+ * prep(hooks) - правка копии хуков до первой пробы (кейсы падения хука и чужого W02).
  */
-check('commit-gate: W02 в модуле самопроверки вне weakeningExempt - отказ с файлом и строкой, тот же литерал в исключённом harness-selftest.js - пропуск', () => {
+function commitDecision(r) {
+  if (r.err.includes(HOOK_ERROR)) return { why: 'commit-gate.js упал внутри guard - ' + r.err.slice(0, 160) };
+  if (r.code !== 0) return { why: 'commit-gate.js: код ' + r.code + ' ' + r.err.slice(0, 120) };
+  if (!r.out.trim()) return { decision: '' };
+  try {
+    const out = JSON.parse(r.out).hookSpecificOutput;
+    return { decision: (out && out.permissionDecision) || '' };
+  } catch (_) {
+    return { why: 'commit-gate.js: stdout не JSON - ' + JSON.stringify(r.out.slice(0, 120)) };
+  }
+}
+/** Сторона пропуска: решение разобрано и это allow или его нет; иначе строка причины. */
+function commitPassed(r, label) {
+  const d = commitDecision(r);
+  if (d.why) return label + ': ' + d.why;
+  return d.decision === '' || d.decision === 'allow' || label + ': решение ' + JSON.stringify(d.decision);
+}
+const W02_PLANTED = 'const cmd = "next build |' + '| true";';
+function weakeningLockProbe(prep) {
   const env = gitIdentityEnv();
   return withScratchTree((tree) => {
     gitStrict(['init', '-q', '--template=', '-b', 'main'], { cwd: tree.dir, env, isolated: true });
     const hooks = path.join(tree.dir, '.claude', 'hooks');
+    if (prep) prep(hooks);
     const commit = () => probe('commit-gate.js', { tool_input: { command: 'git commit -m "feat: x"' } }, tree.dir, hooks, { CLAUDE_HOOK_DEBUG: '1' });
     const weak = (r) => r.out.match(/[\w./-]+:\d+ {2}\[W0\d\]/g) || [];
-    // решение хука: L.deny - JSON с permissionDecision deny и код 0; строки [W..] без него - не отказ
-    const decision = (r) => {
-      try {
-        return r.code === 0 ? JSON.parse(r.out).hookSpecificOutput.permissionDecision : 'код ' + r.code;
-      } catch (_) {
-        return 'не JSON: ' + JSON.stringify(r.out.slice(0, 120));
-      }
-    };
-    const clean = commit();
-    if (clean.err.includes(HOOK_ERROR)) return 'commit-gate.js упал внутри guard - ' + clean.err.slice(0, 160);
-    if (decision(clean) === 'deny') return 'чистая копия хуков: коммит запрещён - ' + (weak(clean).join(', ') || clean.out.slice(0, 160));
-    const line = 'const cmd = "next build |' + '| true";';
+    const ownLines = (r) => weak(r).map((x) => /^sf\/\.claude\/hooks\/selftest-gates\.js:(\d+) {2}\[W02\]$/.exec(x)).filter(Boolean).map((m) => Number(m[1]));
+    const undecidable = (n) => 'в файле уже есть W02 на строке ' + n + ', проба неопределима (замок печатает один пример на файл и правило)';
+    const first = commit();
+    const firstDecision = commitDecision(first);
+    // чужой W02 в selftest-gates.js до строки пробы: замок назовёт его, а не строку пробы
+    if (firstDecision.decision === 'deny' && ownLines(first).length) return undecidable(ownLines(first)[0]);
+    const clean = commitPassed(first, 'чистая копия хуков');
+    if (clean !== true) return clean + (weak(first).length ? ' - ' + weak(first).join(', ') : '');
     const planted = (file) => {
       const p = path.join(hooks, file);
-      fs.appendFileSync(p, '\n' + line + '\n');
-      return fs.readFileSync(p, 'utf8').split(/\r?\n/).lastIndexOf(line) + 1;
+      fs.appendFileSync(p, '\n' + W02_PLANTED + '\n');
+      return fs.readFileSync(p, 'utf8').split(/\r?\n/).lastIndexOf(W02_PLANTED) + 1;
     };
     planted('harness-selftest.js');
-    const exempt = commit();
-    if (decision(exempt) === 'deny') return 'ослабление в исключённом harness-selftest.js: коммит запрещён - ' + (weak(exempt).join(', ') || exempt.out.slice(0, 160));
+    const exempt = commitPassed(commit(), 'ослабление в исключённом harness-selftest.js');
+    if (exempt !== true) return exempt;
     const at = planted('selftest-gates.js');
     const refused = commit();
+    const d = commitDecision(refused);
+    if (d.why) return 'ослабление в selftest-gates.js: ' + d.why;
     const got = weak(refused);
+    const own = ownLines(refused);
+    if (own.length && own[0] !== at) return undecidable(own[0]);
     const want = 'sf/.claude/hooks/selftest-gates.js:' + at + '  [W02]';
     if (!got.includes(want)) return 'нет отказа «' + want + '»: ' + (got.join(', ') || 'ни одного [W..]');
-    if (decision(refused) !== 'deny') return 'ослабление названо, но коммит не запрещён: решение ' + JSON.stringify(decision(refused));
+    if (d.decision !== 'deny') return 'ослабление названо, но коммит не запрещён: решение ' + JSON.stringify(d.decision);
     const stray = got.filter((x) => x !== want);
     return !stray.length || 'лишние отказы (исключённый файл не пропущен?): ' + stray.join(', ');
   });
+}
+check('commit-gate: W02 в модуле самопроверки вне weakeningExempt - отказ с файлом и строкой, тот же литерал в исключённом harness-selftest.js - пропуск', () => weakeningLockProbe(null));
+// Пропуск - только разобранное решение (TECH_DEBT 23.10.2026 E0-12U после Fix 3): копия commit-gate.js,
+// которая бросает на старте, - проба красная с причиной, а не пропуск; чужой W02 выше строки пробы -
+// «проба неопределима» (решение техлида Р4 E0-12AA)
+check('commit-gate: живая проба W02 - падение хука на стороне пропуска и чужой W02 выше строки пробы - отказ пробы с причиной', () => {
+  const crashed = weakeningLockProbe((hooks) => fs.writeFileSync(path.join(hooks, 'commit-gate.js'), "throw new Error('selftest');\n"));
+  const wantCrash = 'чистая копия хуков: commit-gate.js: код 1 ';
+  if (typeof crashed !== 'string' || !crashed.startsWith(wantCrash)) return 'бросающий commit-gate: ожидалось «' + wantCrash + '…», получено ' + JSON.stringify(crashed);
+  let foreign = 0;
+  const shadowed = weakeningLockProbe((hooks) => {
+    const p = path.join(hooks, 'selftest-gates.js');
+    fs.appendFileSync(p, '\n' + W02_PLANTED + '\n');
+    foreign = fs.readFileSync(p, 'utf8').split(/\r?\n/).lastIndexOf(W02_PLANTED) + 1;
+  });
+  const wantForeign = 'в файле уже есть W02 на строке ' + foreign + ', проба неопределима (замок печатает один пример на файл и правило)';
+  return shadowed === wantForeign || 'чужой W02 выше: ожидалось «' + wantForeign + '», получено ' + JSON.stringify(shadowed);
 });
 /** Каталоги репозитория, в которых живут файлы пробы: правило по glob пути, которого нет, ничего не сторожит. */
 function missingDirs(rels) {
@@ -1269,6 +1706,41 @@ check('lib.rulesFor склеивает standards общего файла и ре
   return { note: got.length + ' правил: ' + shared.length + ' общих, ' + mine.length + ' своих' };
 });
 /**
+ * Отказ на запись по правилам W01, W02, W08 общего файла (TECH_DEBT 22.10.2026 E0-12P круг 4: показан
+ * был только W03): каждое - на пути, на который действует (files правила в rules.common.json),
+ * засчитывается только своё правило по id (не ANY_RULE: опечатка в W01 закрылась бы соседним
+ * правилом); пропуск - та же форма без ослабления. Литералы склеены из частей (L-042).
+ */
+const W_CASES = [
+  {
+    id: 'W01',
+    rel: '.github/workflows/zz_selftest.yml',
+    refused: ['jobs:\n  ci:\n    continue-on-' + 'error: true\n', 'steps:\n  - run: pnpm test |' + '| true\n'],
+    allowed: ['jobs:\n  ci:\n    continue-on-error: false\n', 'steps:\n  - run: pnpm test\n'],
+  },
+  {
+    id: 'W02',
+    rel: 'packages/core/test/zz_selftest_w02.test.ts',
+    refused: ['it.sk' + 'ip("x", () => {});\n', 'describe.on' + 'ly("x", () => {});\n'],
+    // второй пропуск - ослабление соседнего правила (W08) в том же файле: хук отказывает, но не по W02 -
+    // засчитывается только своё правило по id (замечание ревью E0-12AA: иначе ANY_RULE прошёл бы так же)
+    allowed: ['it("x", () => {});\n', '// biome-' + 'ignore lint/style/noNonNullAssertion\nit("x", () => {});\n'],
+  },
+  {
+    id: 'W08',
+    rel: 'packages/core/src/zz_selftest_w08.ts',
+    refused: [lineFile('// biome-' + 'ignore lint/style/noNonNullAssertion')],
+    allowed: [lineFile('// biome-' + 'ignore lint/style/noNonNullAssertion: value is checked above')],
+  },
+];
+for (const w of W_CASES) {
+  check('standards: ' + w.id + ' общего файла правил - отказ на ' + w.rel + ' (по id правила), та же форма без ослабления - пропуск', () => {
+    const gone = missingDirs([w.rel.slice(0, w.rel.lastIndexOf('/'))]);
+    if (gone) return gone;
+    return standardsCases(w.id, w.rel, w.refused, w.allowed);
+  });
+}
+/**
  * Склейка и правило без id (E0-12P, решение техлида по кругу 4, п.5): в множество id попадают только
  * строки, поэтому общее правило без id не отбрасывается вместе с отсутствующим id у правила
  * репозитория. Откат к `new Set(mine.map((rule) => rule && rule.id))` - красный: undefined в множестве
@@ -1376,7 +1848,7 @@ check('standards: S16 ловит @sf/* кроме @sf/contracts в packages/api-
  */
 function withProbeState(seed, fn) {
   const statePath = L.statePath();
-  if (path.resolve(statePath) === path.resolve(LIVE_STATE)) return 'проба смотрит в боевой .qa-state: ' + statePath;
+  if (samePath(statePath, LIVE_STATE)) return 'проба смотрит в боевой .qa-state: ' + statePath;
   const dir = tempDir('tr');
   const transcript = path.join(dir, 'transcript.jsonl');
   const state = () => { try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch (_) { return {}; } };
@@ -1676,16 +2148,30 @@ check('readState: файл null, массив, строка, обрыв JSON - �
       fs.rmSync(sp, { recursive: true, force: true });
     }
   }));
-check('statePath: пустой SF_HOOK_STATE_DIR - боевой путь', () => {
+/**
+ * Пустой SF_HOOK_STATE_DIR - боевой путь (в дочернем node: хук сессии без переменной пишет боевое
+ * состояние). В процессе самопроверки боевой путь закрыт (L.refuseStatePath в начале прогона; решение
+ * техлида Р3 E0-12AA): statePath, readState и writeState на нём - исключение, а не запись в состояние
+ * сессии. writeState зовётся, только когда statePath уже отказал: иначе откат замка писал бы боевой файл.
+ */
+check('statePath: пустой SF_HOOK_STATE_DIR - боевой путь (дочерний node); в процессе самопроверки боевой путь закрыт - statePath, readState, writeState на нём исключение, а не запись', () => {
+  const program = 'process.env.SF_HOOK_STATE_DIR = "";\nprocess.stdout.write(require(' + JSON.stringify(path.join(HOOKS, 'lib.js')) + ').statePath());\n';
+  const r = run(process.execPath, ['-e', program], { cwd: ROOT });
+  const childPath = String(r.stdout || '');
+  if (r.status !== 0 || !samePath(childPath, LIVE_STATE)) return 'дочерний node: пустая переменная дала ' + JSON.stringify(childPath) + ' (код ' + r.status + '), боевой ' + LIVE_STATE;
+  const want = 'путь состояния ' + LIVE_STATE + ' закрыт в этом процессе (refuseStatePath): боевой .qa-state пишут только хуки сессии';
   const was = process.env.SF_HOOK_STATE_DIR;
   try {
     process.env.SF_HOOK_STATE_DIR = '';
-    const p = path.resolve(L.statePath());
-    if (p !== path.resolve(L.STATE_DIR, '.qa-state')) return 'пустая переменная дала путь ' + p;
-    return p === LIVE_STATE ? true : 'путь ' + p + ' не совпал с боевым ' + LIVE_STATE;
+    const own = refusalVerdict(() => L.statePath(), want);
+    if (own !== true) return 'statePath в процессе самопроверки: ' + own;
+    const rest = [refusalVerdict(() => L.readState(), want), refusalVerdict(() => L.writeState({ edits: 0 }), want)].filter((v) => v !== true);
+    if (rest.length) return 'readState, writeState: ' + rest.join('; ');
   } finally {
     process.env.SF_HOOK_STATE_DIR = was;
   }
+  const probePath = L.statePath();
+  return samePath(probePath, path.join(PROBE_STATE_DIR, '.qa-state')) || 'с каталогом проб statePath ' + probePath;
 });
 check('remind-format: отдаёт только своё замечание, чужое остаётся', () =>
   withProbeState(seedWith([['S1', NOTE_S1, 1], ['S2', NOTE_S2, 2]]), (p) => {
@@ -1793,6 +2279,52 @@ check('сверка дерева: отпечаток ссылки на файл 
 });
 
 /**
+ * Состав TREE_NOT_COMPARED (TECH_DEBT 23.10.2026 E0-12T, решение техлида B6): только пути, которые
+ * пишет сессия, - боевой .qa-state (L.statePath без SF_HOOK_STATE_DIR), его временный файл атомарной
+ * записи (lib.js: <путь>.<pid>.tmp), файлы дела tasks/ и .claude/.task-current; каждый из них - в
+ * commitGate.forbiddenPaths (rules.common.json: сессия пишет, в коммит не идёт). Запись иной формы
+ * (каталог артефакта .turbo/, dist/, путь с * ? {) - отказ: ложный красный от фонового процесса в
+ * игнорируемых файлах принят (B6), исключений каталогов артефактов, glob и флагов нет. Путь сессии,
+ * которого в list нет, - тоже отказ: перечень держит каждый из них, а не только допускает (решение
+ * техлида Р9 E0-12AA).
+ */
+function treeNotComparedViolations(list, forbidden) {
+  const stateRel = path.relative(ROOT, LIVE_STATE).split(path.sep).join('/');
+  const session = [
+    { form: { path: stateRel }, backing: stateRel },
+    { form: { prefix: stateRel + '.', suffix: '.tmp' }, backing: stateRel },
+    { form: { prefix: 'tasks/' }, backing: 'tasks/**' },
+    { form: { path: '.claude/.task-current' }, backing: '.claude/.task-current' },
+  ];
+  const keyOf = (x) => JSON.stringify([x.path, x.prefix, x.suffix]);
+  const bad = [];
+  for (const x of list) {
+    const hit = session.find((s) => keyOf(s.form) === keyOf(x));
+    const glob = [x.path, x.prefix, x.suffix].some((v) => typeof v === 'string' && /[*?{[]/.test(v));
+    if (glob || !hit) bad.push(keyOf(x) + ' - не путь, который пишет сессия (решение B6: каталоги артефактов, glob и флаги не вводить)');
+    else if (!forbidden.includes(hit.backing)) bad.push(keyOf(x) + ' - ' + hit.backing + ' нет в commitGate.forbiddenPaths');
+  }
+  for (const s of session) if (!list.some((x) => keyOf(x) === keyOf(s.form))) bad.push(keyOf(s.form) + ' - путь, который пишет сессия, нет в перечне');
+  return bad;
+}
+check('сверка дерева: TREE_NOT_COMPARED - только пути, которые пишет сессия (боевой .qa-state, его .<pid>.tmp, tasks/, .claude/.task-current; каждый в перечне и в forbiddenPaths), без glob и каталогов артефактов (проба отказа - .turbo/, dist/*.js, недостающие пути сессии)', () => {
+  const forbidden = (common && common.commitGate && common.commitGate.forbiddenPaths) || [];
+  const live = treeNotComparedViolations(TREE_NOT_COMPARED, forbidden);
+  if (live.length) return live.join('; ');
+  const got = treeNotComparedViolations([{ prefix: '.turbo/' }, { path: 'dist/*.js' }, { path: '.claude/.task-current' }], forbidden.filter((g) => g !== '.claude/.task-current'));
+  const stateRel = path.relative(ROOT, LIVE_STATE).split(path.sep).join('/');
+  const missing = (key) => key + ' - путь, который пишет сессия, нет в перечне';
+  const want = [
+    '[null,".turbo/",null] - не путь, который пишет сессия (решение B6: каталоги артефактов, glob и флаги не вводить)',
+    '["dist/*.js",null,null] - не путь, который пишет сессия (решение B6: каталоги артефактов, glob и флаги не вводить)',
+    '[".claude/.task-current",null,null] - .claude/.task-current нет в commitGate.forbiddenPaths',
+    missing(JSON.stringify([stateRel, undefined, undefined])),
+    missing(JSON.stringify([undefined, stateRel + '.', '.tmp'])),
+    missing('[null,"tasks/",null]'),
+  ];
+  return JSON.stringify(got) === JSON.stringify(want) || 'сверка слепа: ' + JSON.stringify(got);
+});
+/**
  * Исключения сверки дерева (ОВ2 техлида E0-12T): на временном репозитории с .gitignore как у
  * репозитория запись в tasks/x.md, .claude/.qa-state и .claude/.qa-state.<pid>.tmp молчит (пропуск),
  * а соседние пути - docs/tasks/x.md, tasks.md, .claude/.qa-state.bak, .claude/x.tmp,
@@ -1808,14 +2340,10 @@ check('сверка дерева: TREE_NOT_COMPARED - tasks/, .claude/.qa-state 
     fs.writeFileSync(path.join(dir, '.gitignore'), '/tasks/\n.claude/.qa-state\n.claude/.qa-state.*.tmp\n');
     inDir(['add', '.']);
     inDir(['commit', '-q', '-m', 'probe']);
-    const put = (rel) => {
-      fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
-      fs.writeFileSync(path.join(dir, rel), 'x\n');
-    };
     const before = repoSnapshot(dir);
     const silent = ['tasks/x.md', '.claude/.qa-state', '.claude/.qa-state.123.tmp'];
     const named = ['docs/tasks/x.md', 'tasks.md', '.claude/.qa-state.bak', '.claude/x.tmp', '.claude/.qa-state.a/b.tmp'];
-    for (const rel of silent.concat(named)) put(rel);
+    for (const rel of silent.concat(named)) put(dir, rel, 'x\n');
     const diff = treeDiff(before, repoSnapshot(dir));
     const leaked = diff.filter((line) => silent.some((rel) => line.endsWith(' ' + rel)));
     if (leaked.length) return 'исключение названо: ' + leaked.join(', ');
@@ -1872,13 +2400,13 @@ function textMatches(text, re) {
 check('git: в ' + HELPER_SCANNED.join(', ') + ' ни одного вызова git мимо помощника git() и имени git в кавычках вне GIT_BIN (проба отказа - литерал, переменная, выражение, execSync, вызов на двух строках, имя в переменной)', () => {
   const bad = [];
   for (const f of HELPER_SCANNED) {
-    const text = fs.readFileSync(path.join(HOOKS, f), 'utf8');
+    const text = scannedText(f);
     for (const n of textMatches(text, GIT_BYPASS)) bad.push(f + ':' + n);
     const lines = text.split(/\r?\n/);
     for (const n of linesMatching(text, GIT_LITERAL)) if (lines[n - 1].trim() !== GIT_BIN_LINE) bad.push(f + ':' + n + ' (имя в кавычках)');
   }
   if (bad.length) return 'git мимо помощника: ' + bad.join(', ');
-  if (linesMatching(fs.readFileSync(__filename, 'utf8'), GIT_LITERAL).length !== 1) return 'строки GIT_BIN нет - сверка имени в кавычках слепа';
+  if (linesMatching(scannedText(path.basename(__filename)), GIT_LITERAL).length !== 1) return 'строки GIT_BIN нет - сверка имени в кавычках слепа';
   // имя функции со скобкой и имя программы в кавычках склеиваются здесь, а не в тексте файла: иначе
   // сверка выше поймала бы сам кейс
   const call = (name) => name + '(';
@@ -1897,9 +2425,148 @@ check('git: в ' + HELPER_SCANNED.join(', ') + ' ни одного вызова 
   const caught = clean.filter((text) => textMatches(text, GIT_BYPASS).length);
   return !caught.length || 'вызов не git принят за git: ' + caught.join(' | ');
 });
+/**
+ * Дочерние процессы - через одну точку (решения техлида Р3 и Р7 E0-12AA; замечание ревью E0-12AA:
+ * исключения - по строке и числу, не по файлу): модуль child_process в этом файле и модулях
+ * самопроверки берёт только selftest-children.js (makeLauncher - проверка SF_HOOK_STATE_DIR у каждого
+ * ребёнка, hookStateGuard). Любой запуск мимо неё начинается с загрузки модуля - её и ловит сверка, по
+ * имени модуля в кавычках любого вида (с node: и без) в любом месте текста, а не по перечню форм
+ * загрузки: require, статический и динамический import, функция createRequire от import.meta.url,
+ * getBuiltinModule процесса - одна сверка (решение Р7: перечень загрузчиков открытый, литерал - закрытый). Комментарии с именем модуля в
+ * кавычках переписываются, а не исключаются. Загрузка с именем модуля в переменной - отказ пробы
+ * require-рёбер (requireScan) или остаток E0-12AD (AST). Исключения CHILD_PROCESS_DIRECT - по строке (её
+ * текст без отступа) и числу: у каждой причина; строка, которой нет, - красная, лишняя такая же - красная.
+ */
+const CHILD_PROCESS_USE = /(['"`])(?:node:)?child_process\1/g;
+// имя модуля и вызов загрузки склеены: иначе сверка и обход require-рёбер поймали бы сам перечень
+const CP = 'child_' + 'process';
+const REQ = 'req' + 'uire(';
+const CHILD_PROCESS_DIRECT = [
+  { file: 'selftest-children.js', line: 'const cp = ' + REQ + "'" + CP + "');", why: 'одна точка запуска детей самопроверки (makeLauncher)' },
+  {
+    file: 'selftest-gates-run.js',
+    line: '"const cp = ' + REQ + "'" + CP + '\');",',
+    why: 'программа пробы require gates.js: запуски child_process подменены счётчиками, ничего не запускается',
+  },
+  {
+    file: 'selftest-gates-run.js',
+    line: '"const cp = ' + REQ + "'" + CP + '\');",',
+    why: 'предзагрузка pre.js gates.js из командной строки: обёртка spawnSync считает taskkill, запуск - самого gates.js',
+  },
+  {
+    file: 'selftest-gates-run.js',
+    line: 'const spawnGc = (opts) => "const c = ' + REQ + "'" + CP + '\').spawn(process.execPath, process.argv.slice(2), { stdio: \'inherit\'" + opts + \' });\';',
+    why: 'текст стаба команды гейта (tree.js, orphan.js): внук-пульс без хуков в дереве gates.js, не запуск из самопроверки',
+  },
+];
+/**
+ * Строки с child_process в текстах texts ({ файл: текст }) вне allowed - «файл:строка»; число
+ * совпадений с текстом записи в файле не равно числу таких записей - «файл: <текст> N раз, в перечне M».
+ */
+function childProcessViolations(texts, allowed) {
+  const bad = [];
+  for (const [file, text] of Object.entries(texts)) {
+    const lines = text.split(/\r?\n/);
+    const found = new Map();
+    for (const m of text.matchAll(CHILD_PROCESS_USE)) {
+      const n = text.slice(0, m.index).split('\n').length;
+      const line = lines[n - 1].trim();
+      if (!allowed.some((x) => x.file === file && x.line === line)) bad.push(file + ':' + n);
+      else found.set(line, (found.get(line) || 0) + 1);
+    }
+    for (const line of new Set(allowed.filter((x) => x.file === file).map((x) => x.line))) {
+      const want = allowed.filter((x) => x.file === file && x.line === line).length;
+      const got = found.get(line) || 0;
+      if (got !== want) bad.push(file + ': ' + line.slice(0, 60) + ' ' + got + ' раз, в перечне ' + want);
+    }
+  }
+  return bad;
+}
+check('дочерние процессы: child_process в ' + HELPER_SCANNED.join(', ') + ' только в selftest-children.js (одна точка запуска с hookStateGuard) и в программах дочерних node по строке и числу CHILD_PROCESS_DIRECT (проба отказа - require в модуле, import node:, createRequire, getBuiltinModule, имя в обратных кавычках, строка исключения в чужом файле, лишняя такая же строка)', () => {
+  const texts = {};
+  for (const f of HELPER_SCANNED) texts[f] = scannedText(f);
+  const bad = childProcessViolations(texts, CHILD_PROCESS_DIRECT);
+  const req = (q) => REQ + q + CP + q + ')';
+  const point = CHILD_PROCESS_DIRECT[0].line;
+  // у каждого кейса имя формы: слепая сверка называет форму, которую не видит (посадка по форме, Р9 E0-12AA)
+  const cases = [
+    ['require в модуле', { 'selftest-x.js': 'const a = 1;\nconst r = ' + req("'") + '.spawnSync;\n' }, 'selftest-x.js:2'],
+    ['import node:', { 'selftest-y.mjs': "import { spawn } from 'node:" + CP + "';\n" }, 'selftest-y.mjs:1'],
+    // загрузчики вне прежнего перечня форм (замечание ревью E0-12AA): createRequire и getBuiltinModule
+    ['createRequire', { 'selftest-y.mjs': 'const r = create' + 'Require(import.meta.url)(\'' + CP + "');\n" }, 'selftest-y.mjs:1'],
+    ['getBuiltinModule', { 'selftest-x.js': '\nconst c = process.getBuiltinModule("node:' + CP + '");\n' }, 'selftest-x.js:2'],
+    ['имя в обратных кавычках', { 'selftest-x.js': 'const m = `' + CP + '`;\n' }, 'selftest-x.js:1'],
+    ['строка исключения в чужом файле', { 'selftest-roots.js': point + '\n' }, 'selftest-roots.js:1'],
+    ['лишняя такая же строка', { 'selftest-children.js': point + '\n' + point + '\n' }, 'selftest-children.js: ' + point.slice(0, 60) + ' 2 раз, в перечне 1'],
+    ['строки исключения нет', { 'selftest-children.js': '' }, 'selftest-children.js: ' + point.slice(0, 60) + ' 0 раз, в перечне 1'],
+  ];
+  const miss = cases.map(([form, t, want]) => [form, childProcessViolations(t, CHILD_PROCESS_DIRECT).join(), want]).filter(([, got, want]) => got !== want);
+  // живые тексты и кейсы - в одном ответе: слепота к форме не прячется за отказом живых текстов
+  const why = [];
+  if (bad.length) why.push('child_process мимо точки запуска: ' + bad.join(', ') + ' - запускай через run/ctx.spawn (makeLauncher, selftest-children.js) или назови программу в CHILD_PROCESS_DIRECT с причиной');
+  if (miss.length) why.push('сверка слепа: ' + miss.map(([form, got, want]) => form + ': ожидалось «' + want + '», получено «' + got + '»').join('; '));
+  return !why.length || why.join('; ');
+});
 // Текст отказа gitStrict называет подкоманду, а не пары -c впереди (замечание ревью C13 E0-12T)
 check('git: gitStrict - текст отказа называет подкоманду после пар -c', () =>
-  refusalVerdict(() => gitStrict(['-c', 'user.name=selftest', '-c', 'user.email=selftest@localhost', 'commit', '-q'], { spawn: () => ({ status: 1, stderr: 'boom' }) }), 'git commit: boom'));
+  refusalVerdict(() => gitStrict(['-c', 'user.name=selftest', '-c', 'user.email=selftest@localhost', 'commit', '-q'], { cwd: os.tmpdir(), spawn: () => ({ status: 1, stderr: 'boom' }) }), 'git commit: код 1: boom'));
+// Одни пары -c (TECH_DEBT 23.10.2026 E0-12T E20): «нет подкоманды», а не git undefined
+check('git: gitStrict - одни пары -c без подкоманды - отказ «нет подкоманды»', () =>
+  refusalVerdict(() => gitStrict(['-c', 'user.name=selftest', '-c', 'core.autocrlf=false'], { cwd: os.tmpdir(), spawn: () => ({ status: 129, stderr: 'usage: git' }) }), 'git (нет подкоманды, только пары -c): код 129: usage: git'));
+// Текст отказа (L-030): первая строка stderr до 80 символов, пути временного каталога и корня - именами
+check('git: gitStrict - текст отказа: класс ошибки (не запустился, прерван после запуска, код) и первая строка stderr до 80 символов, пути TEMP и корня именами', () => {
+  const long = path.join(os.tmpdir(), 'sf-x', 'repo') + ' ' + ROOT + ' ' + 'x'.repeat(100);
+  const got = [
+    refusalVerdict(() => gitStrict(['status'], { cwd: os.tmpdir(), spawn: () => ({ status: 128, stderr: 'fatal: ' + long + '\nsecond line' }) }), 'git status: код 128: ' + ('fatal: <TEMP>' + path.sep + 'sf-x' + path.sep + 'repo <корень> ' + 'x'.repeat(100)).slice(0, 80)),
+    refusalVerdict(() => gitStrict(['status'], { cwd: os.tmpdir(), spawn: () => ({ status: null, error: Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' }), stderr: '' }) }), 'git status: не запустился (ENOENT): stderr пуст'),
+    // запущенный и прерванный (pid есть: предел, переполнение вывода) - не «не запустился» (замечание ревью E0-12AA)
+    refusalVerdict(() => gitStrict(['status'], { cwd: os.tmpdir(), spawn: () => ({ pid: 4242, status: null, signal: 'SIGTERM', error: Object.assign(new Error('spawnSync git ENOBUFS'), { code: 'ENOBUFS' }), stderr: '' }) }), 'git status: прерван после запуска (ENOBUFS): stderr пуст'),
+  ].filter((v) => v !== true);
+  return !got.length || got.join('; ');
+});
+// Белый список окружения детей (git проб, gates.js проб запуска; замечание ревью E0-12AA C2): поиск
+// программы, система и профиль Windows, язык и локаль остаются (имя - без учёта регистра), GIT_* и
+// NODE_OPTIONS родителя - нет
+check('envByList: PATH, SystemRoot, SystemDrive, APPDATA, LOCALAPPDATA, LANG, LC_* остаются (регистр имён не важен), GIT_DIR, GIT_INDEX_FILE, NODE_OPTIONS - нет', () => {
+  const base = {
+    Path: 'p', SystemRoot: 'r', SystemDrive: 'C:', APPDATA: 'a', LOCALAPPDATA: 'l', LANG: 'ru_RU.UTF-8', LC_ALL: 'C', lc_ctype: 'C',
+    GIT_DIR: 'g', GIT_INDEX_FILE: 'i', NODE_OPTIONS: '--x',
+  };
+  const got = Object.keys(CHILDREN_MOD.envByList(base, { EXTRA: '1' })).sort().join();
+  const want = ['APPDATA', 'EXTRA', 'LANG', 'LC_ALL', 'LOCALAPPDATA', 'Path', 'SystemDrive', 'SystemRoot', 'lc_ctype'].sort().join();
+  return got === want || 'ключи ' + got + ', ожидались ' + want;
+});
+// GIT_CONFIG_GLOBAL git понимает с 2.32 (замечание ревью E0-12AA): версия ниже и неразобранный вывод
+// --version - отказ, 2.32 и выше - пропуск; версия этой машины - в пометке
+check('git: GIT_CONFIG_GLOBAL проб - git 2.32+ (2.31 и неразобранная версия - отказ, 2.32 и 3.0 - пропуск)', () => {
+  const got = ['git version 2.31.8', 'git version 2.32.0', 'git version 3.0.1', 'git version 2.45.1.windows.1', 'не git']
+    .map((v) => (gitVersionVerdict(v) === null ? 'пропуск' : 'отказ'));
+  if (got.join() !== 'отказ,пропуск,пропуск,пропуск,отказ') return '2.31, 2.32, 3.0, 2.45.windows, не git: ' + got.join(', ');
+  const r = git(['--version'], { spawn: run, cwd: os.tmpdir() });
+  const own = gitVersionVerdict(r.stdout);
+  return own === null ? { note: String(r.stdout).trim() } : own;
+});
+// Окружение git пробы - белый список (TECH_DEBT 23.10.2026 E0-12U круг 2, L-030): GIT_DIR родителя
+// на чужой репозиторий не уводит git временного репозитория - rev-parse отвечает своим .git
+check('git: git() и gitStrict - GIT_DIR в окружении родителя не влияет на git пробы (временный репозиторий отвечает своим rev-parse)', () => {
+  const own = tempDir('gitenv');
+  const other = tempDir('gitenv-other');
+  try {
+    gitStrict(['init', '-q', '--template='], { cwd: own });
+    gitStrict(['init', '-q', '--template='], { cwd: other });
+    const baseEnv = Object.assign({}, process.env, { GIT_DIR: path.join(other, '.git') });
+    const why = [];
+    for (const [label, call] of [['gitStrict', gitStrict], ['git()', git]]) {
+      const r = call(['rev-parse', '--absolute-git-dir'], { cwd: own, baseEnv });
+      const got = String(r.stdout).trim();
+      if (!samePath(got, path.join(own, '.git'))) why.push(label + ': rev-parse ответил ' + JSON.stringify(got) + ' - GIT_DIR родителя увёл git пробы');
+    }
+    return why.length ? why.join('; ') : true;
+  } finally {
+    releaseTemp(own);
+    releaseTemp(other);
+  }
+});
 /**
  * Временный каталог мимо помощника tempDir (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «каталоги
  * sf-selftest-* в %TEMP%»): mkdtempSync - одно место в фабрике реестра (selftest-temp.js), ни
@@ -1911,7 +2578,7 @@ check('tempDir: mkdtempSync только в фабрике реестра (од�
   const want = { 'harness-selftest.js': 0 };
   for (const m of SELFTEST_MODULES) want[m.file] = m.mkdtemp || 0;
   const bad = Object.entries(want)
-    .map(([f, n]) => [f, n, linesMatching(fs.readFileSync(path.join(HOOKS, f), 'utf8'), MKDTEMP_CALL).length])
+    .map(([f, n]) => [f, n, linesMatching(scannedText(f), MKDTEMP_CALL).length])
     .filter(([, n, got]) => got !== n)
     .map(([f, n, got]) => f + ' ' + got + ' (ожидалось ' + n + ')');
   if (bad.length) return 'mkdtempSync: ' + bad.join(', ');
@@ -1920,29 +2587,75 @@ check('tempDir: mkdtempSync только в фабрике реестра (од�
   return linesMatching(planted, MKDTEMP_CALL).length === 2 || 'второй вызов mkdtempSync не пойман - сверка слепа';
 });
 /**
+ * Протокол дочернего vitest - в одном модуле (TECH_DEBT 23.10.2026 E0-12T круг 2): строки ответа и
+ * выхода объявлены только в selftest-vitest-protocol.cjs, обе стороны (selftest-vitest.mjs и
+ * selftest-int.js) берут их оттуда. Литерал строки протокола в кавычках в другом файле - отказ с
+ * файлом и строкой: правка одной копии дала бы «не ответил» без причины.
+ */
+const VITEST_PROTOCOL_FILE = 'selftest-vitest-protocol.cjs';
+const VITEST_PROTOCOL_LITERAL = new RegExp('[\'"`]selftest-' + 'vitest(?:-exit)? ', 'g');
+check('протокол дочернего vitest - в одном модуле: строки ответа и выхода только в ' + VITEST_PROTOCOL_FILE + ', обе стороны берут их оттуда (проба отказа - литерал в другом файле)', () => {
+  const protocol = require('./selftest-vitest-protocol.cjs');
+  const own = textMatches(fs.readFileSync(path.join(HOOKS, VITEST_PROTOCOL_FILE), 'utf8'), VITEST_PROTOCOL_LITERAL);
+  if (own.length !== 2) return VITEST_PROTOCOL_FILE + ': строк протокола ' + own.length + ', ожидались 2 (ответ и выход)';
+  const bad = [];
+  for (const f of HELPER_SCANNED.filter((x) => x !== VITEST_PROTOCOL_FILE)) {
+    for (const n of textMatches(scannedText(f), VITEST_PROTOCOL_LITERAL)) bad.push(f + ':' + n);
+  }
+  if (bad.length) return 'копия строки протокола: ' + bad.join(', ') + ' - бери ' + JSON.stringify(Object.keys(protocol)) + ' из ' + VITEST_PROTOCOL_FILE;
+  const planted = 'const MARK = ' + "'selftest-" + "vitest ';\nprocess.stdout.write(" + '"selftest-' + 'vitest-exit " + code);\n';
+  return textMatches(planted, VITEST_PROTOCOL_LITERAL).join() === '1,2' || 'литерал протокола не пойман - сверка слепа';
+});
+/**
  * Каталоги проб снимает releaseTemp (замечание ревью C4 E0-12T): сбой снятия (EBUSY на Windows) не
  * подменяет вердикт пробы и не роняет прогон до report(). Голый вызов dropTemp - только в самом
- * releaseTemp и в кейсе dropTemp с подменой rm: DROP_TEMP_DIRECT - их точные строки (имя склеено,
- * иначе сверка поймала бы сам перечень).
+ * releaseTemp, в кейсе dropTemp с подменой rm и в dropAll реестра: DROP_TEMP_DIRECT - по записи на
+ * вызов { file, call } (имя склеено, иначе сверка поймала бы сам перечень). Сверка идёт по этому файлу
+ * и каждому модулю перечня (TECH_DEBT 23.10.2026 E0-12U, ОВ2 исполнителя): вызов сравнивается с
+ * записью по тексту от имени (перенос строки внутри вызова - отказ), число вызовов в файле - ровно
+ * число его записей. ctx модулям dropTemp не отдаёт (tempView - только dropAll).
  */
-const DROP_TEMP_DIRECT = ['drop' + 'Temp(dir, opts);', 'drop' + 'Temp(box, {'];
-const DROP_TEMP_CALL = /\bdropTemp\(/;
-check('tempDir: каталоги проб снимает releaseTemp - голый dropTemp только в releaseTemp и кейсе подмены rm (проба отказа - вставленный вызов)', () => {
-  const text = fs.readFileSync(__filename, 'utf8');
-  const lines = text.split(/\r?\n/);
-  const bad = linesMatching(text, DROP_TEMP_CALL).filter((n) => !DROP_TEMP_DIRECT.includes(lines[n - 1].trim()));
-  if (bad.length) return 'dropTemp мимо releaseTemp: harness-selftest.js:' + bad.join(', :');
-  const direct = linesMatching(text, DROP_TEMP_CALL).length;
-  if (direct !== DROP_TEMP_DIRECT.length) return 'строк DROP_TEMP_DIRECT в тексте ' + direct + ', в перечне ' + DROP_TEMP_DIRECT.length;
-  const planted = '  } finally {\n    ' + 'drop' + 'Temp(dir);\n  }\n';
-  return linesMatching(planted, DROP_TEMP_CALL).join() === '2' || 'вставленный dropTemp не пойман - сверка слепа';
+const DROP_TEMP_DIRECT = [
+  { file: 'harness-selftest.js', call: 'drop' + 'Temp(dir, opts);' },
+  { file: 'harness-selftest.js', call: 'drop' + 'Temp(box, {' },
+  { file: 'selftest-temp.js', call: 'drop' + 'Temp(dir);' },
+];
+const DROP_TEMP_CALL = /\bdropTemp\s*\(/g;
+/** Вызовы dropTemp в текстах texts ({ файл: текст }) вне allowed - «файл:строка»; число вызовов файла не равно числу его записей - «файл: N вызовов, в перечне M». */
+function dropTempViolations(texts, allowed) {
+  const bad = [];
+  for (const [file, text] of Object.entries(texts)) {
+    const own = allowed.filter((x) => x.file === file);
+    let found = 0;
+    for (const m of text.matchAll(DROP_TEMP_CALL)) {
+      found++;
+      if (!own.some((x) => text.startsWith(x.call, m.index))) bad.push(file + ':' + text.slice(0, m.index).split('\n').length);
+    }
+    if (found !== own.length) bad.push(file + ': ' + found + ' вызовов, в перечне ' + own.length);
+  }
+  return bad;
+}
+check('tempDir: каталоги проб снимает releaseTemp - голый dropTemp в этом файле и модулях самопроверки только в releaseTemp, кейсе подмены rm и dropAll реестра, ctx его не отдаёт (проба отказа - вставленный вызов в модуль, разрешённый вызов в чужом файле, перенос строки)', () => {
+  const texts = {};
+  for (const f of ['harness-selftest.js'].concat(SELFTEST_MODULES.map((m) => m.file))) texts[f] = scannedText(f);
+  const bad = dropTempViolations(texts, DROP_TEMP_DIRECT);
+  if (bad.length) return 'dropTemp мимо releaseTemp: ' + bad.join(', ');
+  if (Object.values(ctx).includes(dropTemp) || Object.prototype.hasOwnProperty.call(ctx.tempView, 'dropTemp')) return 'ctx отдаёт модулям dropTemp';
+  const call = (arg) => 'drop' + 'Temp(' + arg;
+  const cases = [
+    [{ 'selftest-x.js': 'const a = 1;\n  TEMP.' + call('dir);\n') }, 'selftest-x.js:2,selftest-x.js: 1 вызовов, в перечне 0'],
+    [{ 'selftest-temp.js': '', 'selftest-x.js': call('dir);\n') }, 'selftest-temp.js: 0 вызовов, в перечне 1,selftest-x.js:1,selftest-x.js: 1 вызовов, в перечне 0'],
+    [{ 'harness-selftest.js': call('\n  dir, opts);\n') + call('box, {\n') }, 'harness-selftest.js:1'],
+  ];
+  const miss = cases.map(([t, want]) => [dropTempViolations(t, DROP_TEMP_DIRECT).join(), want]).filter(([got, want]) => got !== want);
+  return !miss.length || 'сверка слепа: ' + miss.map(([got, want]) => 'ожидалось «' + want + '», получено «' + got + '»').join('; ');
 });
 
 /**
  * Обработчик exit реестра (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «каталоги sf-selftest-* в %TEMP%»): каталог реестра, оставленный пробой, которую
  * прервали process.exit (как report() внутри пробы) или SIGINT -> exit(130) (Ctrl+C), снимается
  * при выходе процесса, а junction внутри снимается unlink - цель цела. Дочерний node берёт модуль
- * selftest-temp.js через require (один модуль, без копии исходника); каталоги - внутри временного
+ * selftest-temp.js через require - один модуль, без копии исходника; каталоги - внутри временного
  * каталога этой пробы.
  */
 check('tempDir: process.exit и SIGINT посреди пробы - каталог реестра снят обработчиком exit, цель junction внутри цела', () => {
@@ -2042,27 +2755,169 @@ check('absent: ENOENT и ENOTDIR - нет, EACCES - исключение, пут
   if (JSON.stringify(got) !== JSON.stringify([true, true, false])) return 'ENOENT, ENOTDIR, этот файл: ' + JSON.stringify(got);
   return refusalVerdict(() => absent('x', thrower('EACCES')), 'EACCES: selftest');
 });
-// Одно чтение корневого package.json за прогон (rootPkg) и один вопрос к gates.js на файл у пробы
-// гейта (gateProbe) - TECH_DEBT 21.10.2026 E0-12L круг 3 и круг 4; сверка - здесь, когда все пробы
-// уже спросили.
-// Без модулей проб гейтов обе строки ниже не гонялись: их называет строка «пробы гейтов: модули
+/**
+ * Один помощник «файл есть» (TECH_DEBT 23.10.2026 E0-12T, E15): L.isFilePresent - файл, каталог,
+ * ENOENT, ENOTDIR, EACCES - пять ответов; ни в этом файле, ни в одном модуле самопроверки (HELPER_SCANNED:
+ * absent, DISK.isFile selftest-int.js, проверка конфига selftest-vitest.mjs, trackedFiles
+ * selftest-tree-graph.js...) нет своей копии - вызова stat, за которым следует isNotFile (замечание
+ * ревью E0-12AA: сверка трёх файлов не видела копию в selftest-tree-graph.js).
+ */
+const STAT_THEN_NOT_FILE = /\bl?stat(?:Sync)?\s*\([^)]*\)[\s\S]{0,200}?\bisNotFile\s*\(/g;
+check('lib.js: isFilePresent - файл есть, каталог, ENOENT, ENOTDIR - нет, EACCES - исключение; своей копии stat + isNotFile в этом файле и модулях самопроверки нет', () => {
+  const st = (isFile) => () => ({ isFile: () => isFile });
+  const thrower = (code) => () => { throw Object.assign(new Error(code + ': selftest'), { code }); };
+  const got = [L.isFilePresent('x', st(true)), L.isFilePresent('x', st(false)), L.isFilePresent('x', thrower('ENOENT')), L.isFilePresent('x', thrower('ENOTDIR'))];
+  if (JSON.stringify(got) !== '[true,false,false,false]') return 'файл, каталог, ENOENT, ENOTDIR: ' + JSON.stringify(got) + ', ожидалось [true,false,false,false]';
+  const denied = refusalVerdict(() => L.isFilePresent('x', thrower('EACCES')), 'EACCES: selftest');
+  if (denied !== true) return 'EACCES: ' + denied;
+  const copies = [];
+  for (const f of HELPER_SCANNED) {
+    const text = scannedText(f);
+    for (const n of textMatches(text, STAT_THEN_NOT_FILE)) copies.push(f + ':' + n);
+  }
+  if (copies.length) return 'своя копия «файл есть» (stat, затем isNotFile): ' + copies.join(', ') + ' - зови L.isFilePresent или L.statIfPresent';
+  const planted = 'try {\n  return ' + 'fs.stat' + 'Sync(p).isFile();\n} catch (e) {\n  if (L.' + 'isNotFile(e)) return false;\n}\n';
+  return textMatches(planted, STAT_THEN_NOT_FILE).join() === '2' || 'копия stat + isNotFile не поймана - сверка слепа';
+});
+/** Окружение этого процесса (или base) с SF_HOOK_STATE_DIR = dir; dir undefined - без переменной. */
+const stateEnv = (dir, base = process.env) => {
+  const e = Object.assign({}, base);
+  if (dir === undefined) delete e.SF_HOOK_STATE_DIR;
+  else e.SF_HOOK_STATE_DIR = dir;
+  return e;
+};
+/**
+ * Один помощник «файл пробы» (замечание ревью E0-12AA, CV6): put реестра (selftest-temp.js) - каталоги
+ * и файл; своей копии (mkdirSync каталога пути, за ним writeFileSync) ни в этом файле, ни в модулях
+ * самопроверки нет - правка поведения помощника не обходит копии.
+ */
+const PUT_COPY = /\bmkdirSync\s*\(\s*path\.dirname\s*\([\s\S]{0,200}?\bwriteFileSync\s*\(/g;
+check('файл пробы: put реестра - один помощник; своей копии mkdirSync(path.dirname(...)) + writeFileSync в этом файле и модулях самопроверки нет (проба отказа - копия в модуле)', () => {
+  const copies = [];
+  for (const f of HELPER_SCANNED) {
+    const found = textMatches(scannedText(f), PUT_COPY);
+    const allowed = f === 'selftest-temp.js' ? 1 : 0;
+    if (found.length !== allowed) copies.push(f + ':' + found.join(',') + (allowed ? ' (ожидался ровно 1 - put реестра)' : ''));
+  }
+  if (copies.length) return 'своя копия «файл пробы»: ' + copies.join(', ') + ' - зови put из ctx';
+  const planted = 'for (const [rel, body] of files) {\n  fs.mkdir' + 'Sync(path.dirname(path.join(dir, rel)), { recursive: true });\n  fs.write' + 'FileSync(path.join(dir, rel), body);\n}\n';
+  return textMatches(planted, PUT_COPY).join() === '2' || 'копия mkdirSync + writeFileSync не поймана - сверка слепа';
+});
+/**
+ * Защёлка боевого .qa-state в lib.js (решение техлида Р6 E0-12AA): refuseStatePath зовёт только этот
+ * файл, хуки HOOK_FILES (кроме lib.js, где она объявлена) её не зовут и refusedState не читают;
+ * нормализация путей - одна (L.foldPath): своей копии (resolve пути, затем перевод в нижний регистр) в
+ * этом файле, модулях самопроверки и хуках нет.
+ */
+const STATE_LATCH = /\brefuseStatePath\b|\brefusedState\b/g;
+const FOLD_COPY = /\bresolve\s*\([^)]*\)\s*\.toLowerCase\s*\(/g;
+check('lib.js: refuseStatePath - только в процессе самопроверки (хуки HOOK_FILES его не зовут, refusedState не читают); своей копии нормализации пути (resolve + toLowerCase) мимо L.foldPath нет (проба отказа - вызов в хуке, копия)', () => {
+  const bad = [];
+  for (const f of HOOK_FILES.filter((h) => h !== 'lib.js')) {
+    for (const n of textMatches(scannedText(f), STATE_LATCH)) bad.push(f + ':' + n + ' (защёлка)');
+  }
+  for (const f of HELPER_SCANNED.concat(HOOK_FILES.filter((h) => !HELPER_SCANNED.includes(h)))) {
+    for (const n of textMatches(scannedText(f), FOLD_COPY)) bad.push(f + ':' + n + ' (нормализация пути мимо L.foldPath)');
+  }
+  if (bad.length) return 'мимо Р6: ' + bad.join(', ');
+  const planted = ['L.refuse' + 'StatePath(p);\n', 'const p = path.resolve(x).toLower' + 'Case();\n'];
+  const seen = [textMatches(planted[0], STATE_LATCH).join(), textMatches(planted[1], FOLD_COPY).join()];
+  return seen.join('|') === '1|1' || 'вызов защёлки или копия нормализации не пойманы - сверка слепа: ' + seen.join('|');
+});
+// Защёлка - односторонняя и только в своём процессе: дочерний node без refuseStatePath пишет состояние
+// как раньше (хук сессии), тот же node после refuseStatePath на этом пути - исключение, а не запись
+check('lib.js: хук без refuseStatePath пишет состояние как раньше; после refuseStatePath на том же пути - исключение, файла нет (дочерний node)', () => {
+  const dir = tempDir('latch');
+  try {
+    const file = path.join(dir, '.qa-state');
+    const write = (refuse) => run(process.execPath, ['-e', 'const L = require(' + JSON.stringify(path.join(HOOKS, 'lib.js')) + ');\n' +(refuse ? 'L.refuseStatePath(' + JSON.stringify(file) + ');\n' : '') +
+      'try { L.writeState({ edits: 1, strayFiles: [], lastQa: null }); process.stdout.write("written"); } catch (e) { process.stdout.write("refused: " + e.message); }'], { cwd: dir, env: stateEnv(dir) });
+    const refused = String(write(true).stdout || '');
+    if (!refused.startsWith('refused: путь состояния ') || !absent(file)) return 'после refuseStatePath: ' + refused.slice(0, 120) + (absent(file) ? '' : '; файл записан');
+    const written = String(write(false).stdout || '');
+    return (written === 'written' && !absent(file)) || 'без refuseStatePath: ' + written.slice(0, 120) + (absent(file) ? '; файла нет' : '');
+  } finally {
+    releaseTemp(dir);
+  }
+});
+// Мемо текстов статических проб (замечание ревью E0-12AA: перечитывание файлов): второй вопрос о том же
+// файле не читает его, другой файл - читает
+check('статические пробы: текст файла хуков читается один раз на прогон (makeTextMemo: два вопроса - одно чтение, другой файл - своё)', () => {
+  const reads = [];
+  const text = makeTextMemo((p) => { reads.push(path.basename(p)); return 'x'; });
+  text('a.js');
+  text('a.js');
+  text('b.js');
+  return reads.join() === 'a.js,b.js' || 'чтения ' + reads.join() + ', ожидалось a.js,b.js';
+});
+// git временных репозиториев и живого дерева - разные помощники (решение техлида Р8 E0-12AA)
+check('git: git() и gitStrict с cwd в живом дереве (и без cwd из корня) - отказ до запуска', () => {
+  const want = (args, cwd) => 'git ' + args.join(' ') + ': cwd ' + cwd + ' в живом дереве - git временных репозиториев идёт с пустым конфигом, живое дерево зовёт gitLive';
+  const spawn = () => ({ status: 0, stdout: '', stderr: '' });
+  const sub = path.join(ROOT, '.claude');
+  // каталог `..x` внутри корня - живое дерево (выход из корня - только сегмент `..` целиком)
+  const dots = path.join(ROOT, '..x');
+  const got = [
+    refusalVerdict(() => git(['status'], { cwd: ROOT, spawn }), want(['status'], ROOT)),
+    refusalVerdict(() => gitStrict(['ls-files'], { cwd: sub, spawn }), want(['ls-files'], sub)),
+    refusalVerdict(() => git(['status'], { cwd: dots, spawn }), want(['status'], dots)),
+    process.cwd() === ROOT ? refusalVerdict(() => git(['status'], { spawn }), want(['status'], ROOT)) : true,
+  ].filter((v) => v !== true);
+  return !got.length || got.join('; ');
+});
+check('git: gitLive - cwd вне живого дерева, isolated, env, baseEnv - отказ; по живому дереву - окружение процесса как есть и -c core.fsmonitor=false', () => {
+  const spawn = (bin, args, opts) => ({ status: 0, stdout: JSON.stringify({ bin, args, opts }), stderr: '' });
+  const outside = os.tmpdir();
+  const foreign = (keys) => 'gitLive: ' + keys + ' не принимается - живое дерево идёт с конфигом оператора, изоляция - у git временных репозиториев';
+  const got = [
+    refusalVerdict(() => gitLive(['status'], { cwd: outside, spawn }), 'gitLive status: cwd ' + outside + ' вне живого дерева ' + ROOT + ' - временный репозиторий зовёт git/gitStrict'),
+    refusalVerdict(() => gitLive(['status'], { spawn }), 'gitLive status: cwd undefined вне живого дерева ' + ROOT + ' - временный репозиторий зовёт git/gitStrict'),
+    refusalVerdict(() => gitLive(['status'], { cwd: ROOT, isolated: true, spawn }), foreign('isolated')),
+    refusalVerdict(() => gitLive(['status'], { cwd: ROOT, env: {}, spawn }), foreign('env')),
+    refusalVerdict(() => gitLive(['status'], { cwd: ROOT, baseEnv: {}, spawn }), foreign('baseEnv')),
+  ].filter((v) => v !== true);
+  if (got.length) return got.join('; ');
+  const seen = JSON.parse(gitLive(['status'], { cwd: ROOT, spawn }).stdout);
+  const want = JSON.stringify({ bin: GIT_BIN, args: ['-c', 'core.fsmonitor=false', 'status'], opts: { cwd: ROOT } });
+  return JSON.stringify(seen) === want || 'gitLive зовёт ' + JSON.stringify(seen) + ', ожидалось ' + want + ' (без env - окружение процесса)';
+});
+// Сверка версии git не запоминает разовый сбой запуска (замечание ревью E0-12AA): следующий git проб
+// спрашивает снова; разобранный ответ - и пропуск, и отказ по версии - запомнен
+check('git: сверка версии - сбой git --version не запомнен (следующий вопрос спрашивает снова), разобранный ответ запомнен', () => {
+  const answers = [{ status: null, error: Object.assign(new Error('spawnSync git EAGAIN'), { code: 'EAGAIN' }) }, { status: 0, stdout: 'git version 2.45.1\n' }];
+  let asked = 0;
+  const ready = gitVersionGate(() => answers[Math.min(asked++, answers.length - 1)]);
+  const first = refusalVerdict(ready, 'git --version: EAGAIN - сверка версии повторится на следующем git проб');
+  if (first !== true) return 'сбой запуска: ' + first;
+  try {
+    ready();
+    ready();
+  } catch (e) {
+    return 'после сбоя запуска сверка не повторилась: ' + ((e && e.message) || String(e));
+  }
+  if (asked !== 2) return 'git --version спрошен ' + asked + ' раз(а) на трёх вопросах, ожидалось 2 (сбой, ответ, память)';
+  let oldAsked = 0;
+  const old = gitVersionGate(() => { oldAsked++; return { status: 0, stdout: 'git version 2.31.0' }; });
+  const refusal = [refusalVerdict(old, gitVersionVerdict('git version 2.31.0')), refusalVerdict(old, gitVersionVerdict('git version 2.31.0'))].filter((v) => v !== true);
+  if (refusal.length) return 'отказ по версии: ' + refusal.join('; ');
+  return oldAsked === 1 || 'отказ по версии не запомнен: спрошено ' + oldAsked + ' раз(а)';
+});
+// Набор детей: сбой снятия, кроме ESRCH (ребёнок уже вышел), не глотается (замечание ревью E0-12AA)
+check('набор детей: kill - сбой снятия (EPERM) назван в ответе, ESRCH (уже вышел) - нет, набор очищен', () => {
+  const reg = CHILDREN_MOD.makeChildRegistry({
+    kill: (child) => { throw Object.assign(new Error(child.code + ': kill'), { code: child.code }); },
+  });
+  reg.live.add({ pid: 1, code: 'ESRCH' });
+  reg.live.add({ pid: 2, code: 'EPERM' });
+  const failed = reg.kill();
+  if (reg.live.size) return 'набор не очищен: ' + reg.live.size;
+  return JSON.stringify(failed) === JSON.stringify(['2: EPERM: kill']) || 'сбои ' + JSON.stringify(failed) + ', ожидалось ["2: EPERM: kill"]';
+});
+// Мемо прогона (rootPkg, gateProbe) сверяют кейсы на подменённых источниках в selftest-gates.js
+// (TECH_DEBT 23.10.2026 E0-12T C23: счётчики из рабочего кода сняты).
+// Без модулей проб гейтов строка ниже не гонялась: её называет строка «пробы гейтов: модули
 // самопроверки загружены» (GATES - отдача registerGateProbes, selftest-gates.js).
 if (GATES) {
-  check('мемо прогона: корневой package.json прочитан с диска один раз, gateProbe спрашивает gates.js о файле один раз', () => {
-    const reads = GATES.rootPkgReads();
-    if (reads !== 1) return 'корневой package.json прочитан ' + reads + ' раз(а)';
-    const twice = [];
-    let asked = 0;
-    let selected = 0;
-    for (const [id, p] of GATES.gateProbes) {
-      asked += p.asked;
-      selected += p.selected;
-      if (p.selected !== p.seen.size) twice.push(id + ': ' + p.selected + ' вызовов selects на ' + p.seen.size + ' файлов');
-    }
-    if (twice.length) return 'gates.js спрошен о файле больше одного раза: ' + twice.join('; ');
-    return asked > selected || 'мемо gateProbe ни разу не сработало (' + asked + ' вопросов, ' + selected + ' вызовов) - сверка слепа';
-  });
-
   // Строка снимка VITEST_GATE - после всех проб, которым нужен ответ дочернего vitest: отказ
   // (не стартовал, не ответил, иная форма) - одна строка с перечнем не гонявшихся проб.
   const { intGuard, VITEST_GATE } = GATES;
@@ -2078,21 +2933,84 @@ if (GATES) {
 }
 
 // ------------------------------------------------------------------ боевое состояние
-check('боевой .qa-state после проб байт в байт прежний', () => {
-  const now = liveBytes();
-  const same = LIVE_BYTES === null ? now === null : now !== null && LIVE_BYTES.equals(now);
-  if (same) return true;
-  return 'боевой ' + LIVE_STATE + ' изменился за прогон: ' +
-    (LIVE_BYTES === null ? 'не было' : LIVE_BYTES.length + ' байт') + ' -> ' + (now === null ? 'нет' : now.length + ' байт');
+/**
+ * Запись хука сессии в боевой .qa-state во время прогона самопроверку не красит (решение техлида Р3
+ * E0-12AA; TECH_DEBT 23.10.2026 E0-12T ОВ2, E0-12U круг 2). Боевой .qa-state эта проба не трогает:
+ * «боевой» здесь - подставной каталог, на который смотрит своя точка запуска (makeLauncher с
+ * liveState на его .qa-state). Эмулятор сессии - дочерний node, который пишет .qa-state подставного
+ * каталога, как хук сессии (lib.js writeState: временный файл и rename). После его записи дочерний
+ * node проб с каталогом проб запускается (пропуск), с подставным каталогом и без переменной - отказ
+ * точки запуска с путём подставного файла (отказ): точка не смотрит на содержимое состояния, сравнения
+ * байт в байт нет.
+ */
+check('боевой .qa-state: запись хука сессии во время прогона самопроверку не красит - на подставном боевом каталоге эмулятор сессии пишет .qa-state (writeState), дочерний node проб с каталогом проб запускается, с боевым каталогом и без переменной - отказ', () => {
+  const live = tempDir('live-state');
+  try {
+    const liveFile = put(live, '.qa-state', JSON.stringify({ edits: 0, strayFiles: [], lastQa: null }, null, 2));
+    const before = fs.readFileSync(liveFile, 'utf8');
+    // точка запуска «прогона» создана до записи сессии: запись идёт во время её жизни, как у боевой LAUNCH
+    const launch = CHILDREN_MOD.makeLauncher({ liveState: liveFile });
+    const session = 'const L = require(' + JSON.stringify(path.join(HOOKS, 'lib.js')) + ');\nconst s = L.readState();\ns.edits += 1;\nL.writeState(s);\n';
+    const emu = run(process.execPath, ['-e', session], { cwd: ROOT, env: Object.assign({}, process.env, { SF_HOOK_STATE_DIR: live }) });
+    if (emu.status !== 0) return 'эмулятор сессии: код ' + emu.status + ' ' + String(emu.stderr || (emu.error && emu.error.message)).slice(0, 120);
+    const after = fs.readFileSync(liveFile, 'utf8');
+    if (after === before) return 'эмулятор сессии не записал подставной .qa-state - пропуск ничего не доказывает';
+    const node = (dir) => () => launch.spawnSync(process.execPath, ['-e', ''], { cwd: ROOT, env: stateEnv(dir), encoding: 'utf8', windowsHide: true });
+    const passed = node(PROBE_STATE_DIR)();
+    if (passed.status !== 0) return 'после записи сессии дочерний node проб с каталогом проб: код ' + passed.status + ' ' + String(passed.stderr || (passed.error && passed.error.message)).slice(0, 120);
+    const refused = [
+      refusalVerdict(node(live), 'дочерний процесс с SF_HOOK_STATE_DIR на каталоге боевого .qa-state (' + live + ') - хук в нём писал бы состояние сессии'),
+      refusalVerdict(node(undefined), 'дочерний процесс без SF_HOOK_STATE_DIR - хук в нём писал бы боевой ' + liveFile + '; передай окружение с каталогом состояния проб'),
+    ].filter((v) => v !== true);
+    if (refused.length) return 'точка запуска на подставном боевом каталоге: ' + refused.join('; ');
+    return { note: 'подставной .qa-state ' + before.length + ' -> ' + after.length + ' байт' };
+  } finally {
+    releaseTemp(live);
+  }
 });
-// Каталоги прогона (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «каталоги sf-selftest-* в %TEMP%»): каждый каталог реестра, кроме PROBE_STATE_DIR (его
-// снимает выход процесса), снят своей пробой - не в реестре и не на диске. Каталог хуков git
-// временных репозиториев (noHooksDir) живёт до последней пробы с коммитом - он снимается здесь.
-if (noHooks) releaseTemp(noHooks);
-check('временные каталоги прогона сняты: ни одного каталога реестра на диске, кроме PROBE_STATE_DIR', () => {
-  const left = TEMP.made.filter((d) => d !== PROBE_STATE_DIR && (TEMP.live.has(d) || !absent(d)));
-  if (left.length) return 'остались: ' + left.join(', ') + (DROP_FAILURES.length ? '; сбой снятия: ' + DROP_FAILURES.join('; ') : '');
-  return { note: TEMP.made.length + ' каталогов, все с префиксом ' + TEMP.PREFIX };
+// Точка, которая держит смысл прежней сверки: каждый дочерний процесс проб - через одну точку запуска,
+// и она не запускает его без SF_HOOK_STATE_DIR, с относительным путём или с каталогом боевого
+// .qa-state; отказ - в строке той пробы, что так позвала (имя пробы - имя строки). Каждая ветка
+// hookStateGuard - своя строка (замечание ревью E0-12AA: один откат на три ветки ничего не сажал)
+const GUARD_NO_VAR = 'дочерний процесс без SF_HOOK_STATE_DIR - хук в нём писал бы боевой ' + LIVE_STATE + '; передай окружение с каталогом состояния проб';
+const guardedNode = (e) => () => run(process.execPath, ['-e', ''], { env: e, cwd: ROOT });
+check('боевой .qa-state: дочерний процесс проб без SF_HOOK_STATE_DIR - отказ в строке пробы', () =>
+  refusalVerdict(guardedNode(stateEnv(undefined)), GUARD_NO_VAR));
+check('боевой .qa-state: дочерний процесс проб с относительным SF_HOOK_STATE_DIR - отказ в строке пробы', () =>
+  refusalVerdict(guardedNode(stateEnv('state')), 'дочерний процесс с относительным SF_HOOK_STATE_DIR (state) - ребёнок разрешил бы его от своего cwd; передай абсолютный каталог состояния проб'));
+check('боевой .qa-state: дочерний процесс проб с SF_HOOK_STATE_DIR на каталоге боевого .qa-state - отказ в строке пробы', () =>
+  refusalVerdict(guardedNode(stateEnv(path.dirname(LIVE_STATE))), 'дочерний процесс с SF_HOOK_STATE_DIR на каталоге боевого .qa-state (' + path.dirname(LIVE_STATE) + ') - хук в нём писал бы состояние сессии'));
+check('боевой .qa-state: дочерний процесс проб с SF_HOOK_STATE_DIR на каталоге проб - пропуск', () => {
+  const r = guardedNode(stateEnv(PROBE_STATE_DIR))();
+  return r.status === 0 || 'с каталогом проб: код ' + r.status + ' ' + String(r.stderr || (r.error && r.error.message)).slice(0, 120);
+});
+// Проверка - для любой программы точки запуска, не только node по имени (решение техлида Р7 E0-12AA):
+// обёртки cmd /c и bash -c запустили бы хук с тем же окружением. Отказ - до запуска: оболочка не стартует
+check('боевой .qa-state: cmd /c и bash -c с явным окружением без SF_HOOK_STATE_DIR - отказ точки запуска (проверка не по имени программы)', () => {
+  const env = { PATH: process.env.PATH || '' };
+  const got = [
+    refusalVerdict(() => run('cmd', ['/c', 'node -e ""'], { env, cwd: ROOT }), GUARD_NO_VAR),
+    refusalVerdict(() => run('bash', ['-c', 'node -e ""'], { env, cwd: ROOT }), GUARD_NO_VAR),
+  ].filter((v) => v !== true);
+  return !got.length || got.join('; ');
+});
+// git и turbo проходят точку запуска своими окружениями: SF_HOOK_STATE_DIR - в белом списке envByList
+// (gitProbeEnv), turboEnv снимает только TURBO_*; git с окружением без переменной - отказ
+check('боевой .qa-state: git с окружением без SF_HOOK_STATE_DIR - отказ; git через gitProbeEnv и turbo через turboEnv - пропуск', () => {
+  // окружение родителя без переменной: gitProbeEnv берёт его как base, белый список её не добавит
+  const refused = refusalVerdict(() => git(['--version'], { cwd: os.tmpdir(), baseEnv: stateEnv(undefined) }), GUARD_NO_VAR);
+  if (refused !== true) return 'git без переменной: ' + refused;
+  const viaProbe = git(['--version'], { cwd: os.tmpdir() });
+  if (viaProbe.status !== 0) return 'git через gitProbeEnv: код ' + viaProbe.status + ' ' + String(viaProbe.stderr || (viaProbe.error && viaProbe.error.message)).slice(0, 120);
+  if (!G) return 'модуль графа selftest-graph.js не загружен - turboEnv не проверен';
+  const seen = [];
+  const launch = CHILDREN_MOD.makeLauncher({ liveState: LIVE_STATE, spawnSync: (cmd) => { seen.push(cmd); return { status: 0 }; } });
+  try {
+    launch.spawnSync('turbo', ['--version'], { env: G.turboEnv(process.env) });
+  } catch (e) {
+    return 'turbo через turboEnv: ' + ((e && e.message) || String(e));
+  }
+  return seen.join() === 'turbo' || 'turbo через turboEnv не запущен: ' + JSON.stringify(seen);
 });
 check('пробы не оставили файлов в репозитории: записи git status с содержимым и игнорируемые файлы (кроме node_modules) до и после прогона те же', () => {
   if (!LIVE_TREE) return 'снимок дерева до проб не снят: ' + LIVE_TREE_ERROR;
@@ -2100,6 +3018,29 @@ check('пробы не оставили файлов в репозитории: 
   const diff = treeDiff(LIVE_TREE, now);
   if (!diff.length) return { note: now.size + ' записей' };
   return 'за прогон: ' + diff.join(', ').slice(0, 300) + ' (если файлы в это время правили руками или другим процессом - перезапусти)';
+});
+// Каталоги git прогона (noHooksDir - хуки временных репозиториев, emptyGitConfig - GIT_CONFIG_GLOBAL)
+// живут до последнего git проб - они снимаются здесь и забываются: git после снятия берёт новые
+// каталоги, а не путь в снятый (замечание ревью E0-12AA: GIT_CONFIG_GLOBAL на удалённый файл)
+releaseGitDirs();
+check('git: каталоги прогона noHooks и gitcfg сняты в конце и забыты - git проб после снятия берёт новые, а не путь в снятый каталог', () => {
+  const cfg = gitProbeEnv().GIT_CONFIG_GLOBAL;
+  const hooks = noHooksDir();
+  const why = [];
+  if (!L.isFilePresent(cfg)) why.push('GIT_CONFIG_GLOBAL на снятый файл ' + cfg);
+  if (absent(hooks)) why.push('core.hooksPath на снятый каталог ' + hooks);
+  releaseGitDirs();
+  return why.length ? why.join('; ') : true;
+});
+// Каталоги прогона (E0-12T, TECH_DEBT 19.10.2026 E0-12D круг 6 «каталоги sf-selftest-* в %TEMP%»):
+// каждый каталог реестра, кроме PROBE_STATE_DIR (его снимает выход процесса) и каталогов, которые
+// держит живой ребёнок после отказа снятия (holdTemp: их называет строка той пробы, снимет выход
+// процесса после SIGKILL набора детей), снят своей пробой - не в реестре и не на диске
+check('временные каталоги прогона сняты: ни одного каталога реестра на диске, кроме PROBE_STATE_DIR', () => {
+  const left = TEMP.made.filter((d) => d !== PROBE_STATE_DIR && !HELD_TEMP.has(d) && (TEMP.live.has(d) || !absent(d)));
+  if (left.length) return 'остались: ' + left.join(', ') + (DROP_FAILURES.length ? '; сбой снятия: ' + DROP_FAILURES.join('; ') : '');
+  const held = HELD_TEMP.size ? '; держит живой ребёнок (снимет выход процесса): ' + Array.from(HELD_TEMP.keys()).join(', ') : '';
+  return { note: TEMP.made.length + ' каталогов, все с префиксом ' + TEMP.PREFIX + held };
 });
 
 // ------------------------------------------------------------------ итог

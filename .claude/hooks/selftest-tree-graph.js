@@ -17,7 +17,7 @@ const path = require('path');
 
 function createTreeGraph(ctx) {
   const {
-    G, L, LISTING_MAX_BUFFER, ROOT, check, gateVerdict, git, readJson, releaseTemp, snapshotGate, tempDir,
+    G, L, LISTING_MAX_BUFFER, ROOT, check, gateVerdict, git, gitLive, inLiveTree, put, readJson, releaseTemp, run, snapshotGate, tempDir,
   } = ctx;
 
   /**
@@ -47,10 +47,7 @@ function createTreeGraph(ctx) {
   function withTempRoot(files, fn) {
     const dir = tempDir('turbo');
     try {
-      for (const [rel, body] of Object.entries(files)) {
-        fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
-        fs.writeFileSync(path.join(dir, rel), body);
-      }
+      for (const [rel, body] of Object.entries(files)) put(dir, rel, body);
       return fn(dir);
     } finally {
       releaseTemp(dir);
@@ -60,7 +57,8 @@ function createTreeGraph(ctx) {
   /**
    * Файлы, которые git видит в дереве (`git ls-files -z`, пути от корня) и которые есть на диске:
    * удалённый в рабочем дереве файл turbo не хеширует. Для G.inputsGap; git зовёт только
-   * самопроверка (помощник git()), модуль графа получает список параметром. git не запустился или
+   * самопроверка (живое дерево - gitLive с конфигом оператора, как у files.mjs, решение техлида Р8
+   * E0-12AA; временный корень кейса - git(); признак - ctx.inLiveTree, как у repoSnapshot), модуль графа получает список параметром. git не запустился или
    * упал - исключение; вывод больше maxBuffer (ENOBUFS) - своя причина, а не «не запустился».
    * Наличие на диске - stat, как у близнеца trackedFiles из scripts/lib/files.mjs: ссылка судится по
    * цели - на файл в списке, на каталог и висячая - нет; ENOENT и ENOTDIR (родитель стал файлом) -
@@ -76,18 +74,13 @@ function createTreeGraph(ctx) {
     const stat = o.stat || fs.statSync;
     const root = o.root || ROOT;
     const others = o.others ? ['--others', '--exclude-standard'] : [];
-    const r = git(['ls-files', '-z', '--cached', ...others], { cwd: root, maxBuffer: LISTING_MAX_BUFFER, spawn: o.spawn, bin: o.git });
+    const call = inLiveTree(root) ? gitLive : git;
+    const r = call(['ls-files', '-z', '--cached', ...others], { cwd: root, maxBuffer: LISTING_MAX_BUFFER, spawn: o.spawn, bin: o.git });
     if (r.error && r.error.code === 'ENOBUFS') throw new Error('git ls-files: вывод больше maxBuffer (' + LISTING_MAX_BUFFER + ' байт)');
     if (r.error) throw new Error('git ls-files не запустился: ' + r.error.message);
     if (r.status !== 0) throw new Error('git ls-files: ' + (r.status === null ? 'сигнал ' + r.signal : 'код ' + r.status) + ': ' + String(r.stderr || '').trim());
-    const isFile = (f) => {
-      try {
-        return stat(path.join(root, f)).isFile();
-      } catch (e) {
-        if (L.isNotFile(e)) return false;
-        throw e;
-      }
-    };
+    // «файл есть» - один помощник обвязки (L.isFilePresent: нет пути - false, иной сбой - исключение)
+    const isFile = (f) => L.isFilePresent(path.join(root, f), stat);
     // --cached --others даёт файл с конфликтом по строке на стадию - один раз, как в files.mjs.
     return [...new Set(r.stdout.split('\0'))].filter((f) => f && isFile(f));
   }
@@ -101,7 +94,9 @@ function createTreeGraph(ctx) {
    */
   function liveSnap() {
     if (!G) throw new Error('модуль графа selftest-graph.js не загружен (строка синтаксиса или require выше)');
-    const dry = G.turboDry(GRAPH_SCRIPTS);
+    // turbo - через точку запуска самопроверки (ctx.run), а не свою (замечание ревью E0-12AA); общий
+    // кэш dry - только у этого вызова (shared): кейсы с подменённым run идут мимо него (Р9 E0-12AA)
+    const dry = G.turboDry(GRAPH_SCRIPTS, { run, shared: true });
     return {
       dry,
       ws: dryManifests(dry),

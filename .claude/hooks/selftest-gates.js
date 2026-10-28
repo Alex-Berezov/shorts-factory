@@ -23,7 +23,7 @@ const fs = require('fs');
 const path = require('path');
 
 function registerGateProbes(ctx, deps) {
-  const { G, L, LISTING_MAX_BUFFER, ROOT, ROUTE_FORMS, check, git, readJson, releaseTemp, repoRules, run, tempDir } = ctx;
+  const { G, L, LISTING_MAX_BUFFER, ROOT, ROUTE_FORMS, check, gitLive, outcome, put, readJson, refusalVerdict, releaseTemp, repoRules, run, snapshotGate, tempDir } = ctx;
   const { int, gateRun, treeGraph, roots, intCases, cases } = deps;
   const { gatesModule } = gateRun;
   const { intForbidden, INT_PROBE_STATIC, intProbeReads, relUnder } = int;
@@ -37,7 +37,7 @@ function registerGateProbes(ctx, deps) {
    * правка обработки when там обязана краснеть здесь) гейт gate на одном изменённом файле file
    * при полном прогоне (без --only). Вызов selectGates в пробах выбора - только здесь: gateProbe и
    * пробы отказа на изменённом when зовут selects (проба --only в selftest-gates-run.js зовёт его со
-   * списком only). Модуль - через gatesModule: gates.js не прошёл пробу require (selftest-gates-run.js) -
+   * списком only). Модуль - через gatesModule: gates.js не прошёл пробу require в selftest-gates-run.js -
    * исключение (красная строка).
    */
   function selects(gate, file) {
@@ -48,31 +48,46 @@ function registerGateProbes(ctx, deps) {
   }
 
   /**
-   * Гейт id из rules.sf.json и runs(file) - selects на нём, с мемо на гейт: пробы графа и стабов
-   * спрашивают о тех же файлах много раз за прогон (TECH_DEBT 21.10.2026 E0-12L круги 3 и 4,
-   * время прогона: `runs` без мемо). Нет гейта - исключение (красная строка check). Счёт: asked -
-   * вопросов runs, selected - вызовов selects, seen - разных файлов; их сверяет проба в конце прогона
-   * (selected === seen.size: каждый файл спрошен у gates.js один раз).
+   * Пробы выбора гейтов правил rules: gateProbe(id) - { gate, runs }, runs(file) - select(gate, file)
+   * с мемо на гейт и файл: пробы графа и стабов спрашивают о тех же файлах много раз за прогон
+   * (TECH_DEBT 21.10.2026 E0-12L круги 3 и 4, время прогона: `runs` без мемо); проба гейта - одна на
+   * id. Нет гейта - исключение (красная строка check). select - источник ответа (боевой - selects);
+   * мемо сверяет кейс на подменённом источнике со своим счётчиком, в рабочем коде счётчиков нет
+   * (TECH_DEBT 23.10.2026 E0-12T C23).
    */
-  const gateProbes = new Map();
-  function gateProbe(id) {
-    if (gateProbes.has(id)) return gateProbes.get(id);
-    const gate = ((repoRules && repoRules.gates) || []).find((g) => g.id === id);
-    if (!gate) throw new Error('гейта ' + id + ' нет в правилах');
-    const seen = new Map();
-    const res = { gate, seen, asked: 0, selected: 0 };
-    const select = (file) => {
-      res.selected++;
-      return selects(gate, file);
+  function makeGateProbes(rules, select) {
+    const probes = new Map();
+    return (id) => {
+      if (probes.has(id)) return probes.get(id);
+      const gate = ((rules && rules.gates) || []).find((g) => g.id === id);
+      if (!gate) throw new Error('гейта ' + id + ' нет в правилах');
+      const seen = new Map();
+      const res = {
+        gate,
+        runs: (file) => {
+          if (!seen.has(file)) seen.set(file, select(gate, file));
+          return seen.get(file);
+        },
+      };
+      probes.set(id, res);
+      return res;
     };
-    res.runs = (file) => {
-      res.asked++;
-      if (!seen.has(file)) seen.set(file, select(file));
-      return seen.get(file);
-    };
-    gateProbes.set(id, res);
-    return res;
   }
+  const gateProbe = makeGateProbes(repoRules, selects);
+  // Мемо проб выбора (TECH_DEBT 23.10.2026 E0-12T C23): на подменённом источнике второй вопрос о
+  // файле источник не спрашивает, проба гейта - одна на id
+  check('gateProbe: мемо - второй вопрос о том же файле не спрашивает gates.js, проба гейта одна на id (подменённый источник со счётчиком)', () => {
+    let calls = 0;
+    const probeOf = makeGateProbes({ gates: [{ id: 'x' }] }, (gate, file) => {
+      calls++;
+      return file === 'a';
+    });
+    const p = probeOf('x');
+    const got = [p.runs('a'), p.runs('a'), p.runs('b'), p.runs('b')];
+    if (JSON.stringify(got) !== '[true,true,false,false]') return 'ответы ' + JSON.stringify(got);
+    if (probeOf('x') !== p) return 'вторая проба того же гейта - новый объект, мемо потеряно';
+    return calls === 2 || 'источник спрошен ' + calls + ' раз(а) на четырёх вопросах о двух файлах';
+  });
 
   /** Пути файлов, названные в note гейта; шаблоны с * и каталоги (`scripts/lib/**`) - нет. */
   function notePaths(gate) {
@@ -172,17 +187,18 @@ function registerGateProbes(ctx, deps) {
    *   spec.extra - [{ name, fn({ gate, runs }, spec), graph, int }]: fn получает пробу гейта
    *     (gateProbe) и тот же spec вторым аргументом; результат fn - как у check; graph - fn читает
    *     граф turbo настоящего дерева (GRAPH_GATE) и без него не гоняется; int - ещё и test/imports.ts
-   *     с дочерним vitest или require(esm) - та же граница Node (intGuard).
-   * id - идентификатор гейта в правилах; spec - описание пробы выше.
+   *     с дочерним vitest или require(esm) - та же граница Node (extraProbe по снимкам gateSnaps).
+   * id - идентификатор гейта в правилах; spec - описание пробы выше; sink - приёмник строк (по
+   * умолчанию check; кейс TDZ берёт свой).
    */
-  function checkGateSelection(id, spec) {
-    check('гейт ' + id + ': gates.js выбирает его на ' + spec.runWhat, () => {
+  function checkGateSelection(id, spec, sink = check) {
+    sink('гейт ' + id + ': gates.js выбирает его на ' + spec.runWhat, () => {
       const { runs } = gateProbe(id);
       const missed = spec.mustRun.filter((f) => !runs(f));
       if (missed.length) return 'gates.js не выбирает его на ' + missed.join(', ');
       return { note: spec.mustRun.length + ' выбор' };
     });
-    check('гейт ' + id + ': gates.js пропускает его на ' + spec.skipWhat, () => {
+    sink('гейт ' + id + ': gates.js пропускает его на ' + spec.skipWhat, () => {
       const { runs } = gateProbe(id);
       const stray = spec.mustSkip.filter((f) => runs(f));
       if (stray.length) return 'gates.js выбирает его на постороннем ' + stray.join(', ');
@@ -190,15 +206,68 @@ function registerGateProbes(ctx, deps) {
     });
     // gates.js берёт изменённые файлы из git (L.changedFiles: diff и ls-files --exclude-standard):
     // файл из .gitignore туда не попадает никогда, и выбор на нём - обещание без покрытия (E0-12K, B1).
-    check('гейт ' + id + ': каждый файл выбора git показывает (не в .gitignore)', () =>
-      checkIgnoreVerdict(git(['check-ignore', '--', ...spec.mustRun], { cwd: ROOT }), spec.mustRun.length));
+    sink('гейт ' + id + ': каждый файл выбора git показывает (не в .gitignore)', () =>
+      checkIgnoreVerdict(gitLive(['check-ignore', '--', ...spec.mustRun], { cwd: ROOT }), spec.mustRun.length));
     // x.graph - проба графа turbo настоящего дерева: без графа она не гоняется (snapshotGate)
     for (const x of spec.extra || []) {
       const name = 'гейт ' + id + ': ' + x.name;
       const fn = () => x.fn(gateProbe(id), spec);
-      check(name, x.int ? intGuard(name, fn) : x.graph ? GRAPH_GATE.guard(name, fn) : fn);
+      sink(name, extraProbe(x, name, fn, gateSnaps));
     }
   }
+
+  /**
+   * Снимки прогона для extra-строк checkGateSelection: { graph, imports } (GRAPH_GATE и IMPORTS_GATE)
+   * после graph.takeLive() и intRun.start ниже, до них - null. Объявлены здесь, до первого вызова
+   * checkGateSelection (TECH_DEBT 23.10.2026 E0-12U круг 2: чтение GRAPH_GATE до его объявления - TDZ).
+   */
+  let gateSnaps = null;
+  /**
+   * Проба extra-строки x по снимкам s (E0-12AA; TECH_DEBT 23.10.2026 E0-12T F7): int - под guard графа
+   * и test/imports.ts (как intGuard), graph - под guard графа, иначе fn как есть. Снимков нет (описание
+   * гейта стоит до них, как compose, tracker, schema-drift) - строка пробы называет порядок, а не
+   * ReferenceError.
+   */
+  function extraProbe(x, name, fn, s) {
+    if (!x.int && !x.graph) return fn;
+    if (!s) return () => 'проба ' + (x.int ? 'int' : 'графа') + ' в описании гейта до снимков графа turbo и test/imports.ts - перенеси описание гейта ниже graph.takeLive() (selftest-gates.js)';
+    return x.int ? s.graph.guard(name, s.imports.guard(name, fn)) : s.graph.guard(name, fn);
+  }
+
+  // TDZ (TECH_DEBT 23.10.2026 E0-12U круг 2, E0-12T F4): описание гейта с graph: true и int: true до
+  // снимков (там, где стоят compose, tracker, schema-drift) - строки проб с причиной, а не исключение
+  check('checkGateSelection: проба graph и int в описании гейта до снимка графа (место compose, tracker, schema-drift) - строка с причиной, а не ReferenceError', () => {
+    const rows = [];
+    const extra = [{ name: 'g', graph: true, fn: () => true }, { name: 'i', int: true, fn: () => true }];
+    try {
+      checkGateSelection('compose', { runWhat: 'x', skipWhat: 'y', mustRun: [], mustSkip: [], extra }, (name, fn) => rows.push({ name, fn }));
+    } catch (e) {
+      return 'исключение вместо строк: ' + ((e && e.message) || String(e));
+    }
+    const got = rows.filter((r) => /: [gi]$/.test(r.name)).map((r) => outcome(r.name, r.fn));
+    const why = (kind) => 'проба ' + kind + ' в описании гейта до снимков графа turbo и test/imports.ts - перенеси описание гейта ниже graph.takeLive() (selftest-gates.js)';
+    const want = JSON.stringify([{ ok: false, name: 'гейт compose: g', note: why('графа') }, { ok: false, name: 'гейт compose: i', note: why('int') }]);
+    return JSON.stringify(got) === want || 'ожидалось ' + want + ', получено ' + JSON.stringify(got);
+  });
+  // Диспетчер (TECH_DEBT 23.10.2026 E0-12T F7): на подменённых снимках с ошибкой проба int уходит в
+  // перечень снимка test/imports.ts, проба graph - в перечень снимка графа; своей строки нет
+  check('checkGateSelection: диспетчер - int под снимками графа и test/imports.ts, graph под снимком графа (снимок с ошибкой - проба в его перечне, своей строки нет)', () => {
+    const ok = () => snapshotGate(() => ({}));
+    const broken = () => snapshotGate(() => { throw new Error('boom'); });
+    const cases = [
+      ['int при ошибке test/imports.ts', { int: true }, { graph: ok(), imports: broken() }, 'imports'],
+      ['int при ошибке графа', { int: true }, { graph: broken(), imports: ok() }, 'graph'],
+      ['graph при ошибке графа', { graph: true }, { graph: broken(), imports: ok() }, 'graph'],
+    ];
+    const bad = [];
+    for (const [label, x, s, owner] of cases) {
+      const r = outcome(label, extraProbe(x, label, () => true, s));
+      if (r !== null || s[owner].blocked.join() !== label) bad.push(label + ': строка ' + JSON.stringify(r) + ', перечень снимка ' + JSON.stringify(s[owner].blocked));
+    }
+    const live = outcome('с снимками', extraProbe({ int: true }, 'с снимками', () => true, { graph: ok(), imports: ok() }));
+    if (!live || !live.ok) bad.push('со снятыми снимками: ' + JSON.stringify(live));
+    return !bad.length || bad.join('; ');
+  });
 
   /**
    * Вердикт пробы «каждый файл выбора git показывает» по результату `git check-ignore`
@@ -318,7 +387,7 @@ function registerGateProbes(ctx, deps) {
     return {
       name: 'ни один файл, который видит git, кроме файлов выбора' + (exempt.length ? ' и масок целиком (' + exempt.join(', ') + ')' : '') + ', его не выбирает',
       fn: ({ runs }, spec) => {
-        const r = git(['-c', 'core.quotepath=false', 'ls-files', '-z'], { cwd: ROOT, maxBuffer: LISTING_MAX_BUFFER });
+        const r = gitLive(['-c', 'core.quotepath=false', 'ls-files', '-z'], { cwd: ROOT, maxBuffer: LISTING_MAX_BUFFER });
         if (r.error) return 'git ls-files не запустился: ' + r.error.message;
         if (r.status !== 0) return 'git ls-files: ' + (r.status === null ? 'сигнал ' + r.signal : 'код ' + r.status) + ': ' + String(r.stderr || '').trim();
         const files = String(r.stdout || '').split('\0').filter(Boolean);
@@ -332,6 +401,120 @@ function registerGateProbes(ctx, deps) {
       },
     };
   }
+
+  /**
+   * Граф импортов скрипта гейта (TECH_DEBT 21.10.2026 E0-12M круг 4, E3): от entry (путь от корня
+   * root) - относительные пути после from, после import и в динамическом import с литералом (в том
+   * числе export from и динамический import в JSDoc-типе); пакеты и `node:*` - концы. Разбор - регэксп
+   * (решение техлида Р1 E0-12AA: AST - E0-12AD), fail-closed (L-028): динамический import с нелитералом и
+   * путь, которого нет на диске, - исключение с модулем. Пробелы и перенос строки между скобкой и
+   * литералом - тот же литерал (просмотр вперёд целиком, без отката \s*: скобка, пробел и кавычка - не
+   * «нелитеральный», замечание ревью E0-12AA). Возвращает файлы графа от корня, по алфавиту.
+   */
+  const IMPORT_LITERAL = /\b(?:from|import)\s*\(?\s*(['"])([^'"]+)\1/g;
+  const IMPORT_DYNAMIC = /\bimport\s*\((?!\s*['"])/g;
+  function importGraph(entry, root = ROOT) {
+    const seen = new Set();
+    const queue = [entry];
+    while (queue.length) {
+      const file = queue.shift();
+      if (seen.has(file)) continue;
+      const abs = path.join(root, ...file.split('/'));
+      if (!L.isFilePresent(abs)) throw new Error('граф импортов ' + entry + ': ' + file + ' нет на диске');
+      seen.add(file);
+      const text = fs.readFileSync(abs, 'utf8');
+      for (const m of text.matchAll(IMPORT_DYNAMIC)) {
+        throw new Error('граф импортов ' + entry + ': ' + file + ':' + text.slice(0, m.index).split('\n').length + ' - динамический import с нелитеральным аргументом, что грузит модуль, проба не знает');
+      }
+      for (const m of text.matchAll(IMPORT_LITERAL)) {
+        const spec = m[2];
+        if (!spec.startsWith('./') && !spec.startsWith('../')) continue;
+        const rel = path.posix.normalize(path.posix.dirname(file) + '/' + spec);
+        if (rel.startsWith('../')) throw new Error('граф импортов ' + entry + ': ' + file + ' -> ' + spec + ' вне корня');
+        queue.push(rel);
+      }
+    }
+    return [...seen].sort();
+  }
+  /**
+   * Вердикт графа импортов гейта gate со скриптом entry: каждый файл графа выбирает гейт (runs), каждый
+   * scripts/lib/*.mjs вне графа - нет (автоматический mustSkip вместо ручного перечня), и файл
+   * scripts/lib, которого нет (LIB_NEIGHBOR), - тоже нет: маска `scripts/lib/*` в when выбрала бы гейт на
+   * любом будущем помощнике (прежние несуществующие соседи mustSkip, замечание ревью E0-12AA, L-027).
+   * root и libFiles (файлы scripts/lib от корня) - подмена для кейса.
+   */
+  const LIB_NEIGHBOR = 'scripts/lib/sf-selftest-neighbor.mjs';
+  function importGraphVerdict(runs, entry, root = ROOT, libFiles = null) {
+    const graph = importGraph(entry, root);
+    const lib = libFiles || fs.readdirSync(path.join(root, 'scripts', 'lib')).filter((f) => f.endsWith('.mjs')).map((f) => 'scripts/lib/' + f);
+    const missed = graph.filter((f) => !runs(f));
+    const stray = lib.filter((f) => !graph.includes(f) && runs(f));
+    const why = [];
+    if (missed.length) why.push('when не выбирает гейт на файлах графа импортов ' + entry + ': ' + missed.join(', '));
+    if (stray.length) why.push('when выбирает гейт на scripts/lib вне графа импортов ' + entry + ': ' + stray.join(', '));
+    if (runs(LIB_NEIGHBOR)) why.push('when выбирает гейт на файле scripts/lib, которого нет (' + LIB_NEIGHBOR + ') - маска вместо файлов графа импортов ' + entry);
+    return why.length ? why.join('; ') : { note: graph.length + ' файлов графа, ' + lib.filter((f) => !graph.includes(f)).length + ' scripts/lib вне графа' };
+  }
+  /** extra-строка checkGateSelection: граф импортов скрипта cmd гейта (importGraphVerdict). */
+  function importGraphExtra(entry) {
+    return {
+      name: 'граф импортов ' + entry + ': каждый его файл выбирает гейт, scripts/lib/*.mjs вне графа - нет',
+      fn: ({ runs }) => importGraphVerdict(runs, entry),
+    };
+  }
+  // Кейсы графа импортов на временном дереве: файл графа вне when, лишний scripts/lib вне графа в
+  // when, динамический import с нелитералом - отказ с именем; when ровно по графу - пропуск
+  check('граф импортов скрипта гейта: файл графа вне when, scripts/lib вне графа в when, динамический import с нелитералом - отказ с именем; when по графу - пропуск', () => {
+    const tmp = tempDir('imports');
+    try {
+      put(tmp, 'scripts/tasks.mjs', 'import { a } from "./lib/a.mjs";\nimport { join } from "node:path";\n');
+      put(tmp, 'scripts/lib/a.mjs', 'export { b } from "./b.mjs";\n');
+      put(tmp, 'scripts/lib/b.mjs', 'export const b = 1;\n');
+      put(tmp, 'scripts/lib/c.mjs', 'export const c = 1;\n');
+      const runsOf = (when) => (f) => selects({ id: 'sf-selftest-imports', cmd: 'x', when }, f);
+      const lib = ['scripts/lib/a.mjs', 'scripts/lib/b.mjs', 'scripts/lib/c.mjs'];
+      const verdict = (when) => importGraphVerdict(runsOf(when), 'scripts/tasks.mjs', tmp, lib);
+      const got = [
+        verdict('glob:{scripts/tasks.mjs,scripts/lib/a.mjs}'),
+        verdict('glob:{scripts/tasks.mjs,scripts/lib/a.mjs,scripts/lib/b.mjs,scripts/lib/c.mjs}'),
+        verdict('glob:{scripts/tasks.mjs,scripts/lib/a.mjs,scripts/lib/b.mjs}'),
+      ];
+      const want = [
+        'when не выбирает гейт на файлах графа импортов scripts/tasks.mjs: scripts/lib/b.mjs',
+        'when выбирает гейт на scripts/lib вне графа импортов scripts/tasks.mjs: scripts/lib/c.mjs',
+        { note: '3 файлов графа, 1 scripts/lib вне графа' },
+      ];
+      if (JSON.stringify(got) !== JSON.stringify(want)) return 'ожидалось ' + JSON.stringify(want) + ', получено ' + JSON.stringify(got);
+      const masked = verdict('glob:{scripts/tasks.mjs,scripts/lib/a.mjs,scripts/lib/b.mjs,scripts/lib/sf-*.mjs}');
+      const maskWant = 'when выбирает гейт на файле scripts/lib, которого нет (' + LIB_NEIGHBOR + ') - маска вместо файлов графа импортов scripts/tasks.mjs';
+      if (masked !== maskWant) return 'маска scripts/lib в when: ожидалось «' + maskWant + '», получено ' + JSON.stringify(masked);
+      put(tmp, 'scripts/lib/b.mjs', 'const name = "./c.mjs";\nexport const b = await imp' + 'ort(name);\n');
+      return refusalVerdict(() => importGraph('scripts/tasks.mjs', tmp), 'граф импортов scripts/tasks.mjs: scripts/lib/b.mjs:2 - динамический import с нелитеральным аргументом, что грузит модуль, проба не знает');
+    } finally {
+      releaseTemp(tmp);
+    }
+  });
+  // Литерал после пробела или переноса строки за скобкой динамического import - ребро графа, а не
+  // отказ «нелитеральный» (замечание ревью E0-12AA: \s* в IMPORT_DYNAMIC откатывался до нуля)
+  check('граф импортов скрипта гейта: динамический import - пробел или перенос строки между скобкой и литералом - ребро графа, а не отказ «нелитеральный»', () => {
+    const tmp = tempDir('imports-space');
+    try {
+      const imp = 'imp' + 'ort(';
+      put(tmp, 'scripts/tasks.mjs', 'const a = await ' + imp + ' "./lib/a.mjs");\nconst b = await ' + imp + '\n  \'./lib/b.mjs\'\n);\n');
+      put(tmp, 'scripts/lib/a.mjs', 'export const a = 1;\n');
+      put(tmp, 'scripts/lib/b.mjs', 'export const b = 1;\n');
+      let got;
+      try {
+        got = importGraph('scripts/tasks.mjs', tmp);
+      } catch (e) {
+        return 'отказ: ' + ((e && e.message) || String(e));
+      }
+      const want = ['scripts/lib/a.mjs', 'scripts/lib/b.mjs', 'scripts/tasks.mjs'];
+      return JSON.stringify(got) === JSON.stringify(want) || 'граф ' + JSON.stringify(got) + ', ожидался ' + JSON.stringify(want);
+    } finally {
+      releaseTemp(tmp);
+    }
+  });
 
   // Гейт по glob, ошибка в шаблоне, в его разборе или в пути скрипта не краснеет,
   // а молча выключает гейт (E0-11).
@@ -405,14 +588,12 @@ function registerGateProbes(ctx, deps) {
       'scripts/lib.mjs',
       'scripts/library/a.mjs',
       'apps/web/scripts/lib/a.mjs',
-      'scripts/lib/manifest.mjs',
       'apps/api/.env.test',
       '.env.example',
-      // Корневые скрипты и помощники, которые гейт не импортирует (E0-12C, Q16).
+      // Корневые скрипты, которые гейт не импортирует (E0-12C, Q16); scripts/lib вне графа импортов
+      // check-compose.mjs - автоматически (importGraphExtra, E0-12AA)
       'scripts/probe-image.mjs',
       'scripts/check-no-search-list.mjs',
-      'scripts/lib/tasks.mjs',
-      'scripts/lib/index.mjs',
       // Не Compose-файл по имени или не под маской.
       'deploy/compose.yaml',
       'deploy/docker-compose.yml',
@@ -454,6 +635,7 @@ function registerGateProbes(ctx, deps) {
       // Ручной mustSkip держит неотслеживаемые имена (compose.override.*, deploy/compose.yaml);
       // отслеживаемые сверяются все (E0-12M, TECH_DEBT 20.10.2026 E0-12K).
       trackedOutsideExtra(),
+      importGraphExtra('scripts/check-compose.mjs'),
     ],
   });
 
@@ -480,10 +662,8 @@ function registerGateProbes(ctx, deps) {
       'scripts/check-compose.mjs',
       'scripts/lib.mjs',
       'apps/web/scripts/lib/a.mjs',
-      // помощники scripts/lib, которые скрипт трекера не импортирует
-      'scripts/lib/manifest.mjs',
-      'scripts/lib/compose-graph.mjs',
-      'scripts/lib/json.mjs',
+      // помощники scripts/lib, которые скрипт трекера не импортирует, - автоматически графом импортов
+      // scripts/tasks.mjs (importGraphExtra, E0-12AA)
       // документы, которые render --check не читает: журнал, не doc ни одной задачи
       'docs/90_WORKLOG.md',
       'docs/60_HARNESS.md',
@@ -500,6 +680,7 @@ function registerGateProbes(ctx, deps) {
       // Проба отказа: when без маски tracker-doc.mjs не выбирает гейт на этом файле (E0-12M).
       refusalExtra('scripts/lib/tracker-doc.mjs', 'scripts/tasks.mjs', 'when без scripts/lib/tracker-doc.mjs не выбирает его на этом файле (проба отказа)'),
       neighboursExtra(['docs/*_TASKS.md']),
+      importGraphExtra('scripts/tasks.mjs'),
       // when - перечень документов задач на сегодня: doc новой задачи вне него краснеет здесь,
       // а не молчит до первого переименования этого документа (E0-12M, B11).
       {
@@ -529,10 +710,7 @@ function registerGateProbes(ctx, deps) {
             };
             const bad = tasks.map((t) => t.doc).find(outside);
             if (bad !== undefined || tasks.some((t) => outside(t.doc))) return 'doc вне tmp: ' + JSON.stringify(bad);
-            for (const d of new Set(tasks.map((t) => t.doc))) {
-              fs.mkdirSync(path.dirname(path.join(tmp, 'docs', ...d.split('/'))), { recursive: true });
-              fs.writeFileSync(path.join(tmp, 'docs', ...d.split('/')), '');
-            }
+            for (const d of new Set(tasks.map((t) => t.doc))) put(tmp, 'docs/' + d, '');
             const cli = (...args) => run(process.execPath, [path.join(ROOT, 'scripts', 'tasks.mjs'), '--root=' + tmp].concat(args), { cwd: ROOT });
             const said = (r) => 'код ' + r.status + ' ' + String(r.stderr || r.stdout || (r.error && r.error.message)).trim().slice(0, 160);
             const render = cli('render');
@@ -622,7 +800,27 @@ function registerGateProbes(ctx, deps) {
   // кейсов графа: дочерний vitest идёт параллельно с ними.
   const GRAPH_GATE = graph.takeLive();
   const { IMPORTS_GATE, VITEST_GATE } = intRun.start(GRAPH_GATE);
+  gateSnaps = { graph: GRAPH_GATE, imports: IMPORTS_GATE };
   const rootProbes = roots.createRootProbes(ctx, { gateProbe, selects, GRAPH_GATE });
+  // Мемо корневого package.json (TECH_DEBT 23.10.2026 E0-12T C23): на подменённом источнике второй
+  // вопрос не читает, ответ - тот же объект
+  // Боевая сборка (замечание ревью E0-12AA T5): мемо не только у фабрики на подменённом источнике, но и
+  // у собранных этим файлом gateProbe и rootPkg - второй вопрос отдаёт тот же объект, а не новое чтение
+  check('gateProbe и rootPkg боевой сборки: второй вопрос - тот же объект (мемо на боевом источнике)', () => {
+    const why = [];
+    if (gateProbe('harness-selftest') !== gateProbe('harness-selftest')) why.push('gateProbe дал новую пробу гейта на втором вопросе');
+    const a = rootProbes.rootPkg();
+    if (rootProbes.rootPkg() !== a) why.push('rootPkg дал новый объект на втором вопросе - корневой package.json прочитан заново');
+    return why.length ? why.join('; ') : true;
+  });
+  check('rootPkg: мемо - корневой package.json читается один раз, второй вопрос - тот же объект (подменённый источник со счётчиком)', () => {
+    let reads = 0;
+    const own = roots.createRootProbes(ctx, { gateProbe, selects, GRAPH_GATE }, { readRootPkg: () => { reads++; return { scripts: {} }; } });
+    const a = own.rootPkg();
+    const b = own.rootPkg();
+    if (a !== b) return 'второй вопрос дал новый объект';
+    return reads === 1 || 'источник прочитан ' + reads + ' раз(а) на двух вопросах';
+  });
   const { rootsRefusal, rootScriptExtra, checkRootCommands, checkAlwaysScriptGate } = rootProbes;
 
   // Ветки отказа selftest-graph.js - на синтетическом dry и подменённом результате spawn, без
@@ -1031,7 +1229,7 @@ function registerGateProbes(ctx, deps) {
   graph.checkLiveLine();
   intRun.checkImportsLine();
 
-  return { gateProbes, intGuard, VITEST_GATE, rootPkgReads: rootProbes.rootPkgReads };
+  return { intGuard, VITEST_GATE };
 }
 
 module.exports = { registerGateProbes };

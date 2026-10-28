@@ -9,12 +9,12 @@
  * окружение без TURBO_*, предел ожидания и разбор вывода в dry-JSON. Отказ любой ветки -
  * исключение с названной причиной (его ловит check пробы). Граф и сверки - selftest-graph.js,
  * стабы - selftest-stub.js. Цепочка require: lib.js <- selftest-turbo.js <- selftest-graph.js <-
- * selftest-stub.js, обратных рёбер нет.
+ * selftest-stub.js, обратных рёбер нет. Запуск turbo - точка запуска самопроверки (ctx.run), её
+ * передаёт вызывающий: своей точки модуль не строит.
  */
 
 const fs = require('fs');
 const path = require('path');
-const cp = require('child_process');
 const { isGone } = require('./lib.js');
 
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -83,9 +83,12 @@ function strictlyUnder(child, dir) {
  * корня, TECH_DEBT 21.10.2026 E0-12L круг 4, `underNodeModules`) - пути через realpath. Нет node_modules - не лежит; иная ошибка
  * realpath (EACCES) - исключение как есть. `.modules.yaml` читается, только если file не под
  * node_modules: его нет - хранилища вне корня нет; он не разбирается yaml или virtualStoreDir не
- * строка - исключение (fail-closed). Относительный virtualStoreDir - от node_modules. opts -
- * подмена для кейсов: realpath (вместо fs.realpathSync), modulesYaml (текст `.modules.yaml` или
- * null - файла нет), parseYaml (разбор текста).
+ * строка - исключение (fail-closed) с путём файла. Относительный virtualStoreDir - от node_modules.
+ * `.modules.yaml` читается и разбирается один раз на каталог node_modules и корень за прогон
+ * (virtualStore, TECH_DEBT 23.10.2026 E0-12T, correctness; сбой - не запоминается). opts - подмена для кейсов: realpath
+ * (вместо fs.realpathSync), modulesYaml (текст `.modules.yaml` или null - файла нет), readFile (чтение
+ * файла вместо readIfExists), parseYaml (разбор текста), memo (Map мемо вместо мемо прогона). С
+ * подменой текста, чтения или разбора мемо прогона не берётся и не пополняется: только своё opts.memo.
  */
 function underNodeModules(file, root, opts) {
   const o = opts || {};
@@ -99,17 +102,8 @@ function underNodeModules(file, root, opts) {
   }
   const real = realpath(file);
   if (strictlyUnder(real, nm)) return true;
-  const text = o.modulesYaml !== undefined ? o.modulesYaml : readIfExists(path.join(nm, '.modules.yaml'));
-  if (text === null) return false;
-  let store;
-  try {
-    // yaml берётся у корня без проверки underNodeModules: иначе круг (yaml сам резолвится через неё)
-    const parse = o.parseYaml || require(require.resolve('yaml', { paths: [root] })).parse;
-    store = parse(text).virtualStoreDir;
-  } catch (e) {
-    throw new Error('node_modules/.modules.yaml не разбирается yaml: ' + ((e && e.message) || String(e)));
-  }
-  if (typeof store !== 'string' || !store) throw new Error('в node_modules/.modules.yaml нет строки virtualStoreDir');
+  const store = virtualStore(nm, root, o);
+  if (store === null) return false;
   let dir;
   try {
     dir = realpath(path.resolve(nm, store));
@@ -118,6 +112,42 @@ function underNodeModules(file, root, opts) {
     throw e;
   }
   return strictlyUnder(real, dir);
+}
+
+/** virtualStoreDir по каталогу nm (realpath node_modules) и корню root - мемо на прогон: только ответ, исключение не запоминается. */
+const modulesYamlMemo = new Map();
+/**
+ * virtualStoreDir из <nm>/.modules.yaml (underNodeModules): null - файла нет; не разбирается или
+ * нет строки virtualStoreDir - исключение. Один раз на пару nm и root (yaml резолвится от root) -
+ * ответ запоминается в мемо: o.memo кейса или мемо прогона, если текст, чтение и разбор не подменены;
+ * с подменой без o.memo - без мемо (чужой ответ кейсу не достаётся и в прогон не уходит). Исключение
+ * не запоминается: разовый сбой чтения (EBUSY, EACCES) не красит все следующие пробы графа - следующий
+ * вопрос читает снова (решение техлида Р9 E0-12AA, как сверка версии git).
+ */
+function virtualStore(nm, root, o) {
+  const substituted = o.modulesYaml !== undefined || Boolean(o.readFile) || Boolean(o.parseYaml);
+  const memo = o.memo || (substituted ? null : modulesYamlMemo);
+  const key = nm + '\0' + root;
+  if (memo && memo.has(key)) return memo.get(key);
+  const store = readVirtualStore(nm, root, o);
+  if (memo) memo.set(key, store);
+  return store;
+}
+/** Разбор <nm>/.modules.yaml без мемо (virtualStore): путь файла - в тексте отказа разбора. */
+function readVirtualStore(nm, root, o) {
+  const file = path.join(nm, '.modules.yaml');
+  const text = o.modulesYaml !== undefined ? o.modulesYaml : (o.readFile || readIfExists)(file);
+  if (text === null) return null;
+  let store;
+  try {
+    // yaml берётся у корня без проверки underNodeModules: иначе круг (yaml сам резолвится через неё)
+    const parse = o.parseYaml || require(require.resolve('yaml', { paths: [root] })).parse;
+    store = parse(text).virtualStoreDir;
+  } catch (e) {
+    throw new Error(file + ' не разбирается yaml: ' + ((e && e.message) || String(e)));
+  }
+  if (typeof store !== 'string' || !store) throw new Error('в node_modules/.modules.yaml нет строки virtualStoreDir');
+  return store;
 }
 
 /** Текст файла или null, если его нет (ENOENT); иная ошибка - исключение. */
@@ -181,16 +211,23 @@ function parseDry(r, what) {
 const dryCache = new Map();
 /**
  * dry-JSON turbo для скриптов scripts. Зовётся нативный бинарь turboBinary из корня, в окружении
- * turboEnv и с пределом TURBO_TIMEOUT_MS (SIGKILL). Результат кэшируется на прогон: пробы build,
- * test:int и harness-selftest видят один снимок. opts.root - корень (по умолчанию репозиторий),
- * opts.platform/opts.arch - платформа (по умолчанию процесса), opts.spawn - подмена spawnSync для
- * кейсов веток отказа (с подменой кэш не используется).
+ * turboEnv и с пределом TURBO_TIMEOUT_MS (SIGKILL). opts.run - точка запуска самопроверки (ctx.run;
+ * решение техлида Р3 E0-12AA), без неё и без opts.spawn - исключение. opts.root - корень (по умолчанию
+ * репозиторий), opts.platform/opts.arch - платформа (по умолчанию процесса), opts.env - окружение, из
+ * которого turboEnv строит окружение turbo (по умолчанию процесса; кейс передаёт своё, не правя
+ * process.env), opts.spawn - подмена запуска для кейсов веток отказа. Результат кэшируется на прогон
+ * (пробы build, test:int и harness-selftest видят один снимок) только по явному opts.shared - его
+ * ставит один вызов, чья точка запуска - run самопроверки (liveSnap, selftest-tree-graph.js), - и в
+ * окружении процесса без подмены: ключ - корень и скрипты, а снимок без opts.shared (кейс с подменённым
+ * opts.run), с opts.env или opts.spawn кэш не читает и не пополняет (замечание ревью E0-12AA: кейс с
+ * окружением или фальшивым run получал чужой снимок или травил кэш прогона; решение техлида Р9).
  */
 function turboDry(scripts, opts) {
   const o = opts || {};
   const root = o.root || ROOT;
   const key = root + '\0' + scripts.join(' ');
-  if (!o.spawn && dryCache.has(key)) return dryCache.get(key);
+  const shared = o.shared === true && o.env === undefined && !o.spawn;
+  if (shared && dryCache.has(key)) return dryCache.get(key);
   const what = 'turbo run ' + scripts.join(' ') + ' --dry=json';
   let bin;
   try {
@@ -198,7 +235,8 @@ function turboDry(scripts, opts) {
   } catch (e) {
     throw new Error(what + ': ' + ((e && e.message) || String(e)));
   }
-  const spawn = o.spawn || cp.spawnSync;
+  const spawn = o.spawn || o.run;
+  if (typeof spawn !== 'function') throw new Error(what + ': нет точки запуска (opts.run) - turbo зовётся только через run самопроверки');
   const r = spawn(bin, ['run', ...scripts, '--dry=json'], {
     cwd: root,
     encoding: 'utf8',
@@ -206,10 +244,10 @@ function turboDry(scripts, opts) {
     maxBuffer: 64 * 1024 * 1024,
     timeout: TURBO_TIMEOUT_MS,
     killSignal: 'SIGKILL',
-    env: turboEnv(process.env),
+    env: turboEnv(o.env || process.env),
   });
   const dry = parseDry(r, what);
-  if (!o.spawn) dryCache.set(key, dry);
+  if (shared) dryCache.set(key, dry);
   return dry;
 }
 

@@ -15,14 +15,13 @@
 
 const fs = require('fs');
 const path = require('path');
-const cp = require('child_process');
 
 function createIntProbe(ctx) {
-  const { G, HOOKS, L, LIVE_CHILDREN, ROOT, absent, releaseTemp, snapshotGate, tempDir } = ctx;
+  const { G, HOOKS, L, LIVE_CHILDREN, ROOT, absent, holdTemp, put, releaseTemp, run, snapshotGate, spawn, tempDir } = ctx;
 
   /**
    * Граница Node и модуль разбора импортов (E0-12T, решение техлида Р2 E0-12L): проба test:int
-   * грузит test/imports.ts через require (type stripping без флага и require(esm)) и гоняет
+   * грузит test/imports.ts через require - type stripping без флага и require(esm) - и гоняет
    * дочерний vitest. Type stripping включён по умолчанию с 22.18 в линии 22.x и с 23.6 в линии
    * 23.x, в 24+ - всегда; поэтому граница - по линии, а не «мажор больше 22» (NODE_LINES: мажор ->
    * наименьший минор; мажор выше последнего в перечне - годится). Ниже границы или при сбое
@@ -65,7 +64,8 @@ function createIntProbe(ctx) {
 
   /** Дочерний процесс конфигов vitest (selftest-vitest.mjs) и начало его строки вывода. */
   const VITEST_CHILD = path.join(HOOKS, 'selftest-vitest.mjs');
-  const VITEST_MARK = 'selftest-vitest ';
+  // строки протокола ребёнка - один модуль на обе стороны (selftest-vitest.mjs берёт его же)
+  const { VITEST_MARK, VITEST_EXIT_MARK } = require('./selftest-vitest-protocol.cjs');
   /** Предел дочернего vitest: замер E0-12T - 0,9 с на три конфига. */
   const VITEST_TIMEOUT_MS = 60 * 1000;
   /**
@@ -77,6 +77,13 @@ function createIntProbe(ctx) {
   const SPAWN_CODE_UNKNOWN = 'код ошибки неизвестен (pid нет, повтор запустился)';
   /** Сколько awaitVitest и кейсы ждут конца процесса (pidGone) после строки выхода или SIGKILL. */
   const VITEST_GONE_MS = 2000;
+  /**
+   * Сколько awaitVitest ждёт конца процесса после SIGKILL до снятия из LIVE_CHILDREN и отдачи
+   * вызывающему, который снимает каталог (TECH_DEBT 23.10.2026 E0-12T Fix 3a): на Windows процесс с
+   * открытым файлом выходит не сразу; не дождался - отказ с pid, а не молчаливое снятие (каталог с его
+   * файлами дал бы EBUSY и остаток в %TEMP%). 10 с - запас к VITEST_GONE_MS (2 с, замер E0-12T).
+   */
+  const VITEST_KILL_GONE_MS = 10 * 1000;
 
   /** Команда корня стаба int-пробы и его файлы (пути от каталога стаба). */
   const INT_STUB_COMMAND = 'vitest run --config vitest.selftest.config.mjs';
@@ -124,34 +131,44 @@ function createIntProbe(ctx) {
    * globalSetup } (абсолютные пути) или { dir, error } - ошибка пары (нет --config, нет конфига, не
    * простой вызов vitest) - данные, а не отказ. Отказ, fail-closed (L-028), - vitestAnswer.
    *
-   * startVitest(pairs, dir, opts): stdout и stderr ребёнка - в файлы каталога dir; opts - подмена
-   * для кейсов: bin (вместо process.execPath), child (вместо VITEST_CHILD), timeoutMs (вместо
-   * VITEST_TIMEOUT_MS), goneMs (вместо VITEST_GONE_MS), spawn и spawnSync (вместо cp.spawn и cp.spawnSync). Процесс, который не
-   * запустился (pid нет - spawn сообщит ошибку только событием, а самопроверка синхронна и цикла
-   * событий до выхода не отдаёт), - сразу отказ «не запустился: <код>»: код - у синхронного повтора
-   * запуска той же программы (--version), повтор запустился - SPAWN_CODE_UNKNOWN; предела отказ не
-   * ждёт. Запущенный ребёнок - в LIVE_CHILDREN до ответа: выход прогона его снимает.
+   * startVitest(pairs, dir, opts): stdout и stderr ребёнка - в файлы каталога dir. Запуск и повтор -
+   * через одну точку запуска самопроверки (ctx.spawn и ctx.run: дочерний node только с каталогом
+   * состояния проб, решение техлида Р3 E0-12AA). opts - подмена для кейсов:
+   *   bin - вместо process.execPath; child - вместо VITEST_CHILD;
+   *   timeoutMs, goneMs, killGoneMs - вместо VITEST_TIMEOUT_MS, VITEST_GONE_MS, VITEST_KILL_GONE_MS;
+   *   kill - снятие ребёнка вместо SIGKILL; spawn и spawnSync - вместо ctx.spawn и ctx.run;
+   *   hold - корень временного каталога, который снимает releaseTemp вызывающего, когда dir - его
+   *     подкаталог (по умолчанию dir): его держит killAndWait.
+   * Процесс, который не запустился (pid нет - spawn сообщит ошибку только событием, а самопроверка
+   * синхронна и цикла событий до выхода не отдаёт), - сразу отказ «не запустился: <код>»: код - у
+   * синхронного повтора запуска той же программы (--version), повтор запустился - SPAWN_CODE_UNKNOWN;
+   * предела отказ не ждёт. Запущенный ребёнок - в LIVE_CHILDREN до ответа: выход прогона его снимает.
    */
   function startVitest(pairs, dir, opts) {
     const o = opts || {};
     const bin = o.bin || process.execPath;
+    const childFile = o.child || VITEST_CHILD;
     const out = path.join(dir, 'vitest-out.txt');
     const err = path.join(dir, 'vitest-err.txt');
     const fdOut = fs.openSync(out, 'w');
     const fdErr = fs.openSync(err, 'w');
     let child;
     try {
-      child = (o.spawn || cp.spawn)(bin, [o.child || VITEST_CHILD].concat(...pairs), { cwd: ROOT, stdio: ['ignore', fdOut, fdErr], windowsHide: true });
+      child = (o.spawn || spawn)(bin, [childFile].concat(...pairs), { cwd: ROOT, stdio: ['ignore', fdOut, fdErr], windowsHide: true });
     } finally {
       fs.closeSync(fdOut);
       fs.closeSync(fdErr);
     }
-    const h = { pairs, out, err, child, timeoutMs: o.timeoutMs || VITEST_TIMEOUT_MS, goneMs: o.goneMs === undefined ? VITEST_GONE_MS : o.goneMs, started: performance.now(), spawnError: null };
+    const h = {
+      pairs, out, err, child, childFile, hold: o.hold || dir, timeoutMs: o.timeoutMs || VITEST_TIMEOUT_MS, goneMs: o.goneMs === undefined ? VITEST_GONE_MS : o.goneMs,
+      killGoneMs: o.killGoneMs === undefined ? VITEST_KILL_GONE_MS : o.killGoneMs, kill: o.kill || ((c) => c.kill('SIGKILL')),
+      started: performance.now(), spawnError: null,
+    };
     // событие error придёт только после выхода синхронного прогона; без обработчика оно уронило бы
     // выход процесса
     child.on('error', () => {});
     if (child.pid === undefined) {
-      const again = (o.spawnSync || cp.spawnSync)(bin, ['--version'], { cwd: ROOT, stdio: 'ignore', windowsHide: true, timeout: 5000 });
+      const again = (o.spawnSync || run)(bin, ['--version'], { cwd: ROOT, stdio: 'ignore', windowsHide: true, timeout: 5000 });
       h.spawnError = (again.error && again.error.code) || SPAWN_CODE_UNKNOWN;
       return h;
     }
@@ -164,7 +181,8 @@ function createIntProbe(ctx) {
   /**
    * Процесса pid нет в течение ms (монотонные часы, паузы 20 мс; ms 0 - одна сверка): true; жив весь
    * срок - false. Linux: процесс, вышедший или убитый, пока цикл событий прогона занят (самопроверка
-   * синхронна), - зомби до сбора родителем, и kill(pid, 0) видит его живым; состояние Z в
+   * синхронна), - зомби до сбора родителем, и kill(pid, 0) видит его живым; состояние Z (и X - dead,
+   * TECH_DEBT 23.10.2026 E0-12T F10) в
    * /proc/<pid>/stat (или файла нет при читаемом /proc/self/stat) - процесса нет (замечание ревью E1
    * E0-12T). Иначе - kill(pid, 0): ESRCH - нет. Иная ошибка чтения или kill - «жив» (false), не
    * исключение (решение техлида, круг 3). deps - подмена для кейса: platform, readStat(pid) (текст /proc/<pid>/stat), kill.
@@ -192,7 +210,7 @@ function createIntProbe(ctx) {
         }
         // состояние - первое поле после имени программы в скобках (в имени бывают скобки и пробелы)
         const close = stat.lastIndexOf(')');
-        if (close !== -1 && stat.charAt(close + 2) === 'Z') return true;
+        if (close !== -1 && (stat.charAt(close + 2) === 'Z' || stat.charAt(close + 2) === 'X')) return true;
       }
       try {
         d.kill(pid, 0);
@@ -209,8 +227,6 @@ function createIntProbe(ctx) {
       Atomics.wait(pause, 0, 0, 20);
     }
   }
-  /** Строка выхода дочернего vitest (его обработчик exit пишет её в stdout последней). */
-  const VITEST_EXIT_MARK = 'selftest-vitest-exit ';
   /**
    * Ответ дочернего vitest, запущенного startVitest: синхронное ожидание строки выхода
    * (VITEST_EXIT_MARK <код>, целая строка; код не целое - отказ) в файле stdout с паузами Atomics.wait по монотонным часам
@@ -228,7 +244,7 @@ function createIntProbe(ctx) {
       // только целые строки: хвост без перевода строки ребёнок, может быть, ещё дописывает
       const exit = stdout.split(/\r?\n/).slice(0, -1).find((line) => line.startsWith(VITEST_EXIT_MARK));
       if (exit !== undefined) {
-        if (!pidGone(h.child.pid, h.goneMs)) h.child.kill('SIGKILL');
+        if (!pidGone(h.child.pid, h.goneMs)) killAndWait(h);
         LIVE_CHILDREN.delete(h.child);
         // код - целое числом без пробелов и знака «+»; иное (обрезанная строка, `1x`) - отказ, а не
         // Number('') = 0 - успех
@@ -237,11 +253,28 @@ function createIntProbe(ctx) {
         return vitestAnswer({ status: Number(text), signal: null, stdout, stderr: fs.readFileSync(h.err, 'utf8') }, h);
       }
       if (performance.now() - h.started > h.timeoutMs) {
-        h.child.kill('SIGKILL');
+        killAndWait(h);
         LIVE_CHILDREN.delete(h.child);
         return vitestAnswer({ status: null, signal: 'SIGKILL', stdout, stderr: '', error: Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' }) }, h);
       }
       Atomics.wait(pause, 0, 0, 20);
+    }
+  }
+
+  /**
+   * SIGKILL ребёнку запуска h (h.kill - подмена для кейса) и ожидание его конца (pidGone до
+   * h.killGoneMs) - в обеих ветках awaitVitest, до снятия из LIVE_CHILDREN (TECH_DEBT 23.10.2026
+   * E0-12T Fix 3a). Не вышел за предел - исключение с именем программы ребёнка и pid: ребёнок остаётся
+   * в LIVE_CHILDREN, корень временного каталога вызывающего (h.hold, а не каталог файла вывода: у
+   * fakeVitest это подкаталог корня) - в holdTemp (releaseTemp вызывающего его не трогает, второй
+   * красной строки EBUSY нет); их снимет выход прогона, а отказ назван строкой пробы.
+   */
+  function killAndWait(h) {
+    h.kill(h.child);
+    if (!pidGone(h.child.pid, h.killGoneMs)) {
+      const why = path.basename(h.childFile) + ': процесс ' + h.child.pid + ' жив через ' + h.killGoneMs / 1000 + ' с после SIGKILL - каталог его вывода не снять';
+      holdTemp(h.hold, why);
+      throw new Error(why);
     }
   }
 
@@ -315,19 +348,13 @@ function createIntProbe(ctx) {
   };
 
   /**
-   * Источник обхода int-наборов (пути от корня): read - текст модуля, isFile - модуль есть,
-   * present - фикстура есть (не absent: ENOENT и ENOTDIR - нет, иная ошибка - исключение).
+   * Источник обхода int-наборов (пути от корня): read - текст модуля, isFile - модуль есть
+   * (L.isFilePresent - один помощник «файл есть» обвязки), present - фикстура есть (не absent:
+   * ENOENT и ENOTDIR - нет, иная ошибка - исключение).
    */
   const DISK = {
     read: (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8'),
-    isFile: (rel) => {
-      try {
-        return fs.statSync(path.join(ROOT, rel)).isFile();
-      } catch (e) {
-        if (L.isNotFile(e)) return false;
-        throw e;
-      }
-    },
+    isFile: (rel) => L.isFilePresent(path.join(ROOT, rel)),
     present: (rel) => !absent(path.join(ROOT, rel)),
   };
   /** Источник DISK с наложенными текстами files ({ путь от корня: текст }) - стабы и кейсы. */
@@ -549,10 +576,7 @@ function createIntProbe(ctx) {
     const dir = tempDir('int-vitest');
     try {
       const stub = path.join(dir, 'stub');
-      for (const [rel, body] of Object.entries(INT_STUB_FILES)) {
-        fs.mkdirSync(path.dirname(path.join(stub, rel)), { recursive: true });
-        fs.writeFileSync(path.join(stub, rel), body);
-      }
+      for (const [rel, body] of Object.entries(INT_STUB_FILES)) put(stub, rel, body);
       const roots = G.taskGraph(gates.graph.snap.dry, 'test:int').roots;
       const keys = Object.keys(INT_STUB_PAIRS);
       const pairs = roots.map((r) => [path.join(ROOT, r.dir), r.command])
@@ -651,9 +675,9 @@ function createIntProbe(ctx) {
       for (const [key, body] of Object.entries(FAKE_VITEST)) {
         const d = sub(key);
         fs.writeFileSync(path.join(d, 'child.js'), body);
-        runs[key] = startVitest(FAKE_PAIRS, d, { child: path.join(d, 'child.js'), timeoutMs: FAKE_TIMEOUT_KEYS.includes(key) ? FAKE_VITEST_TIMEOUT_MS : undefined });
+        runs[key] = startVitest(FAKE_PAIRS, d, { hold: dir, child: path.join(d, 'child.js'), timeoutMs: FAKE_TIMEOUT_KEYS.includes(key) ? FAKE_VITEST_TIMEOUT_MS : undefined });
       }
-      runs.noSpawn = startVitest(FAKE_PAIRS, sub('noSpawn'), { bin: 'sf-selftest-no-node' });
+      runs.noSpawn = startVitest(FAKE_PAIRS, sub('noSpawn'), { hold: dir, bin: 'sf-selftest-no-node' });
       const out = {};
       for (const [key, h] of Object.entries(runs)) {
         const t0 = performance.now();
@@ -677,7 +701,7 @@ function createIntProbe(ctx) {
   }
 
   return {
-    NODE_NEED, nodeVerdict, importsGate, VITEST_CHILD, VITEST_MARK, SPAWN_CODE_UNKNOWN, VITEST_GONE_MS,
+    NODE_LINES, NODE_NEED, nodeVerdict, importsGate, VITEST_CHILD, VITEST_MARK, SPAWN_CODE_UNKNOWN, VITEST_GONE_MS,
     INT_STUB_COMMAND, INT_STUB_PAIRS, startVitest, pidGone, VITEST_EXIT_MARK, awaitVitest, INT_PROBE_STATIC,
     JOINED_NOT_READ, REPO_ROOT_REVIEWED, DISK, overlaySource, VITEST_CONDITIONS, intProbeWalk, intProbeReads,
     relUnder, startIntVitest, readIntVitest, intForbidden, FAKE_VITEST_TIMEOUT_MS, FAKE_PAIRS, FAKE_VITEST,

@@ -463,10 +463,41 @@ function addedLines(repo, rules, relPath) {
  * Путь к .qa-state. SF_HOOK_STATE_DIR - служебная переменная самопроверки обвязки:
  * harness-selftest.js ставит её во временную папку на весь прогон, чтобы пробы не трогали
  * боевое состояние (решение техлида 03.10.2026). Читается только здесь.
+ * Путь, закрытый refuseStatePath в этом процессе, - исключение, а не путь: readState и writeState
+ * его не читают и не пишут (writeState зовёт statePath до своего try). env - окружение (по умолчанию
+ * процесса): самопроверка берёт боевой путь как statePath({}) до refuseStatePath, без своей копии
+ * правила пути (решение техлида Р6 E0-12AA).
  */
-function statePath() {
-  const override = process.env.SF_HOOK_STATE_DIR;
-  return path.join(override ? path.resolve(override) : STATE_DIR, '.qa-state');
+function statePath(env = process.env) {
+  const override = env.SF_HOOK_STATE_DIR;
+  const p = path.join(override ? path.resolve(override) : STATE_DIR, '.qa-state');
+  if (refusedState !== null && foldPath(p) === refusedState) {
+    throw new Error('путь состояния ' + p + ' закрыт в этом процессе (refuseStatePath): боевой .qa-state пишут только хуки сессии');
+  }
+  return p;
+}
+
+/**
+ * Путь состояния, закрытый в этом процессе (refuseStatePath), в сравнимой форме (foldPath); null - не
+ * закрыт. Хуки сессии refuseStatePath не зовут - у них statePath прежний.
+ */
+let refusedState = null;
+/**
+ * Абсолютный путь p для сравнения: на Windows без учёта регистра. Единственная нормализация путей
+ * состояния обвязки (решение техлида Р6 E0-12AA): statePath, samePath и hookStateGuard самопроверки
+ * сравнивают через неё, своей копии нет.
+ */
+function foldPath(p) {
+  const abs = path.resolve(p);
+  return process.platform === 'win32' ? abs.toLowerCase() : abs;
+}
+/**
+ * Закрыть путь состояния file в этом процессе: statePath на нём - исключение до конца процесса
+ * (самопроверка обвязки закрывает боевой .qa-state в начале прогона, решение техлида Р3 E0-12AA:
+ * запись в боевое состояние из процесса самопроверки - отказ, а не тихая запись).
+ */
+function refuseStatePath(file) {
+  refusedState = foldPath(file);
 }
 
 function defaultState() {
@@ -496,6 +527,27 @@ function isGone(error) {
  */
 function isNotFile(error) {
   return isGone(error) || codeOf(error) === 'ENOTDIR';
+}
+
+/**
+ * stat пути p или null, если пути нет (`isNotFile`: ENOENT, ENOTDIR); иной сбой (EACCES, EPERM) -
+ * исключение, а не «нет». Один помощник «путь есть» обвязки (TECH_DEBT 23.10.2026 E0-12T, E15):
+ * его берут absent самопроверки, DISK.isFile int-пробы и проверка конфига selftest-vitest.mjs.
+ * stat - fs.statSync (через ссылку), fs.lstatSync (сама запись) или подмена для кейса.
+ */
+function statIfPresent(p, stat = fs.statSync) {
+  try {
+    return stat(p);
+  } catch (e) {
+    if (isNotFile(e)) return null;
+    throw e;
+  }
+}
+
+/** По пути p - файл (stat через ссылку): пути нет - false, каталог - false, иной сбой - исключение. */
+function isFilePresent(p, stat = fs.statSync) {
+  const st = statIfPresent(p, stat);
+  return Boolean(st && st.isFile());
 }
 
 /**
@@ -715,10 +767,14 @@ module.exports = {
   addedLines,
   isGone,
   isNotFile,
+  statIfPresent,
+  isFilePresent,
   readState,
   writeState,
   bumpEdits,
   statePath,
+  refuseStatePath,
+  foldPath,
   LENGTH_NOTES_CAP,
   putLengthNote,
   dropLengthNote,

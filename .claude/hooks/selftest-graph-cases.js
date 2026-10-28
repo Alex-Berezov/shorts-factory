@@ -17,7 +17,7 @@ const path = require('path');
 
 function registerGraphCases(ctx, gates) {
   const {
-    G, LISTING_MAX_BUFFER, ROOT, SKIPPED, check, refusalVerdict, refusedCheck, results, run, snapshotGate,
+    G, LISTING_MAX_BUFFER, ROOT, SKIPPED, check, refusalVerdict, refusedCheck, run, snapshotGate,
   } = ctx;
   const {
     GRAPH_GATE, graphVerdict, inputsGapBlind, manifestGapBlind, relUnder, rootsRefusal, trackedFiles,
@@ -95,12 +95,95 @@ function registerGraphCases(ctx, gates) {
   }, (dir) => {
     const repo = path.join(dir, 'repo');
     const yaml = 'virtualStoreDir: ' + JSON.stringify(path.join(dir, 'store', '.pnpm')) + '\n';
-    // yaml - пакет репозитория: во временном корне его нет
-    const parseYaml = require(require.resolve('yaml', { paths: [ROOT] })).parse;
+    // yaml - пакет репозитория: во временном корне его нет; резолв - тот же resolveFrom, что у модуля графа
+    const parseYaml = require(G.resolveFrom('yaml', ROOT, 'yaml', ROOT)).parse;
     const at = (rel) => G.underNodeModules(path.join(dir, ...rel.split('/')), repo, { modulesYaml: yaml, parseYaml });
     const got = JSON.stringify([at('store/.pnpm/turbo/package.json'), at('other/turbo/package.json'), G.underNodeModules(path.join(dir, 'store', '.pnpm', 'turbo', 'package.json'), repo, { modulesYaml: null })]);
     if (got !== JSON.stringify([true, false, false])) return 'ожидалось [true,false,false] (хранилище, посторонний, без .modules.yaml), получено ' + got;
     return refusalVerdict(() => G.underNodeModules(path.join(dir, 'other', 'turbo', 'package.json'), repo, { modulesYaml: 'storeDir: x\n', parseYaml }), 'в node_modules/.modules.yaml нет строки virtualStoreDir');
+  }));
+  // .modules.yaml - одно чтение и разбор на каталог node_modules (TECH_DEBT 23.10.2026 E0-12T,
+  // correctness): два вопроса о модулях вне node_modules одного корня - одно чтение подменённого
+  // readFile; мемо - своё у кейса (opts.memo), не мемо прогона
+  check('граф turbo: underNodeModules - .modules.yaml читается один раз на корень (два вопроса - одно чтение; разовый сбой чтения не запомнен - следующий вопрос читает снова)', () => withTempRoot({
+    'repo/node_modules/.keep': '',
+    'store/.pnpm/turbo/package.json': '{"name":"turbo"}',
+    'other/turbo/package.json': '{"name":"turbo"}',
+  }, (dir) => {
+    const repo = path.join(dir, 'repo');
+    const parseYaml = require(G.resolveFrom('yaml', ROOT, 'yaml', ROOT)).parse;
+    let reads = 0;
+    const readFile = () => {
+      reads++;
+      return 'virtualStoreDir: ' + JSON.stringify(path.join(dir, 'store', '.pnpm')) + '\n';
+    };
+    const memo = new Map();
+    const got = [
+      G.underNodeModules(path.join(dir, 'store', '.pnpm', 'turbo', 'package.json'), repo, { readFile, parseYaml, memo }),
+      G.underNodeModules(path.join(dir, 'other', 'turbo', 'package.json'), repo, { readFile, parseYaml, memo }),
+    ];
+    if (JSON.stringify(got) !== '[true,false]') return 'ответы ' + JSON.stringify(got) + ', ожидалось [true,false]';
+    if (reads !== 1) return '.modules.yaml прочитан ' + reads + ' раз(а) на двух вопросах к одному корню';
+    // разовый сбой чтения (EBUSY) не запоминается: следующий вопрос к тому же корню читает снова (Р9 E0-12AA)
+    let busy = true;
+    const flaky = () => {
+      if (busy) {
+        busy = false;
+        throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+      }
+      return readFile();
+    };
+    const fresh = new Map();
+    const inStore = path.join(dir, 'store', '.pnpm', 'turbo', 'package.json');
+    const first = refusalVerdict(() => G.underNodeModules(inStore, repo, { readFile: flaky, parseYaml, memo: fresh }), 'EBUSY: resource busy or locked');
+    if (first !== true) return 'сбой чтения .modules.yaml: ' + first;
+    let again;
+    try {
+      again = G.underNodeModules(inStore, repo, { readFile: flaky, parseYaml, memo: fresh });
+    } catch (e) {
+      return 'сбой чтения .modules.yaml запомнен - следующий вопрос получил его снова: ' + ((e && e.message) || String(e));
+    }
+    return again === true || 'после сбоя чтения ответ ' + JSON.stringify(again) + ', ожидалось true';
+  }));
+  // Мемо прогона и подмены (замечание ревью E0-12AA C3): вопрос с подменой чтения или разбора без своего
+  // мемо читает сам и в мемо прогона не кладёт - следующий вопрос с другой подменой к тому же корню
+  // получает свой ответ, а не чужой; ключ мемо - каталог node_modules и корень
+  check('граф turbo: underNodeModules - подмена чтения или разбора без своего мемо не берёт и не пополняет мемо прогона; ключ мемо - node_modules и корень', () => withTempRoot({
+    'repo/node_modules/.keep': '',
+    'store/.pnpm/turbo/package.json': '{"name":"turbo"}',
+    'other/turbo/package.json': '{"name":"turbo"}',
+  }, (dir) => {
+    const repo = path.join(dir, 'repo');
+    const parseYaml = require(G.resolveFrom('yaml', ROOT, 'yaml', ROOT)).parse;
+    const storeOf = (where) => () => 'virtualStoreDir: ' + JSON.stringify(path.join(dir, where)) + '\n';
+    const inStore = path.join(dir, 'store', '.pnpm', 'turbo', 'package.json');
+    const got = [
+      G.underNodeModules(inStore, repo, { readFile: storeOf('store/.pnpm'), parseYaml }),
+      G.underNodeModules(inStore, repo, { readFile: storeOf('other'), parseYaml }),
+    ];
+    if (JSON.stringify(got) !== '[true,false]') return 'вторая подмена получила ответ первой: ' + JSON.stringify(got) + ', ожидалось [true,false]';
+    const memo = new Map();
+    G.underNodeModules(inStore, repo, { readFile: storeOf('store/.pnpm'), parseYaml, memo });
+    const keys = Array.from(memo.keys());
+    const want = fs.realpathSync(path.join(repo, 'node_modules')) + '\0' + repo;
+    return (keys.length === 1 && keys[0] === want) || 'ключи мемо ' + JSON.stringify(keys) + ', ожидался ' + JSON.stringify(want);
+  }));
+  // ветка «не разбирается yaml» (TECH_DEBT 23.10.2026 E0-12T): битый текст - отказ с путём файла, а не «нет»
+  check('граф turbo: underNodeModules - .modules.yaml не разбирается (битый YAML) - отказ с путём файла', () => withTempRoot({
+    'repo/node_modules/.keep': '',
+    'other/turbo/package.json': '{"name":"turbo"}',
+  }, (dir) => {
+    const repo = path.join(dir, 'repo');
+    const parseYaml = require(G.resolveFrom('yaml', ROOT, 'yaml', ROOT)).parse;
+    const file = path.join(fs.realpathSync(path.join(repo, 'node_modules')), '.modules.yaml');
+    let why = '';
+    try {
+      parseYaml('virtualStoreDir: [\n');
+    } catch (e) {
+      why = e.message;
+    }
+    if (!why) return 'битый текст кейса разобрался - кейс ничего не доказывает';
+    return refusalVerdict(() => G.underNodeModules(path.join(dir, 'other', 'turbo', 'package.json'), repo, { readFile: () => 'virtualStoreDir: [\n', parseYaml }), file + ' не разбирается yaml: ' + why);
   }));
   refusedWith('платформа без пакета turbo - отказ', () => onFixture({ platform: 'freebsd', arch: 'ia32' }),
     what + ': нет пакета turbo для платформы freebsd-ia32 (пакеты @turbo/<os>-<arch>: windows, darwin, linux x 64, arm64)');
@@ -125,15 +208,9 @@ function registerGraphCases(ctx, gates) {
   // сигнал предела и окружение без TURBO_* оболочки
   const spawnSeen = (platform) => withTempRoot(FIXTURE, (root) => {
     let seen = null;
-    const had = Object.prototype.hasOwnProperty.call(process.env, 'TURBO_FORCE');
-    const prev = process.env.TURBO_FORCE;
-    process.env.TURBO_FORCE = '1';
-    try {
-      G.turboDry(['build'], { root, platform, arch: 'x64', spawn: (cmd, args, opts) => { seen = { cmd, args, opts }; return { pid: 4242, status: 0, signal: null, stdout: EMPTY_DRY, stderr: '' }; } });
-    } finally {
-      if (had) process.env.TURBO_FORCE = prev;
-      else delete process.env.TURBO_FORCE;
-    }
+    // TURBO_FORCE оболочки - в окружении параметром, process.env не правится (TECH_DEBT 23.10.2026 E0-12U круг 2)
+    const env = Object.assign({}, process.env, { TURBO_FORCE: '1' });
+    G.turboDry(['build'], { root, platform, arch: 'x64', env, spawn: (cmd, args, opts) => { seen = { cmd, args, opts }; return { pid: 4242, status: 0, signal: null, stdout: EMPTY_DRY, stderr: '' }; } });
     const bins = { linux: 'node_modules/@turbo/linux-64/bin/turbo', win32: 'node_modules/@turbo/windows-64/bin/turbo.exe' };
     return { seen, bin: fs.realpathSync(path.join(root, bins[platform])) };
   });
@@ -167,6 +244,30 @@ function registerGraphCases(ctx, gates) {
     return got === want || 'ожидалось ' + want + ', получено ' + got;
   });
 
+  // Кэш dry прогона (замечание ревью E0-12AA): ключ - корень и скрипты, поэтому снимок с окружением
+  // параметром кэш не читает и не пополняет - иначе кейс с env получил бы чужой снимок или отдал свой
+  // прогону; кэш - только по явному shared (вызов с run самопроверки): кейс с подменённым run без
+  // shared идёт мимо (Р9 E0-12AA); запуск - только точка запуска самопроверки (opts.run), своей точки у
+  // модуля нет. Кейс ставит shared при подменённом run только на своём временном корне - снимка корня
+  // репозитория в кэше он не касается
+  check('граф turbo: кэш dry прогона - только окружение процесса без подмены (снимок с opts.env кэш не читает и не пополняет); без opts.run - отказ', () => withTempRoot(FIXTURE, (root) => {
+    let calls = 0;
+    const run = () => {
+      calls++;
+      return { pid: 4242, status: 0, signal: null, stdout: EMPTY_DRY, stderr: '' };
+    };
+    const env = Object.assign({}, process.env, { TURBO_FORCE: '1' });
+    const ask = (scripts, withEnv, shared = true) => {
+      G.turboDry(scripts, Object.assign({ root, platform: 'linux', arch: 'x64', run, shared }, withEnv ? { env } : {}));
+      return calls;
+    };
+    // build: процесс, процесс (кэш), env (мимо кэша); lint: env, затем процесс (env кэш не пополнил),
+    // затем без shared (подменённый run - мимо кэша, хотя снимок lint в нём есть)
+    const got = [ask(['build'], false), ask(['build'], false), ask(['build'], true), ask(['lint'], true), ask(['lint'], false), ask(['lint'], false, false)];
+    if (got.join() !== '1,1,2,3,4,5') return 'запусков после каждого вопроса ' + got.join(',') + ', ожидалось 1,1,2,3,4,5 (процесс, процесс из кэша, env мимо кэша, env, процесс после env, без shared мимо кэша)';
+    return refusalVerdict(() => G.turboDry(['test'], { root, platform: 'linux', arch: 'x64' }),
+      'turbo run test --dry=json: нет точки запуска (opts.run) - turbo зовётся только через run самопроверки');
+  }));
   // dry из двух пакетов и постороннего: a#build (next build) зависит от b#build, c#build вне графа
   const task = (id, extra) => Object.assign({
     taskId: id,
@@ -388,17 +489,53 @@ function registerGraphCases(ctx, gates) {
   // форма задач dry проверяется раз на объект dry (TECH_DEBT 21.10.2026 E0-12L круг 3,
   // `dryPackages` -> `tasksById`): второй вопрос к тому же снимку не перебирает его задачи, стаб -
   // новый объект - проверяется сам
-  check('граф turbo: tasksById - форма задач проверяется раз на объект dry, стаб с задачей без taskId - отказ', () => {
+  check('граф turbo: tasksById - форма задач проверяется раз на снимок задач, стаб с задачей без taskId - отказ', () => {
     const base = sample();
     let reads = 0;
-    const tasks = base.tasks;
-    const dry = Object.assign({}, base);
-    Object.defineProperty(dry, 'tasks', { get: () => { reads++; return tasks; }, enumerable: true });
-    G.rootTasks(dry, 'build');
-    G.rootTasks(dry, 'build');
-    if (reads !== 1) return 'задачи dry перебраны ' + reads + ' раз(а) на двух вопросах к одному снимку';
+    // поле, которое читает только проверка формы (TASK_FIELDS), а не rootTasks: второй вопрос его не читает
+    const t0 = base.tasks[0];
+    const def = t0.resolvedTaskDefinition;
+    Object.defineProperty(t0, 'resolvedTaskDefinition', { get: () => { reads++; return def; }, enumerable: true });
+    G.rootTasks(base, 'build');
+    const first = reads;
+    G.rootTasks(base, 'build');
+    if (!first || reads !== first) return 'форма задач проверена ' + (first ? 'заново' : 'ни разу') + ' (чтений поля ' + first + ' -> ' + reads + ') на двух вопросах к одному снимку';
     return refusalVerdict(() => G.rootTasks(Object.assign({}, base, { tasks: base.tasks.concat({}) }), 'build'),
       'задача dry-JSON без taskId - форма dry-JSON turbo неизвестна');
+  });
+  // Ключ кэша - снимок задач (TECH_DEBT 23.10.2026 E0-12T E8): замена dry.tasks новым массивом после
+  // первого вопроса - новая задача видна, её форма проверяется (битая - отказ). Проверенный снимок
+  // заморожен (замечание ревью E0-12AA): push, замена элемента и правка поля задачи на месте - TypeError,
+  // а не правка, которой кэш не видит
+  check('граф turbo: tasksById - проверенный снимок задач заморожен (push, замена элемента, правка поля - TypeError), замена массива после первого вопроса: новая задача видна, битая форма - отказ', () => {
+    const fresh = () => task('@sf/d#build', { command: 'next build', dependencies: [], inputs: {} });
+    const replaced = sample();
+    G.rootTasks(replaced, 'build');
+    replaced.tasks = replaced.tasks.concat(fresh());
+    if (!G.rootTasks(replaced, 'build').map((r) => r.name).includes('@sf/d#build')) return 'новая задача не видна после замены массива';
+    const broken = sample();
+    G.rootTasks(broken, 'build');
+    broken.tasks = broken.tasks.concat({});
+    const replacedBroken = refusalVerdict(() => G.rootTasks(broken, 'build'), 'задача dry-JSON без taskId - форма dry-JSON turbo неизвестна');
+    if (replacedBroken !== true) return 'замена массива с битой задачей: ' + replacedBroken;
+    const edits = [
+      ['push', (dry) => dry.tasks.push(fresh())],
+      ['замена элемента', (dry) => { dry.tasks[0] = {}; }],
+      ['правка поля', (dry) => { dry.tasks[0].command = 'changed'; }],
+      ['правка вложенного поля', (dry) => { dry.tasks[0].resolvedTaskDefinition.inputs.push('x'); }],
+    ];
+    const open = [];
+    for (const [how, edit] of edits) {
+      const dry = sample();
+      G.rootTasks(dry, 'build');
+      try {
+        edit(dry);
+        open.push(how);
+      } catch (e) {
+        if (!(e instanceof TypeError)) open.push(how + ' (' + ((e && e.message) || String(e)) + ')');
+      }
+    }
+    return !open.length || 'проверенный снимок правится на месте: ' + open.join(', ');
   });
   // workspace: только в peerDependencies (Р5 техлида E0-12T; TECH_DEBT 21.10.2026 E0-12L круг 4, peer-only workspace-зависимость): отказ с пакетом,
   // зависимостью и подсказкой; peer с дублем в devDependencies и peer не workspace: - пропуск
@@ -502,9 +639,9 @@ function registerGraphCases(ctx, gates) {
     return (typeof v === 'object' && v.note === '0 задач') || 'строка графа: ' + JSON.stringify(v);
   });
   check('граф turbo: check не пишет строку пробы, которая вернула SKIPPED', () => {
-    const before = results.length;
-    check('граф turbo: проба SKIPPED', () => SKIPPED);
-    const stray = results.splice(before);
+    // приёмник строк - свой (TECH_DEBT 23.10.2026 E0-12U круг 2: не splice общего results мимо check)
+    const stray = [];
+    check('граф turbo: проба SKIPPED', () => SKIPPED, (row) => stray.push(row));
     return !stray.length || 'check записал строку пробы, которая не гонялась: ' + stray.map((x) => (x.ok ? 'ok ' : 'FAIL ') + x.name).join(', ');
   });
   check('граф turbo: rootsRefusal - отказ корней называет перечень и как его расширить', () => {
@@ -523,7 +660,9 @@ function registerGraphCases(ctx, gates) {
   refusedWith('git ls-files убит сигналом - отказ с именем сигнала', () => trackedFiles({ spawn: () => ({ pid: 4242, status: null, signal: 'SIGKILL', stdout: '', stderr: '' }) }),
     'git ls-files: сигнал SIGKILL: ');
   check('граф turbo: trackedFiles - файла нет на диске - не в списке, есть - в списке', () => {
-    const got = JSON.stringify(trackedFiles({ spawn: lsFiles('package.json\0sf-selftest-gone.ts\0') }));
+    // корень - тот же каталог другой строкой (хвостовой разделитель): живое дерево судит ctx.inLiveTree, а не
+    // равенство строки с ROOT (Р9 E0-12AA) - иначе git() временных репозиториев отказал бы на живом дереве
+    const got = JSON.stringify(trackedFiles({ root: ROOT + path.sep, spawn: lsFiles('package.json\0sf-selftest-gone.ts\0') }));
     return got === JSON.stringify(['package.json']) || 'получено ' + got;
   });
   refusedWith('trackedFiles: файл не читается (EACCES) - отказ, а не молча выпавший файл', () => trackedFiles({

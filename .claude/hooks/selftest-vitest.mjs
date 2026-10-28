@@ -10,10 +10,10 @@
  * Своего разбора JS здесь нет; команда только делится на слова по пробелам с учётом кавычек
  * (`-c "x y.ts"`), а команда с операторами оболочки - отказ пары, а не догадка.
  *
- * Вывод - одна строка `selftest-vitest <JSON>` в stdout: массив по парам в их порядке,
+ * Вывод - одна строка ответа (VITEST_MARK и JSON) в stdout: массив по парам в их порядке,
  * `{ dir, config, setupFiles, globalSetup }` (абсолютные пути, как их разрешил vitest) или
  * `{ dir, error }`. Ошибка пары и сбой загрузки vitest - в JSON, не кодом выхода. Последняя
- * строка - `selftest-vitest-exit <код>` из обработчика выхода: harness-selftest.js запускает
+ * строка - строка выхода (VITEST_EXIT_MARK и код) из обработчика выхода: harness-selftest.js запускает
  * процесс без ожидания и ждёт её в файле stdout.
  *
  * Выход через exit процесса здесь запрещён (статический кейс в harness-selftest.js, решение
@@ -21,20 +21,20 @@
  * `<конфиг>.timestamp-<n>.mjs` и снимает его неожидаемым unlink; процесс выходит, когда цикл
  * событий опустел, - после снятия. Остаток ловит финальная сверка снимка дерева selftest.
  */
-import { statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
-// «файла нет» - один предикат обвязки (isNotFile из lib.js: ENOENT и ENOTDIR), без копии здесь
-const { isNotFile } = createRequire(import.meta.url)('./lib.js');
+// «файл есть» - один помощник обвязки (isFilePresent из lib.js: ENOENT и ENOTDIR - нет, иной сбой -
+// исключение), без копии здесь
+const { isFilePresent } = createRequire(import.meta.url)('./lib.js');
 
-/** Начало строки вывода; harness-selftest.js ищет его в stdout. */
-const MARK = 'selftest-vitest ';
+// строки протокола - один модуль на обе стороны (selftest-int.js берёт его же)
+const { VITEST_MARK, VITEST_EXIT_MARK } = createRequire(import.meta.url)('./selftest-vitest-protocol.cjs');
 
 // Строка выхода с кодом - последней в stdout, при любом выходе с обработчиками (и после
 // исключения): harness-selftest.js ждёт ребёнка, запущенного без ожидания, по ней, а не по событию.
 process.on('exit', (code) => {
-  process.stdout.write('selftest-vitest-exit ' + code + '\n');
+  process.stdout.write(VITEST_EXIT_MARK + code + '\n');
 });
 
 /** Слово оболочки, которое меняет смысл команды: команда с ним - не простой вызов vitest. */
@@ -69,13 +69,7 @@ async function resolvePair(vitest, dir, command) {
   }
   const root = path.resolve(dir, typeof options.root === 'string' ? options.root : '.');
   const config = path.resolve(root, options.config);
-  let file = false;
-  try {
-    file = statSync(config).isFile();
-  } catch (e) {
-    if (!isNotFile(e)) throw e;
-  }
-  if (!file) throw new Error('конфига ' + options.config + ' (--config команды ' + JSON.stringify(command) + ') нет на диске');
+  if (!isFilePresent(config)) throw new Error('конфига ' + options.config + ' (--config команды ' + JSON.stringify(command) + ') нет на диске');
   const ctx = await vitest.createVitest('test', Object.assign({}, options, { config, root, watch: false }), {}, {});
   try {
     return { dir, config, setupFiles: [...ctx.config.setupFiles], globalSetup: [...ctx.config.globalSetup] };
@@ -109,4 +103,4 @@ for (const [dir, command] of pairs) {
     out.push({ dir, error: (e && e.message) || String(e) });
   }
 }
-process.stdout.write(MARK + JSON.stringify(out) + '\n');
+process.stdout.write(VITEST_MARK + JSON.stringify(out) + '\n');

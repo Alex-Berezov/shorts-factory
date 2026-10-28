@@ -15,14 +15,15 @@
 
 const fs = require('fs');
 const path = require('path');
+const { PROCESS_EXIT } = require('./selftest-children.js');
 
 function createIntRun(ctx, int) {
   const {
-    G, HOOKS, LIVE_CHILDREN, ROOT, SKIPPED, SYNTAX_OK, TEMP, check, gateVerdict, killLiveChildren,
-    killLiveChildrenOnExit, outcome, refusalVerdict, releaseTemp, run, snapshotGate, tempDir,
+    CLAUDE, G, HOOKS, LIVE_CHILDREN, LIVE_STATE, ROOT, SKIPPED, SYNTAX_OK, tempView, check, gateVerdict, killLiveChildren,
+    killLiveChildrenOnExit, outcome, put, refusalVerdict, releaseTemp, run, snapshotGate, tempDir, unholdTemp, dropFailures, absent,
   } = ctx;
   const {
-    NODE_NEED, nodeVerdict, importsGate, VITEST_CHILD, VITEST_MARK, SPAWN_CODE_UNKNOWN, VITEST_GONE_MS,
+    NODE_LINES, NODE_NEED, nodeVerdict, importsGate, VITEST_CHILD, VITEST_MARK, SPAWN_CODE_UNKNOWN, VITEST_GONE_MS,
     INT_STUB_COMMAND, INT_STUB_PAIRS, startVitest, pidGone, VITEST_EXIT_MARK, awaitVitest, JOINED_NOT_READ,
     REPO_ROOT_REVIEWED, DISK, overlaySource, VITEST_CONDITIONS, intProbeWalk, intProbeReads, startIntVitest,
     readIntVitest, FAKE_VITEST_TIMEOUT_MS, FAKE_PAIRS, FAKE_VITEST, fakeVitest, fakeRefused,
@@ -46,6 +47,22 @@ function createIntRun(ctx, int) {
   function start(graphGate) {
     GRAPH_GATE = graphGate;
     IMPORTS_GATE = importsGate(process.version);
+
+    // Класс TDZ (TECH_DEBT 23.10.2026 E0-12T F4, кейс по образцу E2): функции createIntProbe,
+    // вызванные сразу после её возврата, читают объявления фабрики (DISK, JOINED_NOT_READ,
+    // REPO_ROOT_REVIEWED, VITEST_CONDITIONS) - ответ или отказ по сути, а не ReferenceError
+    check('int-проба: функции createIntProbe сразу после её создания читают DISK, JOINED_NOT_READ, REPO_ROOT_REVIEWED, VITEST_CONDITIONS - отказ по сути, а не ReferenceError', () => {
+      if (overlaySource({}).isFile('sf-selftest-none.ts') !== false) return 'DISK: несуществующий модуль назван файлом';
+      const imports = {
+        DYNAMIC_SPECIFIER: '?',
+        repoRootUses: () => [{ kind: 'path', callee: 'join', path: '.env', line: 1 }],
+        importSpecifiers: () => ['@sf/zz'],
+      };
+      const ws = { '@sf/zz': { dir: 'packages/zz', pkg: { name: '@sf/zz', exports: { '.': { browser: './x.js' } } } } };
+      const entries = [{ name: 'r', config: 'c.ts', setupFiles: ['s.ts'], globalSetup: [] }];
+      return refusalVerdict(() => intProbeWalk(entries, ws, overlaySource({ 's.ts': 'x' }), imports),
+        's.ts: у @sf/zz нет строки exports["."] (условия ' + VITEST_CONDITIONS.join(', ') + ')');
+    });
 
     // Боевой путь «pid нет, повтор запустился» до первого вызова startVitest (замечание ревью E2
     // E0-12T): всё, что он читает, обязано быть инициализировано здесь - кейс ниже по файлу шёл после
@@ -114,7 +131,70 @@ function createIntRun(ctx, int) {
     // IMPORTS_GATE выключила бы границу на настоящем прогоне при зелёном кейсе выше.
     check('граница Node: модуль test/imports.ts этого прогона судился на process.version', () =>
       IMPORTS_GATE.version === process.version || 'IMPORTS_GATE на версии ' + JSON.stringify(IMPORTS_GATE.version) + ', процесс ' + process.version);
+    // Граница Node в четырёх местах (TECH_DEBT 23.10.2026 E0-12T, E11): NODE_LINES пробы, Test-NodeFloor
+    // установщика, engines.node корневого package.json и .nvmrc - одна; отказ называет источник
+    check('граница Node: Test-NodeFloor в install.ps1, engines.node в package.json и .nvmrc - как NODE_LINES (проба отказа - сдвиг в каждом источнике, неразобранный терм install.ps1)', () => {
+      const read = (p) => fs.readFileSync(p, 'utf8');
+      const live = nodeFloorViolations({
+        ps1: read(path.join(CLAUDE, 'install.ps1')),
+        engines: JSON.parse(read(path.join(ROOT, 'package.json'))).engines,
+        nvmrc: read(path.join(ROOT, '.nvmrc')),
+      });
+      if (live.length) return live.join('; ');
+      const ps1 = 'function Test-NodeFloor([string]$version) {\n    return ($major -gt 23) -or ($major -eq 22 -and $minor -ge 18) -or ($major -eq 23 -and $minor -ge 6)\n}\n';
+      const engines = { node: '>=22.18 <23 || >=23.6' };
+      const cases = [
+        [{ ps1: ps1.replace('-ge 18', '-ge 17'), engines, nvmrc: '22.18\n' }, 'install.ps1 Test-NodeFloor: {"22":17,"23":6} и мажор выше 23, у NODE_LINES {"22":18,"23":6} и мажор выше 23'],
+        [{ ps1: ps1.replace(') -or ($major -eq 23', ') -or ($major -ge 23'), engines, nvmrc: '22.18\n' }, 'install.ps1 Test-NodeFloor: не разобрано «($major -ge 23 -and $minor -ge 6)» - сверка по шаблонам ($major -eq N -and $minor -ge M) и ($major -gt T)'],
+        [{ ps1, engines: { node: '>=22.17 <23 || >=23.6' }, nvmrc: '22.18\n' }, 'package.json engines.node: ">=22.17 <23 || >=23.6", по NODE_LINES ">=22.18 <23 || >=23.6"'],
+        [{ ps1, engines, nvmrc: '22.17\n' }, '.nvmrc 22.17: ' + NODE_NEED + ', у тебя v22.17.0'],
+      ];
+      const bad = cases.map(([src, want]) => [nodeFloorViolations(src).join('; '), want]).filter(([got, want]) => got !== want);
+      return !bad.length || 'сверка слепа: ' + bad.map(([got, want]) => 'ожидалось «' + want + '», получено «' + got + '»').join('; ');
+    });
     return { IMPORTS_GATE, VITEST_GATE };
+  }
+
+  /**
+   * Расхождения границы Node с NODE_LINES (TECH_DEBT 23.10.2026 E0-12T, E11): src - { ps1 (текст
+   * install.ps1), engines (поле engines корневого package.json), nvmrc (текст .nvmrc) }. install.ps1 -
+   * тело Test-NodeFloor разбирается по шаблонам `($major -eq N -and $minor -ge M)` и `($major -gt T)`,
+   * остаток, кроме return и -or, - отказ (fail-closed, L-028); engines.node - ровно диапазоны по
+   * NODE_LINES (`>=22.18 <23 || >=23.6`); .nvmrc - версия не ниже границы своей линии (nodeVerdict).
+   * Строки отказа с источником; пусто - сходится.
+   */
+  function nodeFloorViolations(src) {
+    const bad = [];
+    const majors = Object.keys(NODE_LINES).map(Number).sort((a, b) => a - b);
+    const top = majors[majors.length - 1];
+    const want = JSON.stringify(NODE_LINES) + ' и мажор выше ' + top;
+    const body = /function Test-NodeFloor\b[^{]*\{([\s\S]*?)\n\}/.exec(String(src.ps1));
+    if (!body) bad.push('install.ps1: нет функции Test-NodeFloor');
+    else {
+      const ret = /^\s*return\s+(.+)$/m.exec(body[1]);
+      const text = ret ? ret[1].trim() : '';
+      const lines = {};
+      let above = null;
+      const rest = text
+        .replace(/\(\$major -eq (\d+) -and \$minor -ge (\d+)\)/g, (_, m, n) => { lines[m] = Number(n); return ''; })
+        .replace(/\(\$major -gt (\d+)\)/g, (_, t) => { above = Number(t); return ''; })
+        .replace(/\s*-or\s*/g, ' ').trim();
+      if (!ret || rest) bad.push('install.ps1 Test-NodeFloor: не разобрано «' + (ret ? rest : 'нет return') + '» - сверка по шаблонам ($major -eq N -and $minor -ge M) и ($major -gt T)');
+      else {
+        const got = JSON.stringify(lines) + ' и мажор выше ' + above;
+        if (got !== want) bad.push('install.ps1 Test-NodeFloor: ' + got + ', у NODE_LINES ' + want);
+      }
+    }
+    const engines = src.engines && src.engines.node;
+    const ranges = majors.map((m) => '>=' + m + '.' + NODE_LINES[m] + (m === top ? '' : ' <' + (m + 1))).join(' || ');
+    if (typeof engines !== 'string' || engines.replace(/\s+/g, ' ').trim() !== ranges) bad.push('package.json engines.node: ' + JSON.stringify(engines) + ', по NODE_LINES ' + JSON.stringify(ranges));
+    const nv = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?\s*$/.exec(String(src.nvmrc).trim());
+    if (!nv) bad.push('.nvmrc: не версия ' + JSON.stringify(String(src.nvmrc).trim()));
+    else {
+      const verdict = nodeVerdict('v' + nv[1] + '.' + (nv[2] || '0') + '.' + (nv[3] || '0'));
+      if (verdict) bad.push('.nvmrc ' + String(src.nvmrc).trim() + ': ' + verdict);
+    }
+    return bad;
   }
 
   /** Обёртка пробы, которой нужны и граф, и test/imports.ts: без любого из них - SKIPPED. */
@@ -418,7 +498,7 @@ function createIntRun(ctx, int) {
       return (r.error === undefined && JSON.stringify(r.value) === want) || 'получено ' + JSON.stringify(r);
     });
     check(line('вышел с кодом 1 - отказ с кодом и stderr'), () => fakeRefused('code1', what + ': код 1: boom'));
-    check(line('stdout без строки ответа - отказ'), () => fakeRefused('empty', what + ': в stdout не ровно одна строка «selftest-vitest <JSON>»: ' + JSON.stringify(VITEST_EXIT_MARK + '0\n')));
+    check(line('stdout без строки ответа - отказ'), () => fakeRefused('empty', what + ': в stdout не ровно одна строка «' + VITEST_MARK.trim() + ' <JSON>»: ' + JSON.stringify(VITEST_EXIT_MARK + '0\n')));
     check(line('ответ не JSON - отказ'), () => {
       let why = '';
       try {
@@ -471,12 +551,12 @@ function createIntRun(ctx, int) {
     });
     // LIVE_CHILDREN (замечание ревью C3 E0-12T): запущенный без ожидания ребёнок - в наборе до ответа,
     // killLiveChildren снимает его SIGKILL и чистит набор, обработчик exit процесса зовёт её раньше
-    // снятия каталогов реестра (TEMP.dropAll). Набор кейса - свой: общий держит дочерний vitest пробы.
+    // снятия каталогов реестра (tempView.dropAll). Набор кейса - свой: общий держит дочерний vitest пробы.
     check(line('ребёнок без ответа - в LIVE_CHILDREN, killLiveChildren снимает его до снятия каталогов на exit'), () => {
       const exits = process.listeners('exit');
       const kill = exits.indexOf(killLiveChildrenOnExit);
       if (kill === -1) return 'killLiveChildren не в обработчиках exit';
-      if (kill > exits.indexOf(TEMP.dropAll)) return 'killLiveChildren на exit позже TEMP.dropAll';
+      if (kill > exits.indexOf(tempView.dropAll)) return 'killLiveChildren на exit позже TEMP.dropAll';
       const dir = tempDir('vitest-live');
       try {
         fs.writeFileSync(path.join(dir, 'child.js'), FAKE_VITEST.hang);
@@ -564,6 +644,161 @@ function createIntRun(ctx, int) {
         releaseTemp(dir);
       }
     });
+    // Fix 3a (TECH_DEBT 23.10.2026 E0-12T): после SIGKILL awaitVitest ждёт конца процесса до ответа и
+    // снятия из LIVE_CHILDREN. Ребёнок кейса пишет ответ и строку выхода и живёт, пока не придёт
+    // «SIGKILL» - файл-отметка, которую пишет подменённое снятие; получив её, он живёт ещё 500 мс и
+    // выходит. Окно считается от события (отметки), а не от старта ребёнка: на занятой машине ребёнок не
+    // выйдет раньше снятия, и ветка SIGKILL пройдена всегда; после ответа awaitVitest процесса нет
+    check(line('после SIGKILL awaitVitest ждёт конца процесса до ответа и снятия из LIVE_CHILDREN'), () => {
+      const dir = tempDir('vitest-killwait');
+      try {
+        const answer = VITEST_MARK + JSON.stringify([{ dir: '/a', config: '/a/x.ts', setupFiles: [], globalSetup: [] }]) + '\n' + VITEST_EXIT_MARK + '0\n';
+        const killMark = path.join(dir, 'killed');
+        fs.writeFileSync(path.join(dir, 'child.js'), [
+          'process.stdout.write(' + JSON.stringify(answer) + ');',
+          'const cap = setTimeout(() => {}, 30000);',
+          'const poll = setInterval(() => {',
+          '  if (!require("fs").existsSync(' + JSON.stringify(killMark) + ')) return;',
+          '  clearInterval(poll);',
+          '  clearTimeout(cap);',
+          '  setTimeout(() => {}, 500);',
+          '}, 20);',
+        ].join('\n'));
+        const killed = [];
+        const h = startVitest(FAKE_PAIRS, dir, {
+          child: path.join(dir, 'child.js'),
+          goneMs: 0,
+          kill: (c) => {
+            killed.push(c.pid);
+            fs.writeFileSync(killMark, 'kill');
+          },
+        });
+        try {
+          awaitVitest(h);
+        } catch (e) {
+          return 'ответ ребёнка кейса отвергнут: ' + ((e && e.message) || String(e));
+        }
+        if (!killed.length) return 'снятие не вызвано - ветка SIGKILL не пройдена';
+        if (LIVE_CHILDREN.has(h.child)) return 'ребёнок остался в LIVE_CHILDREN';
+        return pidGone(h.child.pid, 0) || 'процесс ' + h.child.pid + ' жив после ответа awaitVitest - снят из набора до своего конца';
+      } finally {
+        releaseTemp(dir);
+      }
+    });
+    // Предел ожидания после SIGKILL не дождался - отказ с именем программы ребёнка и pid, не молчаливое
+    // снятие (Fix 3a); ребёнок остаётся в LIVE_CHILDREN, каталог его вывода держится (holdTemp):
+    // releaseTemp вызывающего его не трогает и сбоем снятия не пишет (замечание ревью E0-12AA C2); вывод
+    // ребёнка - в подкаталоге корня, как у fakeVitest: держится корень, который снимает вызывающий (Р9 E0-12AA)
+    check(line('процесс жив после SIGKILL дольше предела - отказ с pid, ребёнок в LIVE_CHILDREN, каталог держится до выхода прогона'), () => {
+      const dir = tempDir('vitest-killfail');
+      let h = null;
+      try {
+        const sub = path.dirname(put(dir, 'hang/child.js', FAKE_VITEST.hang));
+        h = startVitest(FAKE_PAIRS, sub, { hold: dir, child: path.join(sub, 'child.js'), timeoutMs: FAKE_VITEST_TIMEOUT_MS, killGoneMs: 0, kill: () => {} });
+        const refused = refusalVerdict(() => awaitVitest(h), 'child.js: процесс ' + h.child.pid + ' жив через 0 с после SIGKILL - каталог его вывода не снять');
+        if (refused !== true) return refused;
+        if (!LIVE_CHILDREN.has(h.child)) return 'ребёнок снят из LIVE_CHILDREN при отказе - выход прогона его не снимет';
+        const failures = dropFailures();
+        if (releaseTemp(dir) !== false || absent(dir)) return 'каталог живого ребёнка снят или снимался releaseTemp - он держится до выхода прогона';
+        if (dropFailures() !== failures) return 'releaseTemp каталога живого ребёнка записал сбой снятия';
+        return true;
+      } finally {
+        if (h) {
+          LIVE_CHILDREN.delete(h.child);
+          h.child.kill('SIGKILL');
+          pidGone(h.child.pid, VITEST_GONE_MS);
+        }
+        unholdTemp(dir);
+        releaseTemp(dir);
+      }
+    });
+    // F10 (TECH_DEBT 23.10.2026 E0-12T): состояние X (dead) в /proc/<pid>/stat - процесса нет
+    check('pidGone: Linux - состояние X (dead) в /proc/<pid>/stat при живом kill - процесса нет', () =>
+      pidGone(4242, 0, { platform: 'linux', readStat: () => '4242 (node) X 1 4242', kill: () => true }) === true || 'состояние X принято за живой процесс');
+    // F10: не-linux ветка (kill(pid, 0)) на настоящем процессе - этот процесс есть, вышедший ребёнок - нет
+    check('pidGone: win32 и darwin - настоящий kill(pid, 0): живой процесс есть, вышедший ребёнок - нет', () => {
+      const done = run(process.execPath, ['-e', ''], { cwd: ROOT });
+      if (done.status !== 0 || !done.pid) return 'ребёнок кейса не отработал: код ' + done.status;
+      const got = ['win32', 'darwin'].map((platform) => [pidGone(process.pid, 0, { platform }), pidGone(done.pid, 0, { platform })]);
+      return JSON.stringify(got) === '[[false,true],[false,true]]' || 'ожидалось [[false,true],[false,true]] (живой, вышедший), получено ' + JSON.stringify(got);
+    });
+    // F10: имя пакета constructor, __proto__, toString среди пакетов dry ищется только как своё
+    // свойство: через прототип объекта ws оно не находится, импорт - внешний пакет, не TypeError
+    for (const name of ['constructor', '__proto__', 'toString']) {
+      check('граф чтений int: импорт ' + name + ' - не пакет workspace (своё свойство ws, не прототип), внешний пакет', () => {
+        const imports = {
+          DYNAMIC_SPECIFIER: '?',
+          repoRootUses: () => [{ kind: 'path', callee: 'join', path: '.env.test', line: 1 }],
+          importSpecifiers: () => [name],
+        };
+        const entries = [{ name: 'r', config: 'c.ts', setupFiles: ['s.ts'], globalSetup: [] }];
+        let reads;
+        try {
+          reads = intProbeWalk(entries, {}, overlaySource({ 's.ts': 'x', '.env.test': '' }), imports).reads.map((r) => r.file);
+        } catch (e) {
+          return 'исключение: ' + ((e && e.message) || String(e));
+        }
+        return JSON.stringify(reads) === JSON.stringify(['c.ts', 's.ts', '.env.test']) || 'чтения ' + JSON.stringify(reads);
+      });
+    }
+    // E9 (TECH_DEBT 23.10.2026 E0-12T): тело обработчика exit исполняется - дочерний node берёт набор
+    // детей из selftest-children.js (одно тело с самопроверкой), кладёт туда внука (detached: на Windows
+    // иначе его снимает job object libuv вместе с ребёнком) и выходит exit процесса; после выхода внука
+    // нет. Сторона отказа - тот же ребёнок с пустым снятием (deps.kill): внук жив
+    // pid внуков кейса обработчика exit: их снимает finally кейса, сверяет строка после него
+    const grandchildren = [];
+    // Внук - через точку запуска selftest-children.js (makeLauncher: его окружение проходит
+    // hookStateGuard). Каждый внук, чей pid кейс получил, снимается в finally при любом исходе - и при
+    // раннем отказе (замечание ревью E0-12AA T9: detached-внук с setInterval иначе жил бы вечно)
+    check('killLiveChildrenOnExit: exit процесса снимает внука из набора детей (тело обработчика исполняется); пустое снятие - внук жив', () => {
+      const code = [
+        'const { makeChildRegistry, makeLauncher } = require(' + JSON.stringify(path.join(HOOKS, 'selftest-children.js')) + ');',
+        "const reg = makeChildRegistry(process.argv[1] === 'empty' ? { kill: () => {} } : undefined);",
+        "process.on('exit', reg.onExit);",
+        'const g = makeLauncher({ liveState: ' + JSON.stringify(LIVE_STATE) + " }).spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true, windowsHide: true });",
+        'g.unref();',
+        'reg.live.add(g);',
+        'process.stdout.write(String(g.pid));',
+        PROCESS_EXIT + '(0);',
+      ].join('\n');
+      const child = (mode) => {
+        const r = run(process.execPath, ['-e', code, mode], { cwd: ROOT, timeout: 30000, killSignal: 'SIGKILL' });
+        const pid = Number(String(r.stdout || '').trim()) || null;
+        if (pid) grandchildren.push(pid);
+        return { code: r.status, pid, err: String(r.stderr || '').slice(0, 160) };
+      };
+      try {
+        const real = child('real');
+        if (real.code !== 0 || !real.pid) return 'ребёнок: код ' + real.code + ', pid внука ' + real.pid + ' ' + real.err;
+        if (!pidGone(real.pid, VITEST_GONE_MS)) return 'внук ' + real.pid + ' жив после exit процесса - обработчик не снял набор детей';
+        const empty = child('empty');
+        if (empty.code !== 0 || !empty.pid) return 'ребёнок с пустым снятием: код ' + empty.code + ' ' + empty.err;
+        return !pidGone(empty.pid, 300) || 'с пустым снятием внук ' + empty.pid + ' тоже мёртв - кейс не видит тела обработчика';
+      } finally {
+        for (const pid of grandchildren) {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch (_) {
+            // внук уже вышел
+          }
+          pidGone(pid, VITEST_GONE_MS);
+        }
+      }
+    });
+    // T9 (замечание ревью E0-12AA): после кейса обработчика exit ни одного его внука нет - finally снял
+    // каждого, чей pid получен, и при раннем отказе; живой - отказ с pid (и снятие здесь)
+    check('killLiveChildrenOnExit: после кейса ни одного его внука нет (снятие в finally при любом исходе)', () => {
+      const alive = grandchildren.filter((pid) => !pidGone(pid, VITEST_GONE_MS));
+      for (const pid of alive) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch (_) {
+          // внук уже вышел
+        }
+      }
+      if (!grandchildren.length) return 'кейс не получил ни одного pid внука - сверять нечего';
+      return !alive.length || 'внуки живы после кейса: ' + alive.join(', ');
+    });
     // Ветки самого selftest-vitest.mjs, которые selftest-int.js не вызывает: нечётное число
     // аргументов (до загрузки vitest) и vitest/node, который не грузится (копия модуля и его lib.js вне
     // репозитория, где пакета vitest нет), - ошибка каждой пары в JSON, выход с кодом 0.
@@ -578,8 +813,9 @@ function createIntRun(ctx, int) {
       try {
         const copy = path.join(dir, 'selftest-vitest.mjs');
         fs.copyFileSync(VITEST_CHILD, copy);
-        // модуль берёт isNotFile из соседнего lib.js
+        // модуль берёт isFilePresent из соседнего lib.js и строки протокола из соседнего модуля протокола
         fs.copyFileSync(path.join(HOOKS, 'lib.js'), path.join(dir, 'lib.js'));
+        fs.copyFileSync(path.join(HOOKS, 'selftest-vitest-protocol.cjs'), path.join(dir, 'selftest-vitest-protocol.cjs'));
         const r = run(process.execPath, [copy, 'a', 'vitest run -c x.ts', 'b', 'vitest run -c y.ts'], { cwd: dir, timeout: 30000, killSignal: 'SIGKILL' });
         const got = String(r.stdout || '').split(/\r?\n/).find((l) => l.startsWith(VITEST_MARK));
         let out = null;

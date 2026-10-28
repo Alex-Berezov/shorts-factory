@@ -2093,8 +2093,9 @@
       "E0-12U"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-23"
+    "status": "in_progress",
+    "added_at": "2026-10-23",
+    "started_at": "2026-10-28"
   },
   {
     "id": "E0-12AB",
@@ -2123,5 +2124,18 @@
     "doc": "TECH_DEBT.md",
     "status": "todo",
     "added_at": "2026-10-23"
+  },
+  {
+    "id": "E0-12AD",
+    "epic": "E0",
+    "title": "harness-selftest: статические пробы по AST общим модулем, harness-selftest.js вне weakeningExempt, смысл weakeningExemptNote",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-12AA"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-28"
   }
 ]
