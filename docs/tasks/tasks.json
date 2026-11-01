@@ -2127,8 +2127,9 @@
       "E0-12AA"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-23"
+    "status": "blocked",
+    "added_at": "2026-10-23",
+    "blocked_reason": "стоп 3 (сессия 2): после Б1 текстом по ОВ7 круг /qa нашёл 5 блокеров, внесённых Fix 3/сессией 2 (H7 запись итога без красной посадки, finally Б8, неверный инвариант Б1 о vitest, сигнал null в vitestAnswer, pid-заглушка died/twice); по решению техлида дифф на ветке wip/E0-12AC (33ebd46), main чистый; вопрос техлиду следующей сессии"
   },
   {
     "id": "E0-12AD",
@@ -2140,8 +2141,9 @@
       "E0-12AA"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-28"
+    "status": "blocked",
+    "added_at": "2026-10-28",
+    "blocked_reason": "общие файлы .claude/hooks, ждёт коммита E0-12AC (ветка wip/E0-12AC)"
   },
   {
     "id": "E0-12AE",
