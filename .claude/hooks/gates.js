@@ -23,26 +23,34 @@
  *
  * Предел: у каждого гейта в правилах поле timeoutSec (целое от 1 до MAX_TIMEOUT_SEC, секунды).
  * Гейт, не завершившийся за предел, снимается вместе со всем деревом процессов (Windows -
- * taskkill /T /F, POSIX - группа процессов) и считается упавшим; снять не удалось или вывод после
- * снятия не закрылся - тоже упавший, «снять руками». Гейт без поля или с недопустимым значением -
- * упавший, команда не запускается (E0-12M). Зелёный гейт - только тот, чья оболочка вышла с 0 и
- * чей вывод закрылся сам; оболочка вышла, а оставшийся от неё процесс держит вывод, - упавший,
- * остаток назван, код оболочки в тексте. SIGINT, SIGTERM, SIGHUP, которые дошли до
- * обработчика gates.js, снимают дерево текущего гейта, выход ненулевой, отметка не ставится (на
- * Windows внешний SIGTERM - TerminateProcess, обработчик не зовётся; docs/60_HARNESS.md).
+ * taskkill /T /F, POSIX - группа процессов); гейт без поля или с недопустимым значением не
+ * запускается (E0-12M). Гейт красный во всех случаях, кроме: оболочка вышла с 0 и вывод закрылся
+ * сам; метки сводки (VERDICTS) и что делать - docs/60_HARNESS.md, «Гейты». SIGINT, SIGTERM,
+ * SIGHUP, которые дошли до обработчика gates.js, снимают дерево текущего гейта, выход ненулевой;
+ * полный прогон пишет красную отметку (код 1), частичный отметку не ставит (на Windows внешний
+ * SIGTERM - TerminateProcess, обработчик не зовётся; docs/60_HARNESS.md).
  * stdin гейту не даётся: гейт не интерактивен - команда, ждущая ввода, получает конец ввода сразу,
  * а не висит до предела (на POSIX гейт ещё и в своей сессии, setsid, и делил бы терминал с
  * оператором).
  *
  * Код выхода: 1, если упал хотя бы один гейт в любом репозитории, иначе 0.
+ *
+ * Отметка о прогоне (lastGates в .qa-state, только полный прогон без --repo и --only) - по диффу,
+ * снятому до запуска гейтов; дифф изменился за прогон (файл появился, пропал, сменил содержимое или
+ * не прочитан - метка-каталог, сбой чтения) - отметка с кодом 1 и код возврата 1, и при зелёных гейтах
+ * (решение техлида Р6 E0-12AB: код выхода = код отметки); сверка, запись или сам прогон упали - код 1
+ * и красная отметка.
  */
 
 const cp = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { StringDecoder } = require('string_decoder');
 const L = require('./lib.js');
+// diff-hash.js грузится сразу, а не перед отметкой: сбой его загрузки роняет gates.js до первого гейта
+// кодом 1 со стеком - громко и до траты времени на прогон; отметку тогда не пишет никто, но commit-gate.js
+// берёт тот же модуль и без него коммит не пускает
+const H = require('./diff-hash.js');
 
 // сколько строк вывода показываем целиком и как режем длинный
 const FULL_LIMIT = 200;
@@ -61,9 +69,15 @@ const MAX_TIMEOUT_SEC = 3600;
 // (прежний spawnSync держал maxBuffer; без предела болтливый гейт съел бы память gates.js)
 const OUTPUT_HEAD_BYTES = 1024 * 1024;
 const OUTPUT_TAIL_BYTES = 1024 * 1024;
+// хвост держится кусками не больше этого: срез начала хвоста - сдвиг внутри первого куска, без копии,
+// и лишнее в памяти - меньше одного куска
+const OUTPUT_TAIL_PIECE_BYTES = 64 * 1024;
 
 // taskkill по абсолютному пути: голое имя Windows ищет и в текущем каталоге
 const TASKKILL = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
+// код taskkill /T /F, когда корень дерева вышел сам между перечислением и снятием («нет запущенного
+// экземпляра»): единственный ненулевой код, разобранный замером (E0-12AB, файл дела «Замер шага 0»)
+const TASKKILL_ROOT_GONE = 255;
 
 // ------------------------------------------------------------------ аргументы
 
@@ -83,6 +97,15 @@ function parseArgs(argv) {
     }
   }
   return res;
+}
+
+/**
+ * Полный ли прогон: без --help, --list, --repo и --only. Только он ставит отметку lastGates, и только его
+ * прерывание или сбой пишут красную - одно определение на main(), обработчик сигнала и catch (ревью
+ * E0-12AB, круг 3; решение техлида Р7): новый сужающий ключ добавляется сюда, а не в три места.
+ */
+function isFull(args) {
+  return !args.help && !args.list && !args.repo && !args.only;
 }
 
 function printHelp() {
@@ -105,8 +128,9 @@ function printHelp() {
       'репозитории, и пустой --only - код 1, ничего не запускается.',
       '',
       'Предел времени - поле timeoutSec гейта (целое от 1 до ' + MAX_TIMEOUT_SEC + ', секунды): гейт,',
-      'не завершившийся за предел, снимается вместе с деревом процессов и считается упавшим;',
-      'гейт без поля не запускается и считается упавшим. Ctrl+C (SIGINT), SIGTERM, SIGHUP',
+      'не завершившийся за предел, снимается вместе с деревом процессов; гейт без поля не запускается.',
+      'Гейт красный во всех случаях, кроме: оболочка вышла с 0 и вывод закрылся сам; метки сводки и',
+      'что делать - docs/60_HARNESS.md, «Гейты». Ctrl+C (SIGINT), SIGTERM, SIGHUP',
       'снимают дерево текущего гейта, код ненулевой (на Windows внешний SIGTERM обработчик не зовёт).',
     ].join('\n'),
   );
@@ -296,14 +320,22 @@ function killGroup(pid) {
  * Снятие всего дерева процессов команды, пока её оболочка жива. Убить одну оболочку мало:
  * на Windows cmd.exe умирает, а pnpm -> turbo -> next остаются и держат пайп вывода, и гейт
  * висит дальше. Windows - taskkill /T по PID живой оболочки, POSIX - SIGKILL её группе.
- * Возвращает { ok, why }: ok - снятие подтверждено (taskkill с кодом 0, сигнал группе ушёл),
- * иначе why - почему снять не удалось (нет taskkill.exe, его отказ, нет группы).
+ * Возвращает { ok, why, unconfirmed, status }: ok - снятие подтверждено (taskkill с кодом 0, сигнал
+ * группе ушёл), иначе why - почему снять не удалось (нет taskkill.exe, его отказ, нет группы).
+ * unconfirmed - только код taskkill TASKKILL_ROOT_GONE (255, status - код): под нагрузкой корень
+ * cmd.exe, потеряв снятого ребёнка, выходит сам между перечислением дерева и своим снятием, и taskkill
+ * отвечает 255 «нет запущенного экземпляра», сняв остальное дерево (замер E0-12AB). Вердикт по такому
+ * снятию - по эффекту (settle в runGate, решения техлида Р2 и Р5 E0-12AB). Прочие ненулевые коды
+ * (1 - отказ доступа и др.) замером не разобраны - отказ снятия, «снять руками».
  */
 function killTree(child) {
   if (process.platform === 'win32') {
     const r = cp.spawnSync(TASKKILL, ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     if (r.error) return { ok: false, why: TASKKILL + ' не запустился (' + (r.error.code || r.error.message) + ')' };
-    if (r.status !== 0) return { ok: false, why: 'taskkill /T /F вышел с кодом ' + r.status + (r.signal ? ', сигнал ' + r.signal : '') };
+    if (r.status !== 0) {
+      const why = 'taskkill /T /F вышел с кодом ' + r.status + (r.signal ? ', сигнал ' + r.signal : '');
+      return r.status === TASKKILL_ROOT_GONE ? { ok: false, unconfirmed: true, status: r.status, why } : { ok: false, why };
+    }
     return { ok: true, why: '' };
   }
   const err = killGroup(child.pid);
@@ -337,60 +369,97 @@ function utf8TailStart(buf) {
 
 /**
  * Вывод гейта с пределом памяти: первые OUTPUT_HEAD_BYTES и последние OUTPUT_TAIL_BYTES байт,
- * середина срезается, и в текст встаёт строка, сколько срезано и почему. Каждый поток (stdout,
- * stderr) декодируется своим StringDecoder до склейки: символ, разрезанный между двумя кусками
- * одного потока, не разбивается куском другого. Срез головы и хвоста идёт по границе символа.
+ * середина срезается, и в текст встаёт строка, сколько срезано и почему. Вывод держится байтами и
+ * перекодируется один раз, в text(); у каждого потока (stdout, stderr) свой хвост незаконченного
+ * символа (carry): символ, разрезанный между двумя кусками одного потока, не разбивается куском
+ * другого. Срез головы и хвоста идёт по границе символа. Куски держатся копиями (own): срез
+ * subarray держал бы в памяти весь кусок, от которого он отрезан, и предел памяти не держался бы.
+ * Хвост - копии кусками до OUTPUT_TAIL_PIECE_BYTES: срез его начала сдвигает начало первого куска
+ * (skip) и снимает целые куски, ничего не копируя, - копия остатка на каждом куске вывода гоняла бы
+ * мегабайты памяти на каждый кусок болтливого гейта.
  */
 function outputBuffer() {
   const head = [];
   let headBytes = 0;
   const tail = [];
+  // байт хвоста без срезанного начала первого куска (skip)
   let tailBytes = 0;
+  let skip = 0;
   let cut = 0;
-  const push = (text) => {
-    if (!text) return;
-    let b = Buffer.from(text, 'utf8');
+  // свой буфер под ровно эти байты: срез чужого буфера копируется
+  const own = (b) => (b.byteOffset === 0 && b.length === b.buffer.byteLength ? b : Buffer.from(b));
+  const push = (bytes) => {
+    if (!bytes.length) return;
+    let b = bytes;
     if (headBytes < OUTPUT_HEAD_BYTES) {
       const take = Math.min(b.length, OUTPUT_HEAD_BYTES - headBytes);
-      head.push(b.subarray(0, take));
+      head.push(own(b.subarray(0, take)));
       headBytes += take;
       b = b.subarray(take);
       if (!b.length) return;
     }
-    tail.push(b);
+    // кусок длиннее всего хвоста: его начало срезано сразу, без копии
+    if (b.length > OUTPUT_TAIL_BYTES) {
+      cut += b.length - OUTPUT_TAIL_BYTES;
+      b = b.subarray(b.length - OUTPUT_TAIL_BYTES);
+    }
+    for (let i = 0; i < b.length; i += OUTPUT_TAIL_PIECE_BYTES) tail.push(own(b.subarray(i, i + OUTPUT_TAIL_PIECE_BYTES)));
     tailBytes += b.length;
     while (tailBytes > OUTPUT_TAIL_BYTES) {
       const over = tailBytes - OUTPUT_TAIL_BYTES;
-      if (tail[0].length <= over) {
-        tailBytes -= tail[0].length;
-        cut += tail[0].length;
+      const live = tail[0].length - skip;
+      if (live <= over) {
         tail.shift();
+        skip = 0;
+        tailBytes -= live;
+        cut += live;
       } else {
-        tail[0] = tail[0].subarray(over);
+        skip += over;
         tailBytes -= over;
         cut += over;
       }
     }
   };
+  // хвост без срезанного начала первого куска
+  const tailLive = () => (skip ? [tail[0].subarray(skip)].concat(tail.slice(1)) : tail);
   const streams = [];
   return {
-    /** Поток процесса: его куски декодируются своим декодером и идут в общий вывод. */
+    /**
+     * Поток процесса: в общий вывод идут его байты до границы символа, незаконченный символ в конце
+     * куска ждёт следующего куска этого же потока (carry).
+     */
     attach(stream) {
-      const dec = new StringDecoder('utf8');
-      streams.push(dec);
-      stream.on('data', (b) => push(dec.write(b)));
+      const s = { carry: Buffer.alloc(0) };
+      streams.push(s);
+      stream.on('data', (chunk) => {
+        const buf = s.carry.length ? Buffer.concat([s.carry, chunk]) : chunk;
+        const end = utf8HeadEnd(buf);
+        s.carry = own(buf.subarray(end));
+        push(buf.subarray(0, end));
+      });
     },
-    /** Хвосты декодеров (незаконченный символ в конце потока) - в вывод, перед text(). */
+    /** Хвосты потоков (незаконченный символ в конце потока) - в вывод, перед text(). */
     flush() {
-      for (const dec of streams.splice(0)) push(dec.end());
+      for (const s of streams.splice(0)) push(s.carry);
     },
     get cutBytes() {
       return cut;
     },
+    /** Сколько памяти держат куски вывода и хвосты потоков: размер их буферов, каждый буфер один раз. */
+    get heldBytes() {
+      const seen = new Set();
+      let n = 0;
+      for (const b of head.concat(tail, streams.map((s) => s.carry))) {
+        if (seen.has(b.buffer)) continue;
+        seen.add(b.buffer);
+        n += b.buffer.byteLength;
+      }
+      return n;
+    },
     text() {
       if (!cut) return Buffer.concat(head.concat(tail)).toString('utf8');
       const first = Buffer.concat(head);
-      const last = Buffer.concat(tail);
+      const last = Buffer.concat(tailLive());
       const headText = first.subarray(0, utf8HeadEnd(first)).toString('utf8');
       const tailText = last.subarray(utf8TailStart(last)).toString('utf8');
       return (
@@ -401,7 +470,9 @@ function outputBuffer() {
   };
 }
 
-// Деревья гейтов, которые идут сейчас: их снимает обработчик сигнала самого gates.js (abortRunning).
+// Гейты, которые идут сейчас: их деревья снимает обработчик сигнала самого gates.js (abortRunning).
+// main() гонит гейты по одному, но runGate экспортирован, и ребёнок проб (selftest-gate-runner.js)
+// гонит его параллельно - один слот снимал бы только последний запущенный (ревью E0-12AB).
 const running = new Set();
 
 /**
@@ -432,8 +503,12 @@ function abortRunning() {
  * remnant, noLimit, limit }> и не отклоняется никогда. Код 0 - только оболочка вышла с 0 и вывод
  * закрылся сам, без предела и без снятия (settle). Гейт без предела - код 1 без запуска (noLimit);
  * по пределу дерево снимается: снятие подтверждено и вывод закрылся в KILL_GRACE_MS - код 1,
- * timedOut; отказ снятия или вывод не закрылся - код 1, timedOut и manual (снять руками, оба факта
- * в тексте). Оболочка вышла, а вывод открыт: остаток дерева снимается сразу на POSIX (группа
+ * timedOut; taskkill вышел не с 0, а оболочка вышла и вывод закрылся в KILL_GRACE_MS - тоже код 1 и
+ * timedOut, код taskkill в тексте (Р2 E0-12AB); отказ снятия или вывод не закрылся - код 1, timedOut
+ * и manual (снять руками, оба факта в тексте). Снятие по пределу отложено на фазу check (setImmediate):
+ * выход оболочки, пришедший в том же обороте цикла, что и предел, обрабатывается раньше, и вышедшая
+ * оболочка не снимается. Вывод закрылся без выхода оболочки - код 1 (fail-closed). Оболочка вышла,
+ * а вывод открыт: остаток дерева снимается сразу на POSIX (группа
  * живёт, пока в ней есть процесс, и её номер не достаётся чужому) и не снимается на Windows
  * (дерево ищется только по PID живой оболочки, PID вышедшей мог получить чужой процесс); снят
  * остаток группы - код 1 и это в тексте; вывод не закрылся за KILL_GRACE_MS - код 1 и remnant
@@ -463,7 +538,7 @@ function runGate(gate, root) {
     let timer = null;
     let grace = null;
     let entry = null;
-    // снятие по пределу: null - предел не наступал, иначе { ok, why } killTree
+    // снятие по пределу: null - предел не наступал, иначе итог killTree
     let limitKill = null;
     const finish = (code, tail, flags) => {
       if (settled) return;
@@ -524,6 +599,16 @@ function runGate(gate, root) {
         if (limitKill.ok && closed) {
           return finish(1, 'гейт снят по пределу ' + limit + ' с (timeoutSec в rules.sf.json): команда не завершилась');
         }
+        // taskkill вышел не с 0, а оболочка вышла и вывод закрылся в окне ожидания: дерево снято, корень
+        // ушёл сам между перечислением и снятием (замер E0-12AB) - вердикт по эффекту, код taskkill в тексте
+        // (решение техлида Р2 E0-12AB); сбой запуска taskkill и незакрывшийся вывод - «снять руками» ниже
+        if (limitKill.unconfirmed && closed && entry.exited) {
+          return finish(
+            1,
+            'гейт снят по пределу ' + limit + ' с (timeoutSec в rules.sf.json): команда не завершилась; taskkill /T /F вышел с кодом ' +
+              limitKill.status + ', оболочка вышла, вывод закрылся',
+          );
+        }
         return finish(
           1,
           'гейт не завершился за предел ' + limit + ' с (timeoutSec в rules.sf.json); ' +
@@ -543,6 +628,9 @@ function runGate(gate, root) {
           { remnant: true },
         );
       }
+      // вывод закрылся без выхода, предела и ошибки запуска - Node этого не обещает; кода оболочки
+      // нет, и код из close гейт зелёным не делает (fail-closed)
+      if (shell === null) return finish(1, 'вывод закрылся, а оболочка гейта не сообщила о выходе');
       if (shell.swept) return finish(1, 'оболочка гейта ' + shellText() + ', оставшиеся процессы её группы сняты');
       if (shell.code === null) return finish(1, 'команда прервана сигналом ' + (shell.signal || 'неизвестно'));
       return finish(shell.code, '');
@@ -558,30 +646,63 @@ function runGate(gate, root) {
       // остаток, который снятие не достало (Windows), держал бы пайп вечно: гейт возвращается
       grace = setTimeout(() => settle(false), KILL_GRACE_MS);
     });
-    child.on('close', (code, signal) => {
-      if (!shell && !limitKill) shell = { code, signal, swept: false };
+    // close после error (сбой запуска) молчит: итог уже отдан
+    child.on('close', () => {
+      if (settled) return;
       settle(true);
     });
     timer = setTimeout(() => {
-      // оболочка вышла в том же обороте цикла: гейт не висел, и её PID уже не её
       if (settled || entry.exited) return;
-      limitKill = killTree(child);
-      // процесс, которого снятие не достало, держал бы пайп вечно: гейт возвращается всё равно
-      grace = setTimeout(() => settle(false), KILL_GRACE_MS);
+      // Предел и выход оболочки рядом: снятие откладывается на setImmediate (фаза check). По
+      // документированному порядку фаз цикла Node (timers -> poll -> check,
+      // https://nodejs.org/en/learn/asynchronous-work/event-loop-timers-and-nexttick) событие, отданное
+      // после таймера, но до фазы check этого оборота (в том числе в poll), обрабатывается раньше, и
+      // страж ниже видит entry.exited - PID вышедшей оболочки не снимается. Приходит ли выход cmd.exe
+      // на Windows в тот же оборот, что и таймер, не замерялось. Окно сужается, а не исчезает: выход
+      // после фазы check страж не видит (снятие одно, его исход - вердикт по эффекту в settle); обе
+      // стороны держат пробы runGate с поддельным процессом.
+      setImmediate(() => {
+        if (settled || entry.exited) return;
+        limitKill = killTree(child);
+        // процесс, которого снятие не достало, держал бы пайп вечно: гейт возвращается всё равно
+        grace = setTimeout(() => settle(false), KILL_GRACE_MS);
+      });
     }, limit * 1000);
   });
 }
 
+/**
+ * Метки сводки - одна таблица (E0-12AB): первая подошедшая строка даёт метку. parts - текст метки
+ * вокруг числа: у строки с n метка - parts, склеенные числом n(r) из итога runGate, без n - одна
+ * часть. В матрице docs/60_HARNESS.md, «Гейты» (что каждая значит и что делать) на месте числа
+ * стоит N (экспорт verdicts); совпадение держит harness-selftest.
+ */
+const VERDICTS = [
+  { parts: ['ПРЕДЕЛ ', ' с, СНЯТЬ РУКАМИ'], when: (r) => r.timedOut && r.manual, n: (r) => r.limit },
+  { parts: ['СНЯТ ПО ПРЕДЕЛУ ', ' с'], when: (r) => r.timedOut, n: (r) => r.limit },
+  { parts: ['ОСТАТОК ЖИВ, СНЯТЬ РУКАМИ'], when: (r) => r.remnant },
+  { parts: ['ПАДАЕТ, нет предела timeoutSec'], when: (r) => r.noLimit },
+  { parts: ['ok'], when: (r) => r.code === 0 },
+  { parts: ['ПАДАЕТ, код ', ''], when: () => true, n: (r) => r.code },
+];
+
 /** Итог гейта словами: для строки после его вывода и для сводки. */
 function verdict(r) {
-  if (r.timedOut && r.manual) return 'ПРЕДЕЛ ' + r.limit + ' с, СНЯТЬ РУКАМИ';
-  if (r.timedOut) return 'СНЯТ ПО ПРЕДЕЛУ ' + r.limit + ' с';
-  if (r.remnant) return 'ОСТАТОК ЖИВ, СНЯТЬ РУКАМИ';
-  if (r.noLimit) return 'ПАДАЕТ, нет предела timeoutSec';
-  return r.code === 0 ? 'ok' : 'ПАДАЕТ, код ' + r.code;
+  const v = VERDICTS.find((x) => x.when(r));
+  return v.n ? v.parts.join(String(v.n(r))) : v.parts[0];
 }
 
 // --------------------------------------------------------------- какие репозитории
+
+/** Годные гейты правил репозитория: объявленные с id и cmd; без поля gates - ни одного. */
+function gatesOf(rules) {
+  return Array.isArray(rules.gates) ? rules.gates.filter((x) => x && x.id && x.cmd) : [];
+}
+
+/** Группа прогона репозитория без изменённых файлов (--repo без диффа, --only на чистом дереве). */
+function bareGroup(repo) {
+  return { repo, rules: L.rulesFor(repo), files: [] };
+}
 
 /**
  * Репозитории, по которым пойдём: те, где есть дифф. С --repo берём только названный,
@@ -603,7 +724,7 @@ function pickRepos(wanted) {
     );
     return null;
   }
-  return [{ repo, rules: L.rulesFor(repo), files: [] }];
+  return [bareGroup(repo)];
 }
 
 /**
@@ -616,9 +737,7 @@ function pickRepos(wanted) {
 function onlyRepos(args, groups) {
   const owners = new Map();
   for (const repo of L.knownRepos()) {
-    const rules = L.rulesFor(repo);
-    for (const x of Array.isArray(rules.gates) ? rules.gates : []) {
-      if (!x || !x.id || !x.cmd) continue;
+    for (const x of gatesOf(L.rulesFor(repo))) {
       if (!owners.has(x.id)) owners.set(x.id, []);
       owners.get(x.id).push(repo.name);
     }
@@ -635,12 +754,9 @@ function onlyRepos(args, groups) {
   if (!groups.length) {
     // --only на чистом дереве: гейты, которые попросили прямо, идут и без диффа - иначе
     // `--only=build` после коммита отвечал бы exit 0, ничего не собрав (E0-12M, B1)
+    // группы помечены clean: строку о чистом дереве печатает main() вместо «Пойдём по репозиториям»
     const owning = L.knownRepos().filter((r) => args.only.some((id) => owners.get(id).indexOf(r.name) !== -1));
-    console.log(
-      'Изменений нет ни в одном репозитории; --only гонит названные гейты там, где они объявлены: ' +
-        owning.map((r) => r.name).join(', ') + ' (сузить - --repo=<имя>).',
-    );
-    return owning.map((repo) => ({ repo, rules: L.rulesFor(repo), files: [] }));
+    return owning.map((repo) => Object.assign(bareGroup(repo), { clean: true }));
   }
   // гейт есть, но только в репозитории, куда прогон не идёт (там нет изменений, или --repo
   // назвал другой): молча не запустить его - тот же exit 0 без проверки
@@ -654,13 +770,28 @@ function onlyRepos(args, groups) {
     );
     return null;
   }
+  // гейт идёт в изменённых репозиториях, а объявлен и в репозитории без изменений: туда прогон не
+  // идёт, и это говорится прямо - иначе оператор считал бы тот репозиторий проверенным (решение
+  // техлида Р3 E0-12AB); --repo выбрал репозиторий сам - строки нет
+  if (!args.repo) {
+    for (const id of args.only) {
+      for (const n of owners.get(id)) {
+        if (picked.indexOf(n) === -1) {
+          console.log('--only: гейт ' + id + ' объявлен и в ' + n + ' без изменений, туда прогон не идёт (--repo=' + n + ').');
+        }
+      }
+    }
+  }
   return groups;
 }
 
 // ---------------------------------------------------------------------- запуск
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+// Метки диффа полного прогона (diffLabels до выбора гейтов): по ним обработчик сигнала пишет красную
+// отметку; null - метки ещё не сняты (тогда redMark() берёт текущий дифф) или прогон не полный.
+let fullLabels = null;
+
+async function main(args) {
   if (args.help) {
     printHelp();
     return { code: 0, ran: false };
@@ -672,6 +803,17 @@ async function main() {
     return { code: 1, ran: false };
   }
 
+  // Снимок диффа - только у прогона, который ставит отметку (полный, не --list): метки (diffLabels) -
+  // до выбора гейтов, отпечатки файлов (diffSnapshot) - когда очередь не пуста, перед первым гейтом:
+  // прогон без работы файлы диффа не читает, а файл, появившийся между выбором и снимком, виден по
+  // меткам. Отметка ставится по снимку, а файл, тронутый во время прогона (фоновый прогон идёт до
+  // ~25 мин), даёт отметку с кодом 1 (E0-12AB, решение техлида Р6). Метки - дифф замка коммита
+  // (diffLabels, от origin/<база>), а гейты выбирает L.allChanged (от L.baseRef): два источника -
+  // строка TECH_DEBT 28.10.2026 E0-12AB.
+  const full = isFull(args);
+  const labels = full ? H.diffLabels() : null;
+  fullLabels = labels;
+
   let groups = pickRepos(args.repo);
   if (groups === null) return { code: 1, ran: false };
 
@@ -681,20 +823,25 @@ async function main() {
   }
 
   if (!groups.length) {
-    // 🔴 Прежде здесь стоял особый ход для обвязки: её не было в repos.json, поэтому дифф
-    // из одних её правок давал «гонять нечего», отметка не ставилась, а замок её
-    // требует - цикл не замыкался. С 02.09.2026 обвязка в repos.json наравне с
-    // остальными (решение арбитра, decisions-log.md), её гейт описан в rules..claude.json,
-    // и особый ход больше не нужен: сюда доходит только по-настоящему пустой дифф.
+    // Особого хода для обвязки здесь нет: она в repos.json как часть репозитория sf, её гейт
+    // harness-selftest - в rules.sf.json, и дифф из одних её правок идёт по общему пути. Сюда
+    // доходит только по-настоящему пустой дифф.
     console.log('Изменений нет ни в одном репозитории - гонять нечего.');
     console.log('Нужен прогон без диффа - укажи репозиторий: --repo=<имя>.');
     return { code: 0, ran: false };
   }
 
-  console.log(
-    'Пойдём по репозиториям: ' +
-      groups.map((g) => g.repo.name + ' - ' + files(g.files.length)).join(', '),
-  );
+  if (groups.every((g) => g.clean)) {
+    console.log(
+      'Изменений нет ни в одном репозитории; --only гонит названные гейты там, где они объявлены: ' +
+        groups.map((g) => g.repo.name).join(', ') + ' (сузить - --repo=<имя>).',
+    );
+  } else {
+    console.log(
+      'Пойдём по репозиториям: ' +
+        groups.map((g) => g.repo.name + ' - ' + files(g.files.length)).join(', '),
+    );
+  }
   for (const g of groups) {
     console.log('  ' + g.repo.name + '  ' + g.repo.path + '  база ' + (g.rules.baseBranch || 'main'));
   }
@@ -702,8 +849,7 @@ async function main() {
   // план по каждому репозиторию
   const plans = [];
   for (const g of groups) {
-    const gates = Array.isArray(g.rules.gates) ? g.rules.gates.filter((x) => x && x.id && x.cmd) : [];
-    plans.push({ group: g, plan: selectGates(gates, g.files, args.only) });
+    plans.push({ group: g, plan: selectGates(gatesOf(g.rules), g.files, args.only) });
   }
 
   const queue = [];
@@ -737,6 +883,7 @@ async function main() {
     console.log('Запускать нечего.');
     return { code: 0, ran: false };
   }
+  const before = labels ? H.diffSnapshot(labels) : null;
 
   const results = [];
   let stopped = false;
@@ -783,11 +930,33 @@ async function main() {
         Array.from(byRepo).map(([n, c]) => n + ' - ' + c).join(', ') +
         '). Чини и прогоняй заново.',
     );
-    return { code: 1, ran: true, scoped: Boolean(args.repo || args.only) };
+    return { code: 1, ran: true, full, before };
   }
   console.log('');
   console.log('Все гейты прошли.');
-  return { code: 0, ran: true, scoped: Boolean(args.repo || args.only) };
+  return { code: 0, ran: true, full, before };
+}
+
+/**
+ * Красная отметка (код 1) после сбоя сверки, отметки или самого прогона: labels - метки снимка до
+ * прогона, без них - текущий дифф. Возвращает, что записано, словами; запись не удалась - так и
+ * сказано, с тем, что прежняя отметка осталась и коммитить нельзя.
+ */
+function markRed(labels) {
+  try {
+    H.markGates(1, labels);
+    return 'записана отметка о красном прогоне (код 1)';
+  } catch (e) {
+    return 'красную отметку записать не удалось (' + ((e && e.message) || e) + '), прежняя отметка в .qa-state осталась - не коммить до полного прогона с отметкой';
+  }
+}
+
+/**
+ * Красная отметка полного прогона по меткам, снятым до очереди (fullLabels), а до них - по текущему
+ * диффу: одна форма у обработчика сигнала и у catch main() (ревью E0-12AB, круг 4; решение техлида Р8).
+ */
+function redMark() {
+  return markRed(fullLabels || undefined);
 }
 
 // Скрипт исполняется только при запуске из командной строки. Через require его берёт
@@ -795,9 +964,16 @@ async function main() {
 // что запускает их с пределом): загрузка модуля
 // не запускает гейты, не ставит отметку о прогоне и не выходит из процесса (E0-12D).
 if (require.main === module) {
+  // Аргументы разбираются один раз: обработчик сигнала, main() и catch видят один и тот же isFull(args)
+  const args = parseArgs(process.argv.slice(2));
+  const full = isFull(args);
   // Прерывание самого gates.js (Ctrl+C, внешнее снятие): дерево идущего гейта снимается, выход
-  // ненулевой, отметка не ставится (process.exit раньше markGates). SIGKILL, а на Windows и
-  // внешний SIGTERM (TerminateProcess) обработчик не зовут - тогда дерево гейта остаётся (замер
+  // ненулевой. Полный прогон пишет красную отметку (redMark()) по меткам, снятым до очереди, а до них -
+  // по текущему диффу: прежняя зелёная отметка иначе пережила бы прерванный прогон, и правка, сделанная
+  // после неё, ушла бы в коммит (ревью E0-12AB, круг 3; решение техлида Р7). Частичный прогон отметку не
+  // ставит. Код taskkill 255 здесь - отказ снятия с кодом в причине и «снять руками»: эффект снятия в
+  // обработчике проверить нечем (решения техлида Р2 и Р7). SIGKILL, а на Windows и внешний SIGTERM
+  // (TerminateProcess) обработчик не зовут - тогда дерево гейта остаётся и отметка прежняя (замер
   // E0-12M, 21.10.2026: снятый process.kill родитель, его ребёнок и внук живы; docs/60_HARNESS.md,
   // «Известные ограничения»).
   for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]) {
@@ -807,7 +983,7 @@ if (require.main === module) {
         'gates.js прерван (' + signal + '): снято деревьев гейтов - ' + a.killed +
           (a.failed.length ? '; снять не удалось - ' + a.failed.length + ': ' + a.failed.join('; ') + ' - снять руками' : '') +
           (a.exited ? '; оболочка уже вышла, остаток не снимается - ' + a.exited : '') +
-          ', отметка о прогоне не поставлена',
+          ', ' + (full ? redMark() : 'отметка о прогоне не поставлена'),
       );
       process.exit(exitCode);
     });
@@ -817,19 +993,31 @@ if (require.main === module) {
     let code = 1;
     let result = null;
     try {
-      result = await main();
+      result = await main(args);
       code = result.code;
     } catch (e) {
-      // скрипт-проверка не имеет права молча притвориться зелёным
-      console.error('gates.js сломался: ' + (e && e.stack ? e.stack : e));
+      // скрипт-проверка не имеет права молча притвориться зелёным; полный прогон пишет красную отметку -
+      // иначе прежняя зелёная пустила бы коммит после сломавшегося прогона (ревью E0-12AB, круг 2)
+      console.error('gates.js сломался: ' + (e && e.stack ? e.stack : e) + (full ? '\n' + redMark() + ', код прогона 1.' : ''));
       code = 1;
       result = null;
     }
 
     // Отметка о прогоне в общем состоянии: код возврата вместе с отпечатком того диффа,
-    // по которому гоняли. Её читают commit-gate.js и report-honesty.js - без неё коммит
-    // не проходит, а слово «зелено» в отчёте не подтверждается. Код пишется честный,
-    // включая ненулевой: отметка «гейты падали» нужна не меньше, чем «гейты прошли».
+    // по которому выбраны гейты (снимок в main() до очереди), а не диффа в конце прогона.
+    // Её читают commit-gate.js и report-honesty.js: коммит проходит только по зелёной отметке
+    // текущего диффа, слово «зелено» в отчёте - тоже. Код пишется честный, включая ненулевой:
+    // отметка «гейты падали» нужна не меньше, чем «гейты прошли».
+    //
+    // Дифф за прогон изменился - новый или пропавший файл, другое содержимое файла диффа (Р1
+    // E0-12AB), файл не прочитан (метка-каталог, сбой чтения; Р6): тронутое во время прогона гейты
+    // могли не видеть, и отметка пишется с кодом 1, код возврата тоже 1, даже если все гейты прошли
+    // (решение техлида Р6 E0-12AB: код выхода = код отметки). Не писать ничего нельзя: прежняя
+    // зелёная отметка с тем же набором имён пустила бы коммит. Сверка строже замка коммита: файлы
+    // afterReviewAllowed (tasks.json, 00_STATUS.md, docs/*_TASKS.md), тронутые за прогон, тоже дают
+    // код 1 - их читает гейт tracker, и отметка по ним стояла бы за непроверенный трекер (решение
+    // техлида Р5 E0-12AB; цена - редкий перепрогон). Сверка или запись упала - код 1 и попытка
+    // записать красную отметку (markRed): прежняя зелёная иначе пустила бы коммит без сверки.
     //
     // 🔴 Отметку ставит ТОЛЬКО настоящий полный прогон. Раньше здесь стояло «всё, кроме
     // --list», и этого было мало: `main()` возвращает ноль ещё в четырёх местах, ничего
@@ -844,17 +1032,33 @@ if (require.main === module) {
     // `--repo=books --only=lint` объявлял бы проверенным и фронт, и документацию.
     // Частичный прогон полезен при работе, но отметку не ставит - её ставит только
     // `node gates.js` без сужающих ключей.
-    if (result && result.ran && !result.scoped) {
+    if (result && result.ran && result.full) {
       try {
-        require('./diff-hash.js').markGates(code);
-      } catch (_) {
-        // состояние - не повод уронить проверку
+        const after = H.diffSnapshot();
+        const moved = H.diffMoved(result.before, after);
+        const markCode = moved.length ? 1 : code;
+        H.markGates(markCode, result.before.labels);
+        if (moved.length) {
+          const why = H.movedWhy(moved, result.before, after);
+          console.log('');
+          console.log(
+            'Дифф изменился во время прогона (' + L.shortList(moved) + '): ' +
+              (code !== 0
+                ? 'записана отметка о красном прогоне (код ' + code + ')'
+                : 'записана отметка «не зелено» (код 1): гейты прошли, но изменившиеся файлы не проверены') +
+              ', прогони gates.js заново в фоне' + (why.length ? '. Не прочитано: ' + why.join('; ') : '') + '.',
+          );
+        }
+        code = markCode;
+      } catch (e) {
+        code = 1;
+        console.error('Сверка диффа или отметка о прогоне упала (' + ((e && e.message) || e) + '): ' + markRed(result.before.labels) + ', код прогона 1.');
       }
-    } else if (result && result.ran && result.scoped) {
+    } else if (result && result.ran && !result.full) {
       console.log('');
       console.log(
         'Прогон был частичным (--repo или --only), отметка о зелёных гейтах не поставлена.\n' +
-          'Замок коммита её не увидит: перед коммитом прогони node .claude/hooks/gates.js целиком.',
+          'Замок коммита её не увидит: перед коммитом прогони node .claude/hooks/gates.js целиком в фоне (run_in_background: true).',
       );
     }
 
@@ -867,4 +1071,7 @@ module.exports = {
   runGate,
   gateTimeoutSec,
   limits: { MAX_TIMEOUT_SEC, KILL_GRACE_MS, OUTPUT_HEAD_BYTES, OUTPUT_TAIL_BYTES },
+  verdicts: VERDICTS.map((v) => v.parts.join('N')),
+  outputBuffer,
+  abortRunning,
 };

@@ -2110,8 +2110,9 @@
       "E0-12M"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-23"
+    "status": "in_progress",
+    "added_at": "2026-10-23",
+    "started_at": "2026-10-28"
   },
   {
     "id": "E0-12AC",
@@ -2135,6 +2136,19 @@
     "estimate_days": 1,
     "deps": [
       "E0-12AA"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-10-28"
+  },
+  {
+    "id": "E0-12AE",
+    "epic": "E0",
+    "title": "gates.js/diff-hash.js: долг ревью E0-12AB (кругов 1-4)",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-12AB"
     ],
     "doc": "TECH_DEBT.md",
     "status": "todo",

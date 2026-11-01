@@ -2455,6 +2455,11 @@ const CHILD_PROCESS_DIRECT = [
   },
   {
     file: 'selftest-gates-run.js',
+    line: '"const cp = ' + REQ + "'" + CP + '\');",',
+    why: 'программа пробы runGate с поддельным процессом (E0-12AB): spawn и spawnSync подменены, ничего не запускается',
+  },
+  {
+    file: 'selftest-gates-run.js',
     line: 'const spawnGc = (opts) => "const c = ' + REQ + "'" + CP + '\').spawn(process.execPath, process.argv.slice(2), { stdio: \'inherit\'" + opts + \' });\';',
     why: 'текст стаба команды гейта (tree.js, orphan.js): внук-пульс без хуков в дереве gates.js, не запуск из самопроверки',
   },

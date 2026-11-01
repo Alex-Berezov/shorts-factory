@@ -219,17 +219,16 @@ function createIntProbe(ctx) {
       }
       return false;
     };
-    const pause = new Int32Array(new SharedArrayBuffer(4));
     const t0 = performance.now();
     for (;;) {
       if (gone()) return true;
       if (performance.now() - t0 >= ms) return false;
-      Atomics.wait(pause, 0, 0, 20);
+      L.pauseSync(20);
     }
   }
   /**
    * Ответ дочернего vitest, запущенного startVitest: синхронное ожидание строки выхода
-   * (VITEST_EXIT_MARK <код>, целая строка; код не целое - отказ) в файле stdout с паузами Atomics.wait по монотонным часам
+   * (VITEST_EXIT_MARK <код>, целая строка; код не целое - отказ) в файле stdout с паузами L.pauseSync по монотонным часам
    * (performance.now); дальше - конец процесса (pidGone, до h.goneMs: строку выхода пишет его
    * обработчик exit, процесс ещё жив и держит файлы каталога; не вышел за срок - SIGKILL, не отказ:
    * ответ уже полон) и сверка формы vitestAnswer. Нет строки выхода за h.timeoutMs -
@@ -238,7 +237,6 @@ function createIntProbe(ctx) {
    */
   function awaitVitest(h) {
     if (h.spawnError) return vitestAnswer({ error: Object.assign(new Error(h.spawnError), { code: h.spawnError }), status: null, signal: null, stdout: '', stderr: '' }, h);
-    const pause = new Int32Array(new SharedArrayBuffer(4));
     for (;;) {
       const stdout = fs.readFileSync(h.out, 'utf8');
       // только целые строки: хвост без перевода строки ребёнок, может быть, ещё дописывает
@@ -257,7 +255,7 @@ function createIntProbe(ctx) {
         LIVE_CHILDREN.delete(h.child);
         return vitestAnswer({ status: null, signal: 'SIGKILL', stdout, stderr: '', error: Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' }) }, h);
       }
-      Atomics.wait(pause, 0, 0, 20);
+      L.pauseSync(20);
     }
   }
 

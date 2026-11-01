@@ -13,20 +13,26 @@
  * Считается он ровно в одном месте - здесь: два независимых счётчика разошлись бы
  * при первой же правке, и замок тихо открылся бы сам.
  *
- * Отпечаток нарочно берётся от списка файлов, а не от содержимого: точка отсчёта
- * L.baseRef переезжает с HEAD на origin/<база> в момент коммита, и список файлов
- * при этом не меняется - значит, отметка, поставленная до коммита, доживает до пуша.
+ * Отпечаток в .qa-state (diffHash) нарочно берётся от списка файлов, а не от содержимого:
+ * точка отсчёта L.baseRef переезжает с HEAD на origin/<база> в момент коммита, и список
+ * файлов при этом не меняется - значит, отметка, поставленная до коммита, доживает до пуша.
+ * Содержимое файлов диффа здесь тоже читается, но только для сверки одного прогона gates.js
+ * (diffSnapshot/diffMoved, решения техлида Р1 и Р6 E0-12AB; отпечатка нет - у метки-каталога, не обычного
+ * файла, непрочитанного файла - отметка и выход с кодом 1): в .qa-state оно не пишется, и замок коммита
+ * по-прежнему сверяет список.
  *
  * Поля в .qa-state:
  *   lastQa      - дата прогона /qa (формат не меняем)
  *   qaDiffHash  - отпечаток диффа, по которому прогнали /qa
- *   lastGates   - { hash, code, at }: отпечаток, код возврата gates.js и дата
+ *   lastGates   - { hash, files, code, at }: отпечаток, метки диффа, код возврата gates.js и дата
  *
  * Запускается и руками:  node .claude/hooks/diff-hash.js
  * тогда печатает отпечаток и файлы, которые в него вошли.
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const L = require('./lib.js');
 
 /**
@@ -59,16 +65,16 @@ function repoLabels(repo) {
     }
   }
 
-  if (from) {
-    const d = L.sh('git', ['diff', '--name-only', from], root);
-    if (d.ok) d.out.split('\n').filter(Boolean).forEach((f) => set.add(f));
-  } else {
-    // ветки сравнения нет вовсе - остаётся рабочее дерево против HEAD
-    L.changedFiles(repo, rules).forEach((f) => set.add(f));
-  }
+  // -z и сырой вывод (raw) у каждого вызова git: имя не в кавычках с восьмеричными escape (core.quotepath
+  // у не-ASCII имён) и не обрезано по краям - метка совпадает с путём на диске, и сверка прогона читает
+  // сам файл
+  const names = (r) => r.out.split('\0').filter(Boolean);
+  // ветки сравнения нет вовсе - остаётся рабочее дерево против HEAD, тем же разбором
+  const d = L.sh('git', ['diff', '--name-only', '-z', from || 'HEAD'], root, { raw: true });
+  if (d.ok) names(d).forEach((f) => set.add(f));
 
-  const u = L.sh('git', ['ls-files', '--others', '--exclude-standard'], root);
-  if (u.ok) u.out.split('\n').filter(Boolean).forEach((f) => set.add(f));
+  const u = L.sh('git', ['ls-files', '--others', '--exclude-standard', '-z'], root, { raw: true });
+  if (u.ok) names(u).forEach((f) => set.add(f));
 
   return Array.from(set).map((f) => L.label(repo, f));
 }
@@ -145,7 +151,121 @@ function diffLabels() {
 /** Отпечаток диффа. Без аргумента считает список сам. */
 function diffHash(labels) {
   const list = (Array.isArray(labels) ? labels.slice() : diffLabels()).sort();
-  return crypto.createHash('sha1').update(list.join('\n'), 'utf8').digest('hex');
+  return sha1(list.join('\n'));
+}
+
+/** sha1 строки (UTF-8) или байт, hex. */
+function sha1(data) {
+  return crypto.createHash('sha1').update(data).digest('hex');
+}
+
+// пауза перед повтором чтения файла диффа: на Windows файл бывает занят мгновение (EBUSY, EPERM от
+// антивируса или индексатора), и без повтора такой сбой давал бы «дифф изменился» и лишний перепрогон
+const READ_RETRY_MS = 50;
+// кусок чтения файла диффа: файл читается кусками в sha1, а не целиком - память прогона не растёт с
+// размером файла, и файл больше предела Buffer (2 ГиБ) читается, а не даёт вечный «не читается»
+const HASH_CHUNK_BYTES = 1024 * 1024;
+
+/** sha1 содержимого файла, hex: чтение кусками HASH_CHUNK_BYTES. */
+function fileSha1(file) {
+  const h = crypto.createHash('sha1');
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, HASH_CHUNK_BYTES, null);
+      if (!n) break;
+      h.update(buf.subarray(0, n));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return h.digest('hex');
+}
+
+/**
+ * Отпечаток одного пути: { print } - sha1 содержимого файла, 'ссылка <sha1 цели>' у ссылки (lstat: ссылка
+ * не разыменовывается, файл вне репозитория не читается), 'нет' - пути нет. Каталог - { print: null, dir }:
+ * отпечатка у каталога нет (решение техлида Р6 E0-12AB, fail-closed). Не обычный файл (FIFO, сокет,
+ * устройство) - { print: null, why: 'не обычный файл' } без открытия: чтение FIFO висело бы без предела
+ * (решение техлида Р7 E0-12AB). Сбой чтения - один повтор через READ_RETRY_MS, затем { print: null, why } с
+ * кодом сбоя. hash(file) - sha1 файла (fileSha1), lstat(file) - fs.lstatSync; оба подменяются пробами.
+ */
+function pathPrint(file, hash, lstat) {
+  let err = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const st = L.statIfPresent(file, lstat);
+      if (!st) return { print: 'нет' };
+      if (st.isSymbolicLink()) return { print: 'ссылка ' + sha1(fs.readlinkSync(file)) };
+      if (st.isDirectory()) return { print: null, dir: true };
+      if (!st.isFile()) return { print: null, why: 'не обычный файл' };
+      return { print: hash(file) };
+    } catch (e) {
+      err = e;
+      if (attempt === 0) L.pauseSync(READ_RETRY_MS);
+    }
+  }
+  return { print: null, why: 'не читается (' + ((err && (err.code || err.message)) || String(err)) + ')' };
+}
+
+/**
+ * Снимок диффа для сверки одного прогона gates.js (решение техлида Р1 E0-12AB): метки (labels как даны;
+ * без аргумента - diffLabels()), отпечаток каждой метки (prints: { <метка>: строка pathPrint | null }) и
+ * причина каждого null (unread: { <метка>: текст }): метка-каталог (вложенный репозиторий, решения техлида Р6
+ * и Р7), не обычный файл, сбой чтения с кодом, метка ни одного известного репозитория. null сверка считает
+ * изменившимся - отметка не зелёная (fail-closed). Правку уже изменённого файла diffHash не видит - набор
+ * меток тот же, - а prints видит. В .qa-state не пишется. opts.repos (по умолчанию L.knownRepos()), opts.hash
+ * (sha1 файла, по умолчанию fileSha1) и opts.lstat (по умолчанию fs.lstatSync) - для проб.
+ */
+function diffSnapshot(labels, opts) {
+  const o = opts || {};
+  const repos = o.repos || L.knownRepos();
+  const hash = o.hash || fileSha1;
+  const lstat = o.lstat || fs.lstatSync;
+  const list = Array.isArray(labels) ? labels.slice() : diffLabels();
+  const prints = {};
+  const unread = {};
+  for (const label of list) {
+    const at = L.unlabel(repos, label);
+    if (!at) {
+      prints[label] = null;
+      unread[label] = label + ': метка ни одного репозитория repos.json';
+      continue;
+    }
+    const p = pathPrint(path.join(at.repo.path, at.rel), hash, lstat);
+    prints[label] = p.print;
+    // запись в repos.json метку-каталог не снимает: внешний репозиторий видит каталог по-прежнему (ревью E0-12AB, круг 3)
+    if (p.dir) unread[label] = 'метка-каталог ' + label + ': вложенный репозиторий: внеси каталог в .gitignore внешнего репозитория или убери (отдельный репозиторий - ещё и в repos.json)';
+    else if (p.why) unread[label] = label + ': ' + p.why;
+  }
+  return { labels: list, prints, unread };
+}
+
+/**
+ * Что изменилось между двумя снимками diffSnapshot: метки, появившиеся или пропавшие, и метки обоих
+ * снимков с другим отпечатком; отпечаток null или его нет хотя бы в одном снимке - изменилась.
+ * Пусто - дифф тот же. Правку, вернувшую файл к прежнему содержимому до второго снимка (A -> B -> A),
+ * сверка не видит.
+ */
+function diffMoved(before, after) {
+  const was = new Set(before.labels);
+  const now = new Set(after.labels);
+  const moved = after.labels.filter((l) => !was.has(l)).concat(before.labels.filter((l) => !now.has(l)));
+  for (const l of before.labels) {
+    // отпечаток - строка; null (не прочитан) или его нет - изменилась, даже если в обоих снимках одинаково
+    if (now.has(l) && (typeof before.prints[l] !== 'string' || before.prints[l] !== after.prints[l])) moved.push(l);
+  }
+  return moved;
+}
+
+/** Причины непрочитанных меток из moved (unread обоих снимков diffSnapshot), без повторов. */
+function movedWhy(moved, before, after) {
+  const why = new Set();
+  for (const l of moved) {
+    for (const s of [before, after]) if (s.unread && s.unread[l]) why.add(s.unread[l]);
+  }
+  return Array.from(why);
 }
 
 /** Отметка о прогоне /qa по текущему диффу. Зовётся из команды /qa. */
@@ -162,17 +282,28 @@ function markQa(hash) {
   return state;
 }
 
-/** Отметка о прогоне гейтов: код возврата сохраняется честно, включая ненулевой. */
-function markGates(code, hash) {
+/**
+ * Отметка о прогоне гейтов: код возврата сохраняется честно, включая ненулевой. labels - метки
+ * диффа, по которому выбраны гейты (gates.js снимает их до очереди): отпечаток и files - по ним, а
+ * не по диффу в конце прогона. Без аргумента - текущий дифф. labels не массив (прежняя форма
+ * markGates(code, hash)) - исключение до записи: молча поставить отметку по диффу конца прогона нельзя.
+ * Запись состояния не удалась (L.writeState вернул ошибку) - исключение: прежняя отметка осталась, и
+ * gates.js обязан это сказать, а не «записана» (решение техлида Р9 E0-12AB, п.8).
+ */
+function markGates(code, labels) {
+  if (labels !== undefined && !Array.isArray(labels)) {
+    throw new TypeError('markGates(code, labels): labels - массив меток диффа или ничего, дано ' + typeof labels);
+  }
   const state = L.readState();
-  const labels = diffLabels();
+  const list = Array.isArray(labels) ? labels.slice().sort() : diffLabels();
   state.lastGates = {
-    hash: hash || diffHash(labels),
-    files: labels,
+    hash: diffHash(list),
+    files: list,
     code: Number.isFinite(Number(code)) ? Number(code) : 1,
     at: new Date().toISOString(),
   };
-  L.writeState(state);
+  const failed = L.writeState(state);
+  if (failed) throw new Error('запись .qa-state не удалась: ' + (failed.message || failed));
   return state;
 }
 
@@ -228,8 +359,7 @@ function qaProblem(state, hash, currentLabels) {
   }
   const extra = unreviewed(reviewed, currentLabels || diffLabels());
   if (!extra.length) return null;
-  return 'ревьюеры не видели этих файлов: ' + extra.slice(0, 6).join(', ') +
-    (extra.length > 6 ? ' и ещё ' + (extra.length - 6) : '');
+  return 'ревьюеры не видели этих файлов: ' + L.shortList(extra);
 }
 
 /** Зелёные ли гейты по этому диффу. Возвращает null или причину отказа. */
@@ -245,7 +375,7 @@ function gatesProblem(state, hash, currentLabels) {
     if (!known || extra.length) {
       return 'гейты гонялись по другому диффу (' + String(g.hash).slice(0, 8) + '), а сейчас ' +
         hash.slice(0, 8) + ' - после этого менялись файлы' +
-        (extra && extra.length ? ': ' + extra.slice(0, 6).join(', ') : '');
+        (extra && extra.length ? ': ' + L.shortList(extra) : '');
     }
   }
   if (Number(g.code) !== 0) {
@@ -254,7 +384,7 @@ function gatesProblem(state, hash, currentLabels) {
   return null;
 }
 
-module.exports = { diffLabels, newLabels, diffHash, markQa, markGates, qaProblem, gatesProblem, unreviewed };
+module.exports = { diffLabels, newLabels, diffHash, diffSnapshot, diffMoved, movedWhy, markQa, markGates, qaProblem, gatesProblem, unreviewed };
 
 if (require.main === module) {
   const labels = diffLabels();

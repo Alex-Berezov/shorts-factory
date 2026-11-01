@@ -177,7 +177,11 @@ function guard(fn, opts) {
 
 // ------------------------------------------------------------------------ git
 
-function sh(cmd, args, cwd) {
+/**
+ * Команда без оболочки: { ok, out, err }. out обрезан по краям (trim), с opts.raw - нет: вывод с
+ * разделителем NUL (git -z) несёт имена файлов, у которых пробел в начале или в конце - часть имени.
+ */
+function sh(cmd, args, cwd, opts) {
   try {
     const r = cp.spawnSync(cmd, args, {
       cwd,
@@ -185,7 +189,8 @@ function sh(cmd, args, cwd) {
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
     });
-    return { ok: r.status === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
+    const out = r.stdout || '';
+    return { ok: r.status === 0, out: opts && opts.raw ? out : out.trim(), err: (r.stderr || '').trim() };
   } catch (_) {
     return { ok: false, out: '', err: '' };
   }
@@ -264,6 +269,19 @@ function rel(repoPath, p) {
 /** Подпись файла в сообщениях: "sf/apps/api/src/server.ts". */
 function label(repo, relPath) {
   return (repo && repo.name ? repo.name + '/' : '') + relPath;
+}
+
+/**
+ * Обратное к label: репозиторий из repos и путь от его корня, null - метка ни одного из repos. Имя
+ * репозитория бывает префиксом другого ("sf" и "sf/x"): берётся самое длинное подошедшее.
+ */
+function unlabel(repos, text) {
+  let best = null;
+  for (const repo of repos || []) {
+    if (!repo || !repo.name || !String(text).startsWith(repo.name + '/')) continue;
+    if (!best || repo.name.length > best.repo.name.length) best = { repo, rel: String(text).slice(repo.name.length + 1) };
+  }
+  return best;
 }
 
 // -------------------------------------------------------------------- правила
@@ -567,6 +585,23 @@ function readState() {
   return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : defaultState();
 }
 
+/**
+ * Синхронная пауза потока на ms миллисекунд (Atomics.wait): одна на обвязку - повтор rename здесь, повтор
+ * чтения файла диффа (diff-hash.js), ожидание ребёнка int-пробы (selftest-int.js).
+ */
+function pauseSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Первые n элементов списка через запятую и «и ещё K», если их больше: один помощник списка в строке вывода
+ * обвязки (решение техлида Р7 E0-12AB) - потребители diff-hash.js (отказы замка коммита) и gates.js (строка
+ * «Дифф изменился»).
+ */
+function shortList(list, n = 6) {
+  return list.slice(0, n).join(', ') + (list.length > n ? ' и ещё ' + (list.length - n) : '');
+}
+
 /** Коды, на которых rename на win32 падает эпизодически (файл держит антивирус или читатель). */
 const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
 const RENAME_ATTEMPTS = 3;
@@ -578,6 +613,9 @@ const RENAME_PAUSE_MS = 25;
  * последней неудачи файл пишется напрямую - отметка важнее атомарности. Одновременные
  * read-modify-write двух хуков это не спасает (последний пишущий побеждает) - см.
  * docs/TECH_DEBT.md.
+ * Возвращает null - записано, или ошибку записи: хуку сессии состояние - не повод падать, и он
+ * её не смотрит, а отметка о прогоне (diff-hash.js markGates) обязана её увидеть - иначе прежняя
+ * отметка молча осталась бы под словами «записана» (решение техлида Р9 E0-12AB, п.8).
  */
 function writeState(obj) {
   const p = statePath();
@@ -589,16 +627,17 @@ function writeState(obj) {
     for (let attempt = 1; ; attempt++) {
       try {
         fs.renameSync(tmp, p);
-        return;
+        return null;
       } catch (e) {
         if (!(e && RENAME_RETRY_CODES.has(e.code))) throw e;
         if (attempt >= RENAME_ATTEMPTS) break;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RENAME_PAUSE_MS);
+        pauseSync(RENAME_PAUSE_MS);
       }
     }
     fs.writeFileSync(p, body);
-  } catch (_) {
-    /* состояние - не повод падать */
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e : new Error(String(e));
   } finally {
     /* недописанный или не переименованный временный файл не оставляем */
     try {
@@ -754,6 +793,7 @@ module.exports = {
   repoFor,
   rel,
   label,
+  unlabel,
   commonRules,
   rulesFor,
   mergeStandards,
@@ -769,6 +809,8 @@ module.exports = {
   isNotFile,
   statIfPresent,
   isFilePresent,
+  pauseSync,
+  shortList,
   readState,
   writeState,
   bumpEdits,
