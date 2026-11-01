@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const cp = require('child_process');
+const crypto = require('crypto');
 
 const HOOKS_DIR = __dirname;
 const STATE_DIR = path.resolve(__dirname, '..');
@@ -108,23 +109,86 @@ function pass() {
  */
 /**
  * Отметка о здоровье Stop-хука: detail - текст падения, null - хук отработал.
- * Читает её commit-gate.js; чинится она сама, как только хук пройдёт без исключения.
+ * Читает её commit-gate.js (brokenHooks); чинится она сама, как только хук пройдёт без исключения.
+ * Пишет через updateState; снимать нечего (отметки нет) - состояние не трогается. Запись состояния с
+ * detail не удалась (блокировка занята, состояние недоступно) - пишется запасной маркер
+ * hookMarkerPath(name) без блокировки (решение техлида Р-6 E0-12AE), его читает тот же brokenHooks();
+ * снятие (null) удаляет маркер только после удачной записи состояния. Имя не из [a-z0-9-] (hookMarkerPath) - ошибка
+ * сразу, ничего не пишется (Р-8). Возвращает null - отметка записана (в состояние или маркером) или снята, иначе
+ * ошибку; не бросает: хук не падает ради отметки, потерю отметки guard называет в отказе Stop-хука, отказ снятия -
+ * строкой в stderr.
  */
 function noteHookHealth(name, detail) {
   try {
-    const state = readState();
-    const broken = state.brokenHooks && typeof state.brokenHooks === 'object' ? state.brokenHooks : {};
-    if (detail) {
-      broken[name] = { at: new Date().toISOString(), detail: String(detail).split('\n')[0] };
-    } else {
-      delete broken[name];
+    const marker = hookMarkerPath(name);
+    const firstLine = String(detail || '').split('\n')[0];
+    const failed = updateState(
+      (state) => {
+        const broken = state.brokenHooks && typeof state.brokenHooks === 'object' ? state.brokenHooks : {};
+        if (detail) broken[name] = { at: new Date().toISOString(), detail: firstLine };
+        else delete broken[name];
+        if (Object.keys(broken).length) state.brokenHooks = broken;
+        else delete state.brokenHooks;
+        return true;
+      },
+      { changes: (state) => Boolean(detail) || Boolean(state.brokenHooks && Object.prototype.hasOwnProperty.call(state.brokenHooks, name)) },
+    );
+    if (!detail) return failed || unlinkRetry(marker);
+    if (!failed) return null;
+    try {
+      fs.writeFileSync(marker, JSON.stringify({ at: new Date().toISOString(), detail: firstLine }) + '\n');
+      return null;
+    } catch (e) {
+      return new Error(failed.message + '; маркер ' + marker + ' не записан: ' + (codeOf(e) || asError(e).message));
     }
-    if (Object.keys(broken).length) state.brokenHooks = broken;
-    else delete state.brokenHooks;
-    writeState(state);
-  } catch (_) {
-    /* состояние недоступно - молчим, иначе сломаем хук ради отметки о поломке */
+  } catch (e) {
+    return asError(e);
   }
+}
+
+/**
+ * Запасной маркер поломки Stop-хука name (решение техлида Р-6 E0-12AE): <statePath(env)>.broken-<имя>. Имя -
+ * часть пути: не строка из [a-z0-9-] - исключение, общего имени на все такие хуки нет (решение техлида Р-8 E0-12AE:
+ * удачный проход одного снимал бы маркер другого). Путь только через statePath (SF_HOOK_STATE_DIR, refuseStatePath).
+ */
+const HOOK_MARKER_INFIX = '.broken-';
+function hookMarkerPath(name, env = process.env) {
+  if (typeof name !== 'string' || !/^[a-z0-9-]+$/.test(name)) {
+    throw new Error('имя Stop-хука ' + JSON.stringify(name === undefined ? null : name) + ' не из [a-z0-9-] - маркер поломки не построить');
+  }
+  return statePath(env) + HOOK_MARKER_INFIX + name;
+}
+
+/**
+ * Отметки о поломке Stop-хуков для замка коммита: brokenHooks состояния и маркеры hookMarkerPath в каталоге
+ * состояния - { имя: { detail } }. Каталога нет - маркеров нет; иной сбой чтения каталога или состояния -
+ * исключение (fail-closed: замок, который не прочитал отметки, не пускает). Маркер не разобрать - он всё
+ * равно отметка, с причиной вместо текста.
+ */
+function brokenHooks() {
+  const p = statePath();
+  const state = readState();
+  const out = Object.assign({}, state.brokenHooks && typeof state.brokenHooks === 'object' ? state.brokenHooks : {});
+  let names = [];
+  try {
+    names = fs.readdirSync(path.dirname(p));
+  } catch (e) {
+    if (!isGone(e)) throw e;
+  }
+  const prefix = path.basename(p) + HOOK_MARKER_INFIX;
+  for (const n of names) {
+    if (!n.startsWith(prefix) || n.length === prefix.length) continue;
+    const name = n.slice(prefix.length);
+    if (Object.prototype.hasOwnProperty.call(out, name)) continue;
+    let detail;
+    try {
+      detail = String(JSON.parse(fs.readFileSync(path.join(path.dirname(p), n), 'utf8')).detail || '');
+    } catch (e) {
+      detail = 'маркер ' + n + ' не прочитан (' + (codeOf(e) || asError(e).message) + ')';
+    }
+    out[name] = { detail: detail || 'без текста' };
+  }
+  return out;
 }
 
 function guard(fn, opts) {
@@ -142,7 +206,12 @@ function guard(fn, opts) {
       // вернул true. Ранний выход по stop_hook_active - это молчание, а не работа: он
       // завершается успешно, и снятие отметки на нём стирало бы память о падении ровно
       // на следующей же остановке, то есть всегда.
-      if (onStop && opts.name && verdict === true) noteHookHealth(opts.name, null);
+      // Снять не удалось - одна строка в stderr, не отказ: хук отработал, а отметка и маркер остаются, и замок
+      // коммита отказывает по ним до следующего удачного прохода (решение техлида Р-8 E0-12AE)
+      if (onStop && opts.name && verdict === true) {
+        const left = noteHookHealth(opts.name, null);
+        if (left) process.stderr.write(who + ': отметку о поломке не снять (' + left.message.split('\n')[0] + ') - замок коммита отказывает по ней до следующего удачного прохода\n');
+      }
       pass();
     })
     .catch((e) => {
@@ -156,13 +225,18 @@ function guard(fn, opts) {
         // он висит на PreToolUse, разбирает каждую команду заново и петли не образует.
         // Несданный ход безвреден, закоммиченная работа - нет; замок и есть та точка,
         // где сломанная проверка обязана остановить, а не просто пожаловаться.
-        noteHookHealth(opts.name || 'stop-hook', detail);
+        // Отметку не записать ни в состояние, ни запасным маркером - замок коммита о поломке не узнает:
+        // это сказано в том же отказе, который читает агент (ревью E0-12AE, круг 1, Б2; решение техлида Р-6)
+        const lost = noteHookHealth(opts && opts.name, detail);
         complain(
           who + ' сломалась и не смогла вынести решение, поэтому работа не закрыта.\n\n' +
             String(detail).split('\n').slice(0, 4).join('\n') +
             '\n\nЭто ошибка в самом хуке, а не в твоей работе. Почини хук и повтори:\n' +
             '  node ' + HOOKS_DIR.replace(/\\/g, '/') + '/harness-selftest.js\n' +
-            'Молча пропустить нельзя: проверка, упавшая на исключении, неотличима от снятой.\n',
+            'Молча пропустить нельзя: проверка, упавшая на исключении, неотличима от снятой.\n' +
+            (lost
+              ? '\nОтметка о поломке не записана ни в .qa-state, ни маркером (' + lost.message + '): замок коммита о ней не узнает.\n'
+              : ''),
         );
       }
       deny(
@@ -530,6 +604,14 @@ function codeOf(error) {
 }
 
 /**
+ * Ошибка как Error: брошенное не-Error (строка, число) - Error с его текстом. Одна нормализация обвязки
+ * (ревью E0-12AE, Б13): writeState, updateState и gates.js (writeRed) берут её, своей копии нет.
+ */
+function asError(e) {
+  return e instanceof Error ? e : new Error(String(e));
+}
+
+/**
  * Путь пропал: `ENOENT` и ничего больше. Близнец `isGone` из `scripts/lib/files.mjs` для хуков
  * (CJS не импортирует ESM без флага на Node 22.0-22.11, решение Р4 техлида E0-12N): EPERM, EBUSY,
  * EACCES - путь не прочитать, а не его нет. Что близнец отвечает так же, как оригинал, на ENOENT,
@@ -608,42 +690,311 @@ const RENAME_ATTEMPTS = 3;
 const RENAME_PAUSE_MS = 25;
 
 /**
+ * fn() с повтором на RENAME_RETRY_CODES (на win32 файл держит антивирус или читатель): до RENAME_ATTEMPTS
+ * попыток с паузой RENAME_PAUSE_MS; прочий сбой и сбой последней попытки бросаются. Один цикл повтора у
+ * rename/unlink/чтения блокировки и writeState (ревью E0-12AE, круг 2, CR9; решение техлида Р-7 п.3).
+ */
+function retrySync(fn) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return fn();
+    } catch (e) {
+      if (!RENAME_RETRY_CODES.has(codeOf(e)) || attempt >= RENAME_ATTEMPTS) throw e;
+      pauseSync(RENAME_PAUSE_MS);
+    }
+  }
+}
+
+/** Временный файл атомарной записи состояния этого процесса: <statePath(env)>.<pid>.tmp. */
+function stateTmpPath(env = process.env) {
+  return statePath(env) + '.' + process.pid + '.tmp';
+}
+
+/**
  * Запись целиком через временный файл и rename: читатель видит либо старый файл, либо новый,
- * но не недописанный. rename повторяется до RENAME_ATTEMPTS раз на RENAME_RETRY_CODES, после
- * последней неудачи файл пишется напрямую - отметка важнее атомарности. Одновременные
- * read-modify-write двух хуков это не спасает (последний пишущий побеждает) - см.
- * docs/TECH_DEBT.md.
+ * но не недописанный. rename повторяется (retrySync), после последней неудачи на RENAME_RETRY_CODES
+ * файл пишется напрямую - отметка важнее атомарности. Read-modify-write состояния писатели делают не
+ * здесь, а через updateState (под блокировкой .qa-state.lock, docs/adr/0016-qa-state-writes.md);
+ * writeState зовут updateState и пробы самопроверки.
  * Возвращает null - записано, или ошибку записи: хуку сессии состояние - не повод падать, и он
- * её не смотрит, а отметка о прогоне (diff-hash.js markGates) обязана её увидеть - иначе прежняя
+ * её не смотрит, а отметки (diff-hash.js markQa, markGates) обязаны её увидеть - иначе прежняя
  * отметка молча осталась бы под словами «записана» (решение техлида Р9 E0-12AB, п.8).
  */
 function writeState(obj) {
   const p = statePath();
-  const tmp = p + '.' + process.pid + '.tmp';
+  const tmp = stateTmpPath();
   const body = JSON.stringify(obj, null, 2);
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(tmp, body);
-    for (let attempt = 1; ; attempt++) {
-      try {
-        fs.renameSync(tmp, p);
-        return null;
-      } catch (e) {
-        if (!(e && RENAME_RETRY_CODES.has(e.code))) throw e;
-        if (attempt >= RENAME_ATTEMPTS) break;
-        pauseSync(RENAME_PAUSE_MS);
-      }
+    try {
+      retrySync(() => fs.renameSync(tmp, p));
+      return null;
+    } catch (e) {
+      if (!RENAME_RETRY_CODES.has(codeOf(e))) throw e;
     }
     fs.writeFileSync(p, body);
     return null;
   } catch (e) {
-    return e instanceof Error ? e : new Error(String(e));
+    return asError(e);
   } finally {
     /* недописанный или не переименованный временный файл не оставляем */
     try {
       fs.rmSync(tmp, { force: true });
     } catch (_e) {
       /* нечего убирать */
+    }
+  }
+}
+
+/*
+ * Блокировка read-modify-write состояния (docs/adr/0016-qa-state-writes.md, решение техлида Р-3 E0-12AE):
+ * файл <statePath()>.lock, взятый openSync(lock, 'wx'); в нём токен владельца (pid и случайная часть) и время.
+ * Занята - пауза RENAME_PAUSE_MS и повтор до waitMs по монотонным часам процесса; старше staleMs (mtimeMs файла
+ * против Date.now(): часы локальной ФС и ОС одни) - её оставил упавший процесс, она снимается и берётся заново.
+ * Снимает блокировку только claimStateLock: rename в сторону, сверка отодвинутого, возврат на место, если это
+ * не та блокировка (ревью E0-12AE, круг 1, Б4): свежую чужую не снимает ни снятие протухшей, ни finally владельца.
+ */
+const STATE_LOCK_WAIT_MS = 1000;
+const STATE_LOCK_STALE_MS = 5000;
+/**
+ * Пределы, которые читает takeStateLock; в бою - STATE_LOCK_WAIT_MS и STATE_LOCK_STALE_MS. Меняет их только
+ * предзагрузка проб самопроверки (node -r в дочернем процессе пробы), чтобы пробы не держались на часах
+ * нагруженной машины (ревью E0-12AE, круг 1, Б11); переменной окружения у них нет. Значение - не конечное
+ * число или меньше нуля - при чтении заменяется константой (решение техлида Р-7): отрицательный staleMs
+ * сделал бы протухшей любую блокировку.
+ */
+const stateLockLimits = { waitMs: STATE_LOCK_WAIT_MS, staleMs: STATE_LOCK_STALE_MS };
+/** Предел value из stateLockLimits, если это конечное неотрицательное число, иначе константа fallback. */
+function lockLimit(value, fallback) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+/** Коды openSync(lock, 'wx'), на которых блокировку берут заново: занята (EEXIST), на win32 - EBUSY/EPERM от антивируса и читателя. */
+const STATE_LOCK_RETRY_CODES = new Set(['EEXIST', 'EBUSY', 'EPERM']);
+/**
+ * Сколько раз за один вызов takeStateLock после снятия протухшей (или пропавшей) блокировки её берут заново
+ * без сверки с пределом ожидания; счёт за вызов не обнуляется - дальше каждая попытка сверяется с пределом.
+ */
+const STATE_LOCK_FREE_RETRIES = 3;
+
+/**
+ * Путь блокировки состояния: рядом с .qa-state, через statePath(env) (SF_HOOK_STATE_DIR, refuseStatePath).
+ * env - как у statePath: пробы строят путь блокировки своего каталога им же, а не своей склейкой имени.
+ */
+function stateLockPath(env = process.env) {
+  return statePath(env) + '.lock';
+}
+
+/** Уникальный токен владельца блокировки: pid и 8 случайных байт. */
+function lockToken() {
+  return process.pid + '-' + crypto.randomBytes(8).toString('hex');
+}
+
+/** Токен владельца из текста файла блокировки (первое слово); '' - его нет. */
+function tokenIn(text) {
+  return String(text).split(/\s/)[0] || '';
+}
+
+/** Токен в файле блокировки f сейчас (чтение через retrySync); файла нет - ''. */
+function tokenAt(f) {
+  try {
+    return tokenIn(retrySync(() => fs.readFileSync(f, 'utf8')));
+  } catch (e) {
+    if (isGone(e)) return '';
+    throw e;
+  }
+}
+
+/** unlink файла f с повтором (retrySync); ENOENT - уже нет. null или ошибка последней попытки. */
+function unlinkRetry(f) {
+  try {
+    retrySync(() => fs.unlinkSync(f));
+    return null;
+  } catch (e) {
+    return isGone(e) ? null : asError(e);
+  }
+}
+
+/**
+ * Отодвинутая блокировка lock: <lock>-<токен>.tmp рядом с ней - из самого lock, а не из statePath() процесса:
+ * у вызывающего с чужим env rename в другой каталог дал бы EXDEV (ревью E0-12AE, круг 2, CR7). token - для
+ * проб самопроверки (форма имени из одного места).
+ */
+function asidePath(lock, token = lockToken()) {
+  return lock + '-' + token + '.tmp';
+}
+
+/**
+ * Снять блокировку lock, только если она та, что можно снимать: rename lock -> asidePath(lock) (атомарно:
+ * отодвинут ровно тот файл, что лежал), removable(отодвинутый) - и unlink его, иначе возврат на место linkSync
+ * (не перезаписывает блокировку, взятую за это время). Итог: 'removed' - снята; 'gone' - её уже нет; 'kept' -
+ * не та, возвращена; ошибка - rename не удался, или не та и вернуть не удалось: тогда отодвинутый файл
+ * остаётся (под .gitignore, .claude/.qa-state.*.tmp) - удалить его значило бы снять чужую блокировку
+ * (решение техлида Р-7 п.2).
+ */
+function claimStateLock(lock, removable) {
+  const aside = asidePath(lock);
+  try {
+    retrySync(() => fs.renameSync(lock, aside));
+  } catch (e) {
+    return isGone(e) ? 'gone' : asError(e);
+  }
+  let ok = false;
+  try {
+    ok = Boolean(removable(aside));
+  } catch (_) {
+    ok = false; // не разобрать - не снимаем
+  }
+  if (ok) {
+    unlinkRetry(aside);
+    return 'removed';
+  }
+  try {
+    fs.linkSync(aside, lock);
+  } catch (e) {
+    return new Error('блокировку ' + lock + ' не вернуть на место (' + (codeOf(e) || asError(e).message) + '): её место заняла другая, отодвинутая оставлена в ' + aside);
+  }
+  unlinkRetry(aside);
+  return 'kept';
+}
+
+/**
+ * Отказ взять блокировку за waitMs: протухшую снять не удалось (claimFail - ошибка последнего снятия; ревью
+ * E0-12AE, круг 2, Н4; причина - в её тексте: отказ ФС или место заняла другая), иначе - по коду последней
+ * ошибки e: EEXIST - занята другим писателем, иной код - отказ ФС (ревью E0-12AE, круг 3, CR3-7; решение Р-8).
+ */
+function lockRefusal(lock, e, waitMs, claimFail) {
+  if (claimFail) {
+    return new Error('блокировка ' + lock + ' протухла, но снять её за ' + waitMs + ' мс не удалось: ' + claimFail.message + ' - см. причину');
+  }
+  if (codeOf(e) === 'EEXIST') {
+    let holder = '';
+    try {
+      holder = String(fs.readFileSync(lock, 'utf8')).split(/\r?\n/)[0].slice(0, 80);
+    } catch (_) {
+      holder = ''; // снята в этот миг
+    }
+    return new Error('блокировка ' + lock + ' занята дольше ' + waitMs + ' мс - её держит другой писатель .qa-state' + (holder ? ' (' + holder + ')' : ''));
+  }
+  return new Error(
+    'блокировку ' + lock + ' не взять за ' + waitMs + ' мс: ' + (codeOf(e) || asError(e).message) +
+      ' - это отказ файловой системы, а не другой писатель: проверь права на каталог состояния и антивирус',
+  );
+}
+
+/**
+ * Взять блокировку lock: { token, staleMs } - взята (токен записан в файл), { error } - нет: занята дольше
+ * waitMs или сбой. Протухшая (старше staleMs) снимается через claimStateLock, только если отодвинутый файл
+ * тоже протух; после снятия берётся заново сразу, без сверки с пределом ожидания (Б7), но не больше
+ * STATE_LOCK_FREE_RETRIES раз за вызов.
+ */
+function takeStateLock(lock) {
+  const waitMs = lockLimit(stateLockLimits.waitMs, STATE_LOCK_WAIT_MS);
+  const staleMs = lockLimit(stateLockLimits.staleMs, STATE_LOCK_STALE_MS);
+  const from = performance.now();
+  const stale = (st) => Boolean(st && Date.now() - st.mtimeMs > staleMs);
+  let claimFail = null;
+  let freeRetries = 0;
+  for (;;) {
+    let fd;
+    try {
+      fd = fs.openSync(lock, 'wx');
+    } catch (e) {
+      const code = codeOf(e);
+      if (!STATE_LOCK_RETRY_CODES.has(code)) return { error: asError(e) };
+      let again = false;
+      if (code === 'EEXIST') {
+        claimFail = null;
+        let st;
+        try {
+          st = retrySync(() => statIfPresent(lock));
+        } catch (_) {
+          st = undefined; // не прочитать - ждём как занятую
+        }
+        if (st === null) again = true; // снята между open и stat
+        else if (stale(st)) {
+          const r = claimStateLock(lock, (aside) => stale(retrySync(() => statIfPresent(aside))));
+          again = r === 'removed' || r === 'gone';
+          if (r instanceof Error) claimFail = r;
+        }
+      }
+      if (again && freeRetries++ < STATE_LOCK_FREE_RETRIES) continue;
+      if (performance.now() - from >= waitMs) return { error: lockRefusal(lock, e, waitMs, claimFail) };
+      pauseSync(RENAME_PAUSE_MS);
+      continue;
+    }
+    const token = lockToken();
+    let failed = null;
+    try {
+      fs.writeSync(fd, token + ' ' + new Date().toISOString() + '\n');
+    } catch (e) {
+      failed = asError(e);
+    }
+    try {
+      fs.closeSync(fd);
+    } catch (_) {
+      /* дескриптор закроет выход процесса; блокировку держит сам файл */
+    }
+    if (failed) {
+      // без токена её снимет только протухание: файл создан этим вызовом мгновение назад - снимаем сразу
+      unlinkRetry(lock);
+      return { error: failed };
+    }
+    return { token, staleMs };
+  }
+}
+
+/** Снять свою блокировку: только если в ней токен token (claimStateLock); чужую - вернуть на место. */
+function dropStateLock(lock, token) {
+  const r = claimStateLock(lock, (aside) => tokenAt(aside) === token);
+  if (r === 'removed' || r === 'gone') return null;
+  return r === 'kept' ? new Error('блокировка ' + lock + ' не своя - её сочли протухшей и взяли, оставлена владельцу') : r;
+}
+
+/**
+ * Read-modify-write состояния под блокировкой .qa-state.lock - единственный путь записи для писателей
+ * (docs/adr/0016-qa-state-writes.md). mutate(state) меняет объект, прочитанный под блокировкой, и возвращает
+ * истину («изменилось»); writeState - только если изменилось. opts.changes(state) - предикат «изменится?» на
+ * своей копии, прочитанной без блокировки: ложь - блокировка не берётся и файл не пишется (Stop-хук без
+ * замечания не конкурирует за блокировку на каждом ходу; ревью E0-12AE, круг 1, Б10). Без предиката - одно
+ * чтение, сразу под блокировкой: писатель, который пишет всегда (отметки, edits), не читает файл дважды
+ * (круг 2, CR8). Побочное действие вне объекта (вывод) вызывающий делает после updateState (CR10).
+ * Перед записью токен в блокировке сверяется со своим: блокировку увели как протухшую - запись отменена
+ * (решение техлида Р-7 п.1). Медленное (git) вызывающий считает до вызова: под блокировкой - только файл.
+ * Возвращает null - записано или менять нечего, или ошибку - не записано: блокировка занята дольше предела
+ * или уведена, каталог состояния не создать, путь закрыт (refuseStatePath), чтение, mutate или запись
+ * упали. Отказ снять свою блокировку итог не меняет (запись сделана, блокировка протухнет сама) - он одной
+ * строкой в stderr (Р-7 п.6).
+ */
+function updateState(mutate, opts) {
+  const changes = opts && opts.changes;
+  let lock = null;
+  let held = null;
+  try {
+    lock = stateLockPath();
+    if (changes && !changes(readState())) return null;
+    fs.mkdirSync(path.dirname(lock), { recursive: true });
+    held = takeStateLock(lock);
+    if (held.error) return held.error;
+    const state = readState();
+    if (!mutate(state)) return null;
+    const now = tokenAt(lock);
+    if (now !== held.token) {
+      return new Error('токен в блокировке ' + lock + ' не свой (' + (now || 'пусто') + '): её увели как протухшую или место занял другой писатель, запись отменена');
+    }
+    return writeState(state);
+  } catch (e) {
+    return asError(e);
+  } finally {
+    if (held && held.token) {
+      const left = dropStateLock(lock, held.token);
+      if (left) {
+        try {
+          fs.writeSync(2, 'updateState: ' + left.message + '\n');
+        } catch (_) {
+          /* некуда писать - блокировка протухнет сама */
+        }
+      }
     }
   }
 }
@@ -704,11 +1055,23 @@ function takeLengthNote(s, sessionId) {
   return { text, changed: dropLengthNote(s, sessionId) };
 }
 
+/**
+ * Счётчик правок edits + n (по умолчанию 1) под блокировкой; зовёт standards.js (PostToolUse) на каждую
+ * правку файла. Возвращает новое значение или null - не записано (блокировка занята, состояние недоступно):
+ * этот шаг счёта пропал, и отказ - null, а не 0 (ревью E0-12AE, круг 1, Б12). До E0-12AF отпечаток qaDiffHash
+ * считается по именам файлов (diff-hash.js diffHash), правку уже проверенного файла ловит только edits; при
+ * занятой блокировке шаг теряется, строка stderr PostToolUse оператору не видна - edits = 0 не доказательство,
+ * edits > 0 - правки были (решение техлида Р-8 E0-12AE). Вызывающий называет null в stderr (standards.js; ревью
+ * E0-12AE, круг 2, data Н2). Одно чтение - под блокировкой.
+ */
 function bumpEdits(n) {
-  const s = readState();
-  s.edits = (s.edits || 0) + (n || 1);
-  writeState(s);
-  return s.edits;
+  let edits = null;
+  const failed = updateState((s) => {
+    s.edits = (s.edits || 0) + (n || 1);
+    edits = s.edits;
+    return true;
+  });
+  return failed ? null : edits;
 }
 
 // ------------------------------------------------------------------ транскрипт
@@ -805,6 +1168,8 @@ module.exports = {
   allChanged,
   isTracked,
   addedLines,
+  codeOf,
+  asError,
   isGone,
   isNotFile,
   statIfPresent,
@@ -813,6 +1178,15 @@ module.exports = {
   shortList,
   readState,
   writeState,
+  updateState,
+  stateLockPath,
+  stateTmpPath,
+  asidePath,
+  hookMarkerPath,
+  brokenHooks,
+  stateLockLimits,
+  STATE_LOCK_STALE_MS,
+  STATE_LOCK_FREE_RETRIES,
   bumpEdits,
   statePath,
   refuseStatePath,

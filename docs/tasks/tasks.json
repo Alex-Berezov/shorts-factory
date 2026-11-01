@@ -2155,7 +2155,49 @@
       "E0-12AB"
     ],
     "doc": "TECH_DEBT.md",
+    "status": "blocked",
+    "added_at": "2026-10-28",
+    "started_at": "2026-11-01",
+    "blocked_reason": "стоп 3: после двух /fix и захода по Р-8 точечное /qa нашло новые блокеры (fail-open маркера поломки против HEAD, __proto__ в brokenHooks, ложные тексты про edits); дифф пакета А в рабочем дереве не закоммичен"
+  },
+  {
+    "id": "E0-12AF",
+    "epic": "E0",
+    "title": "diff-hash.js: отпечаток диффа по содержимому, A->B->A в diffMoved, TOCTOU pathPrint, метки вложенных репозиториев, репозиторий без коммитов, метка-каталог gitlink",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-12AE"
+    ],
+    "doc": "TECH_DEBT.md",
     "status": "todo",
-    "added_at": "2026-10-28"
+    "added_at": "2026-11-01"
+  },
+  {
+    "id": "E0-12AG",
+    "epic": "E0",
+    "title": "gates.js: разрез на модули, own()/heldBytes, VERDICTS шаблоном, откат isFull, вердикт 255 по потомкам, копии в lib.js, nonAsciiNames через envByList, readWatch при pid null",
+    "estimate": "1.5 д",
+    "estimate_days": 1.5,
+    "deps": [
+      "E0-12AC",
+      "E0-12AE"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-11-01"
+  },
+  {
+    "id": "E0-12AH",
+    "epic": "E0",
+    "title": "Stop-хуки fail-closed: guard {stop, failClosed, name} в боевых хуках, qa-state.js из lib.js, хвосты блокировки .qa-state",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-12AE"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-11-01"
   }
 ]

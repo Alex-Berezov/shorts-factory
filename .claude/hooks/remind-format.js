@@ -9,6 +9,11 @@
  * своей сессии, и после выдачи снимается; замечания других сессий остаются на месте
  * (операции - раздел «состояние» lib.js). Без session_id на входе замечание не отдаётся
  * и состояние не пишется. Ничего не блокирует, выход всегда нулевой.
+ *
+ * Замечание снимается под блокировкой состояния (L.updateState, docs/adr/0016-qa-state-writes.md) и
+ * отдаётся после записи. Блокировку не взять или запись не удалась - отдаётся замечание, прочитанное без
+ * блокировки, а в состоянии оно остаётся и повторится на следующем ходу (ревью E0-12AE, круг 2, CR5):
+ * невыданное его стёр бы следующий короткий ответ. Памятка от состояния не зависит и отдаётся как обычно.
  */
 
 const fs = require('fs');
@@ -21,25 +26,45 @@ const REMINDER =
   'Задача / Решено за тебя / Проверки / Обвязка / Дальше - по одной каждая.\n' +
   'Подробности - в файл дела (tasks/), а не в чат. Без пересказа хода работы и вводных.\n';
 
+/** Текст агенту. Пишем синхронно: guard завершает процесс сразу после нас. */
+function say(text) {
+  if (!text) return;
+  try {
+    fs.writeSync(1, text);
+  } catch (_) {
+    /* некуда писать - не повод шуметь */
+  }
+}
+
 L.guard(async () => {
   const input = await L.readStdin();
 
   const sessionId = L.sessionIdOf(input);
+  const reminder = L.userTurnCount(input && input.transcript_path) < MIN_TURNS ? '' : REMINDER;
 
-  const s = sessionId ? L.readState() : null;
-  const taken = s ? L.takeLengthNote(s, sessionId) : { text: '', changed: false };
-
-  const out = taken.text +
-    (L.userTurnCount(input && input.transcript_path) < MIN_TURNS ? '' : REMINDER);
-
-  // сначала агенту, потом состояние: замечание не снимается раньше, чем отдано.
-  // Пишем синхронно: guard завершает процесс сразу после нас.
-  if (out) {
-    try {
-      fs.writeSync(1, out);
-    } catch (_) {
-      /* некуда писать - не повод шуметь */
-    }
+  // предикат changes на копии, прочитанной без блокировки: замечания нет - блокировка не берётся. Снятие -
+  // под блокировкой (mutate), вывод - после updateState (ревью E0-12AE, круг 2, CR10). Блокировку не взять или
+  // запись не удалась - отдаётся замечание, прочитанное без блокировки, и оно остаётся в состоянии: повторится
+  // на следующем ходу. Иначе следующий короткий ответ (answer-length снимает замечание своей сессии) стёр бы
+  // его невыданным (CR5); повтор лучше потери
+  let text = '';
+  if (sessionId) {
+    let seen = '';
+    const failed = L.updateState(
+      (s) => {
+        const taken = L.takeLengthNote(s, sessionId);
+        text = taken.text;
+        return taken.changed;
+      },
+      {
+        changes: (s) => {
+          const peek = L.takeLengthNote(s, sessionId);
+          seen = peek.text;
+          return peek.changed;
+        },
+      },
+    );
+    if (failed) text = seen;
   }
-  if (taken.changed) L.writeState(s);
+  say(text + reminder);
 });

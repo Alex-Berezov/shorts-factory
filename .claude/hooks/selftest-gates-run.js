@@ -19,6 +19,8 @@ const { PROCESS_EXIT: EXIT } = require('./selftest-children.js');
 // суффикс отметки старта внука - одна строка протокола с gcStartedAt (решение техлида Р9 E0-12AA); при
 // require модуль ничего не исполняет, exit - только в gateRunner дочернего node
 const { STARTED_SUFFIX } = require('./selftest-gate-runner.js');
+// строковые литералы исходника - общий лексер статических проб (ревью E0-12AE, круг 2, Н6)
+const { sourceLiterals } = require('./selftest-source.js');
 
 function registerGateRunProbes(ctx) {
   const { CLAUDE, HOOKS, LIVE_STATE, ROOT, check, copyHooksTo, gitStrict, put, releaseTemp, repoRules, run, tempDir } = ctx;
@@ -238,15 +240,26 @@ function registerGateRunProbes(ctx) {
    *   killStatusOne (только Windows) - код taskkill 1 при снятом дереве: «СНЯТЬ РУКАМИ» (решение техлида Р5);
    *   touchedRed, markFail - в состоянии прежняя зелёная отметка (SEED_GREEN): красный прогон с правкой b.txt
    *     пишет красную отметку; сверка диффа после прогона бросает (SF_PROBE_MOVED_FAIL) - код 1, красная отметка;
-   *   markWriteFail - сверка бросает и запись красной отметки тоже (SF_PROBE_MARK_FAIL): код 1, прежняя
-   *     отметка осталась и это сказано; mainFail - main() бросил после снятия меток (снимок до очереди,
-   *     SF_PROBE_SNAP_FAIL, перед отказом создаёт during.txt - SF_PROBE_TOUCH=new): код 1, красная отметка по
-   *     меткам до очереди (Р9 п.1); labelsFail - main() бросил до снятия меток (SF_PROBE_LABELS_FAIL): код 1,
-   *     красная отметка по текущему диффу (Р9 п.2); stateLocked - .qa-state и его каталог только для чтения,
-   *     гейты зелёные: код 1, прежняя отметка осталась и это сказано (Р9 п.8); nestedDir - метка-каталог (вложенный git в корне дерева): отметка с кодом 1,
-   *     причина «метка-каталог» в строке «Дифф изменился» (решение техлида Р6); fullSignal - полный прогон
-   *     (SF_PROBE_RULES=touchSig) прерван SIGINT на старте гейта с внуком: код 130, внук снят, прежняя зелёная
-   *     отметка заменена красной по диффу до запуска (решение техлида Р7); внук до файла PID создаёт
+   *   markWriteFail - сверка бросает и запись красной отметки тоже (SF_PROBE_MARK_FAIL=later: красная до первого
+   *     гейта записана, следующие записи бросают): код 1, осталась красная до первого гейта, и это сказано;
+   *   mainFail - main() бросил после снятия меток (снимок до очереди, SF_PROBE_SNAP_FAIL, перед отказом создаёт
+   *     during.txt - SF_PROBE_TOUCH=new): код 1, красная отметка по меткам до очереди (Р9 п.1);
+   *   labelsFail - main() бросил до снятия меток (SF_PROBE_LABELS_FAIL): код 1, красная по текущему диффу (Р9 п.2);
+   *   pickFail - main() бросил при выборе гейтов, после первого снимка меток (SF_PROBE_PICK_FAIL): красная по нему (CR4);
+   *   stateLocked - SF_HOOK_STATE_DIR - обычный файл: красную до первого гейта не записать - ни одного гейта,
+   *     код 1, это сказано, файл не тронут (Р9 п.8, решение техлида Р-4 E0-12AE);
+   *   preMarkFail - то же через SF_PROBE_MARK_FAIL при прежней зелёной: она на месте;
+   *   earlyTouch - выбор гейтов создаёт during.txt и видит его (SF_PROBE_TOUCH=early): не сдвиг, отметка с кодом 0;
+   *   lateTouch - второй снимок меток создаёт during.txt после выбора (SF_PROBE_TOUCH=late): гейты не
+   *     запускаются, «Дифф изменился», красная по меткам с ним (решение техлида Р-5 E0-12AE);
+   *   fullKill - гейт p-kill читает отметку во время прогона (killSeen) и снимает gates.js SIGKILL по PID
+   *     (SF_PROBE_PID_FILE): обе красные;
+   *   fullSignalMarkFail - SIGINT при отказе записи красной в обработчике (SF_PROBE_MARK_FAIL=later): код 130,
+   *     отказ назван, отметка - красная до первого гейта;
+   *   nestedDir - метка-каталог (вложенный git в корне дерева): отметка с кодом 1, причина «метка-каталог» в
+   *     строке «Дифф изменился» (решение техлида Р6);
+   *   fullSignal - полный прогон (SF_PROBE_RULES=touchSig) прерван SIGINT на старте гейта с внуком: код 130,
+   *     внук снят, прежняя зелёная отметка заменена красной по диффу до запуска (решение техлида Р7); внук до файла PID создаёт
    *     during.txt (SF_PROBE_TOUCH=new) - отметка по текущему диффу, а не по меткам до очереди, краснеет (Р8);
    *   fullClean - полный прогон на чистом дереве: снимков диффа ни одного (файлы не читаются).
    * Шпион считает и снимки диффа (H.diffSnapshot копии diff-hash.js) и аргументы taskkill.
@@ -268,23 +281,23 @@ function registerGateRunProbes(ctx) {
   }
   const PROBE_SIGNALS = [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]];
   /** Запуски gates.js этапа 2 ребёнка проб (решение техлида Р4 E0-12AB); killPartial* - только на Windows. */
-  const CLI_STAGE_TWO = ['touchNone', 'touched', 'touchedContent', 'touchedRed', 'markFail', 'markWriteFail', 'mainFail', 'labelsFail', 'stateLocked', 'nestedDir', 'fullSignal', 'remnant', 'onlyBothDirty', 'killPartial', 'killPartialOpen', 'killStatusOne'];
+  const CLI_STAGE_TWO = ['touchNone', 'touched', 'touchedContent', 'touchedRed', 'markFail', 'markWriteFail', 'mainFail', 'labelsFail', 'pickFail', 'stateLocked', 'nestedDir', 'fullSignal', 'preMarkFail', 'earlyTouch', 'lateTouch', 'fullKill', 'fullSignalMarkFail', 'remnant', 'onlyBothDirty', 'killPartial', 'killPartialOpen', 'killStatusOne'];
   /** Внуки случаев этапа 2 (решение техлида Р7 E0-12AB): их пульс читается после этапа 2, остальных - после этапа 1. */
-  const WATCH_STAGE_TWO = ['held', 'partial', 'partialNoop', 'partialOne', 'fullSig'];
+  const WATCH_STAGE_TWO = ['held', 'partial', 'partialNoop', 'partialOne', 'fullSig', 'fullSigFail'];
   /** Срок жизни внука gc.js: выходит сам, чтобы не пережить пробу; пульс, прочитанный позже, ничего не доказывает. */
   const GC_LIFE_MS = 30000;
   /** Прежняя зелёная отметка в состоянии случаев SEEDED_GREEN: набор имён - дифф их дерева (sf/b.txt). */
   const SEED_GREEN = { hash: 'seed-green', files: ['sf/b.txt'], code: 0, at: '2000-01-01T00:00:00.000Z' };
+  /** Содержимое обычного файла, на который указывает SF_HOOK_STATE_DIR случая stateLocked: после прогона - то же. */
+  const STATE_FILE_BODY = 'каталог состояния - обычный файл (проба stateLocked)\n';
   /** Случаи с прежней зелёной отметкой: она не должна пережить ни один из них. */
-  const SEEDED_GREEN = ['touched', 'touchedContent', 'touchedRed', 'markFail', 'markWriteFail', 'mainFail', 'labelsFail', 'stateLocked', 'nestedDir', 'fullSignal'];
+  const SEEDED_GREEN = ['touched', 'touchedContent', 'touchedRed', 'markFail', 'markWriteFail', 'mainFail', 'labelsFail', 'pickFail', 'nestedDir', 'fullSignal', 'preMarkFail', 'lateTouch', 'fullKill', 'fullSignalMarkFail'];
   function buildGateRunCases() {
     const { limits } = gatesModule();
     // без умолчания: снятый экспорт - красная строка, а не молча 2 с
     const grace = limits && limits.KILL_GRACE_MS;
     if (!Number.isInteger(grace) || grace <= 0) throw new Error('gates.js не экспортирует limits.KILL_GRACE_MS: ' + JSON.stringify(grace));
     const dir = tempDir('rungate');
-    // каталог состояния stateLocked, закрытый на запись: права возвращаются до удаления дерева пробы
-    let lockedState = null;
     try {
       const q = (p) => '"' + p + '"';
       const cmd = (...args) => [process.execPath].concat(args).map(q).join(' ');
@@ -361,7 +374,7 @@ function registerGateRunProbes(ctx) {
       const cliMarker = path.join(dir, 'marker-cli');
       const mark = (m) => put(dir, 'bin/mark-' + path.basename(m) + '.js', 'require("fs").writeFileSync(' + JSON.stringify(m) + ', "ran");\n');
       const watch = {};
-      const watchKeys = ['tree', 'orphan', 'afterExit', 'stuck', 'noop', 'held', 'partial', 'partialNoop', 'partialOne', 'fullSig'].concat(PROBE_SIGNALS.map(([s]) => s));
+      const watchKeys = ['tree', 'orphan', 'afterExit', 'stuck', 'noop', 'held', 'partial', 'partialNoop', 'partialOne', 'fullSig', 'fullSigFail'].concat(PROBE_SIGNALS.map(([s]) => s));
       for (const k of watchKeys) watch[k] = { pid: path.join(dir, 'gc-' + k + '.pid'), hb: path.join(dir, 'gc-' + k + '.hb') };
       for (const k of WATCH_STAGE_TWO) watch[k].stage = 2;
       const withGc = (file, k) => cmd(file, gc, watch[k].pid, watch[k].hb);
@@ -418,7 +431,7 @@ function registerGateRunProbes(ctx) {
       put(dir, 'b.txt', 'b\n');
       // свои деревья случаев отметки (свой git): гейт p-touch пишет в корень своего дерева, общий дифф не трогает
       const touchRoots = {};
-      for (const k of ['touchNone', 'touched', 'touchedContent', 'touchedRed', 'markFail', 'markWriteFail', 'mainFail', 'labelsFail', 'stateLocked', 'nestedDir', 'fullSignal']) {
+      for (const k of ['touchNone', 'touched', 'touchedContent', 'touchedRed', 'markFail', 'markWriteFail', 'mainFail', 'labelsFail', 'pickFail', 'stateLocked', 'nestedDir', 'fullSignal', 'preMarkFail', 'earlyTouch', 'lateTouch', 'fullKill', 'fullSignalMarkFail']) {
         touchRoots[k] = path.join(dir, 'root-' + k);
         put(touchRoots[k], '.gitignore', '*\n!/b.txt\n!/during.txt\n!/sub/\n');
         put(touchRoots[k], 'b.txt', 'b\n');
@@ -435,6 +448,22 @@ function registerGateRunProbes(ctx) {
       const touchRedGates = touchGates.concat([{ id: 'p-red', cmd: cmd(failSilent), when: 'always', timeoutSec: 30 }]);
       // полный прогон, прерванный сигналом: зелёный гейт, затем гейт с внуком, на старте которого приходит сигнал
       const touchSigGates = [touchGates[0], { id: 'p-sig-hold', cmd: cmd(gc, watch.fullSig.pid, watch.fullSig.hb), when: 'always', timeoutSec: 30 }];
+      // то же со своим внуком - случай fullSignalMarkFail (запись красной в обработчике сигнала падает)
+      const touchSigFailGates = [touchGates[0], { id: 'p-sig-hold', cmd: cmd(gc, watch.fullSigFail.pid, watch.fullSigFail.hb), when: 'always', timeoutSec: 30 }];
+      // полный прогон, снятый без обработчика (решение техлида Р-4 E0-12AE): гейт читает отметку в состоянии
+      // случая (какой она стоит во время прогона) в killSeen, затем снимает gates.js по его PID (SF_PROBE_PID_FILE)
+      // SIGKILL - на Windows process.kill это TerminateProcess; обработчик сигнала gates.js не зовётся ни там, ни там
+      const killSeen = path.join(dir, 'kill-seen.json');
+      const killPid = path.join(dir, 'kill-gates.pid');
+      const killParent = put(dir, 'bin/kill-parent.js', [
+        "const fs = require('fs');",
+        'const [seenFile, pidFile] = process.argv.slice(2);',
+        'let seen = null;',
+        "try { seen = JSON.parse(fs.readFileSync(require('path').join(process.env.SF_HOOK_STATE_DIR, '.qa-state'), 'utf8')).lastGates || null; } catch (e) { seen = { error: String(e && e.message) }; }",
+        'fs.writeFileSync(seenFile, JSON.stringify(seen));',
+        "process.kill(Number(fs.readFileSync(pidFile, 'utf8')), 'SIGKILL');",
+      ].join('\n'));
+      const touchKillGates = [touchGates[0], { id: 'p-kill', cmd: cmd(killParent, killSeen, killPid), when: 'always', timeoutSec: 30 }];
       const preload = put(dir, 'pre.js', [
         "const fs = require('fs');",
         "const cp = require('child_process');",
@@ -445,7 +474,17 @@ function registerGateRunProbes(ctx) {
         "if (process.env.SF_PROBE_RULES === 'touch') L.rulesFor = () => ({ gates: " + JSON.stringify(touchGates) + ' });',
         "if (process.env.SF_PROBE_RULES === 'touchRed') L.rulesFor = () => ({ gates: " + JSON.stringify(touchRedGates) + ' });',
         "if (process.env.SF_PROBE_RULES === 'touchSig') L.rulesFor = () => ({ gates: " + JSON.stringify(touchSigGates) + ' });',
-        "L.allChanged = () => { if (!one) return []; const repo = L.knownRepos()[0]; return [{ repo, rules: L.rulesFor(repo), files: ['b.txt'] }]; };",
+        "if (process.env.SF_PROBE_RULES === 'touchSigFail') L.rulesFor = () => ({ gates: " + JSON.stringify(touchSigFailGates) + ' });',
+        "if (process.env.SF_PROBE_RULES === 'touchKill') L.rulesFor = () => ({ gates: " + JSON.stringify(touchKillGates) + ' });',
+        // SF_PROBE_TOUCH=early: выбор гейтов (L.allChanged в pickRepos) создаёт during.txt в дереве случая и видит
+        // его (files с during.txt) - файл появился между началом main() и очередью, выбору виден (Р-5 E0-12AE)
+        "const early = process.env.SF_PROBE_TOUCH === 'early';",
+        // SF_PROBE_PICK_FAIL: выбор гейтов создаёт during.txt и бросает - main() падает между первым и вторым
+        // снимком меток (ревью E0-12AE, круг 2, CR4)
+        "const pickFail = process.env.SF_PROBE_PICK_FAIL === '1';",
+        "L.allChanged = () => { if (pickFail) { fs.writeFileSync(require('path').join(process.env.SF_PROBE_ROOT, 'during.txt'), 'pick'); throw new Error('allChanged EIO (проба)'); } if (early) fs.writeFileSync(require('path').join(process.env.SF_PROBE_ROOT, 'during.txt'), 'early'); if (!one) return []; const repo = L.knownRepos()[0]; return [{ repo, rules: L.rulesFor(repo), files: early ? ['b.txt', 'during.txt'] : ['b.txt'] }]; };",
+        // SF_PROBE_PID_FILE: PID gates.js - гейту, который снимает его без обработчика (SIGKILL, TerminateProcess)
+        "if (process.env.SF_PROBE_PID_FILE) fs.writeFileSync(process.env.SF_PROBE_PID_FILE, String(process.pid));",
         // leak - переменная окружения самопроверки вне белого списка (envByList) дошла до gates.js
         "const spy = { groupKills: 0, taskkills: 0, taskkillArgs: [], snapshots: 0, logWrites: [], logDirReads: 0, logUnlinks: 0, leak: process.env.SF_SELFTEST_LEAK || null };",
         'const spyFile = process.env.SF_PROBE_SPY;',
@@ -455,15 +494,20 @@ function registerGateRunProbes(ctx) {
         'const diffSnapshot = H.diffSnapshot;',
         // SF_PROBE_SNAP_FAIL - снимок до очереди бросает (main() падает после снятия меток), с SF_PROBE_TOUCH=new -
         // создав during.txt в дереве случая: текущий дифф уходит от меток до очереди; SF_PROBE_MARK_FAIL - запись
-        // отметки бросает; SF_PROBE_LABELS_FAIL - метки до очереди (H.diffLabels из gates.js) бросают: main() падает
-        // до снятия меток (markGates берёт свой diffLabels модуля, не подменённый)
+        // отметки бросает (later - кроме первой: красная до первого гейта записана, следующие бросают);
+        // SF_PROBE_LABELS_FAIL - метки до очереди (H.diffLabels из gates.js) бросают: main() падает до снятия
+        // меток (markGates берёт свой diffLabels модуля, не подменённый)
         "H.diffSnapshot = function () { spy.snapshots++; if (process.env.SF_PROBE_SNAP_FAIL === '1') { " + touchNew('process.env.SF_PROBE_ROOT') + " throw new Error('diffSnapshot EIO (проба)'); } return diffSnapshot.apply(H, arguments); };",
+        // SF_PROBE_TOUCH=late: второй снимок меток gates.js (перед очередью) сначала создаёт during.txt - файл
+        // появился после выбора гейтов, выбор его не видел (решение техлида Р-5 E0-12AE)
         'const diffLabels = H.diffLabels;',
-        "H.diffLabels = function () { if (process.env.SF_PROBE_LABELS_FAIL === '1') throw new Error('diffLabels EIO (проба)'); return diffLabels.apply(H, arguments); };",
+        'let labelCalls = 0;',
+        "H.diffLabels = function () { labelCalls++; if (process.env.SF_PROBE_LABELS_FAIL === '1') throw new Error('diffLabels EIO (проба)'); if (process.env.SF_PROBE_TOUCH === 'late' && labelCalls === 2) fs.writeFileSync(require('path').join(process.env.SF_PROBE_ROOT, 'during.txt'), 'late'); return diffLabels.apply(H, arguments); };",
         'const diffMoved = H.diffMoved;',
         "H.diffMoved = function () { if (process.env.SF_PROBE_MOVED_FAIL === '1') throw new Error('diffMoved EIO (проба)'); return diffMoved.apply(H, arguments); };",
         'const markGates = H.markGates;',
-        "H.markGates = function () { if (process.env.SF_PROBE_MARK_FAIL === '1') throw new Error('markGates EIO (проба)'); return markGates.apply(H, arguments); };",
+        'let marks = 0;',
+        "H.markGates = function () { marks++; const f = process.env.SF_PROBE_MARK_FAIL; if (f === '1' || (f === 'later' && marks > 1)) throw new Error('markGates EIO (проба)'); return markGates.apply(H, arguments); };",
         "const failKill = process.env.SF_PROBE_KILL_FAIL === '1';",
         // SF_PROBE_KILL_NOOP: снятие отвечает успехом, ничего не сняв (taskkill 0, сигнал группе «ушёл»)
         "const noopKill = process.env.SF_PROBE_KILL_NOOP === '1';",
@@ -610,15 +654,30 @@ function registerGateRunProbes(ctx) {
       cliCase('touchedRed', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.touchedRed, SF_PROBE_RULES: 'touchRed', SF_PROBE_TOUCH: 'content' });
       cliCase('markFail', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.markFail, SF_PROBE_RULES: 'touch', SF_PROBE_MOVED_FAIL: '1' });
       // сверка бросила, и красную отметку записать не удалось; main() бросил; метка-каталог (ревью E0-12AB, круг 2)
-      cliCase('markWriteFail', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.markWriteFail, SF_PROBE_RULES: 'touch', SF_PROBE_MOVED_FAIL: '1', SF_PROBE_MARK_FAIL: '1' });
+      cliCase('markWriteFail', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.markWriteFail, SF_PROBE_RULES: 'touch', SF_PROBE_MOVED_FAIL: '1', SF_PROBE_MARK_FAIL: 'later' });
       // mainFail: main() бросил после снятия меток, дифф к тому времени ушёл (during.txt) - отметка по меткам до
       // очереди (redMark), а не по текущему диффу; labelsFail: main() бросил до снятия меток - отметка по текущему
       // диффу, а не отказ записи (решение техлида Р9 E0-12AB, п.1-2)
       cliCase('mainFail', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.mainFail, SF_PROBE_RULES: 'touch', SF_PROBE_SNAP_FAIL: '1', SF_PROBE_TOUCH: 'new' });
       cliCase('labelsFail', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.labelsFail, SF_PROBE_RULES: 'touch', SF_PROBE_LABELS_FAIL: '1' });
-      // зелёный прогон, состояние не записывается (.qa-state только для чтения, каталог - тоже): writeState
-      // отдаёт отказ, markGates бросает - код 1 и «прежняя отметка … осталась», а не молча старая зелёная (Р9 п.8)
+      // pickFail: main() бросил между первым снимком меток и вторым (выбор гейтов), дифф ушёл - красная по первому
+      // снимку, а не по текущему диффу (ревью E0-12AE, круг 2, CR4)
+      cliCase('pickFail', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.pickFail, SF_PROBE_RULES: 'touch', SF_PROBE_PICK_FAIL: '1' });
+      // состояние не записывается: каталог состояния - обычный файл (mkdirSync - EEXIST/ENOTDIR под любым
+      // пользователем, root тоже; ревью E0-12AB, круг 6): updateState отдаёт отказ, markGates бросает - красную
+      // до первого гейта не записать, прогон не начат, код 1 и «прежняя осталась», а не зелёный прогон (Р9 п.8)
       cliCase('stateLocked', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.stateLocked, SF_PROBE_RULES: 'touch' });
+      const stateFile = path.join(dir, 'state-is-a-file');
+      fs.writeFileSync(stateFile, STATE_FILE_BODY);
+      cli.stateLocked.env.SF_HOOK_STATE_DIR = stateFile;
+      // красная до первого гейта (решение техлида Р-4 E0-12AE): её запись падает - прогон не начат, прежняя
+      // зелёная на месте; файл появился до очереди - не сдвиг; прогон снят без обработчика (SIGKILL,
+      // TerminateProcess) - во время прогона и после снятия отметка красная; сигнал при отказе записи красной
+      cliCase('preMarkFail', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.preMarkFail, SF_PROBE_RULES: 'touch', SF_PROBE_MARK_FAIL: '1' });
+      cliCase('earlyTouch', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.earlyTouch, SF_PROBE_RULES: 'touch', SF_PROBE_TOUCH: 'early' });
+      cliCase('lateTouch', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.lateTouch, SF_PROBE_RULES: 'touch', SF_PROBE_TOUCH: 'late' });
+      cliCase('fullKill', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.fullKill, SF_PROBE_RULES: 'touchKill', SF_PROBE_PID_FILE: killPid });
+      cliCase('fullSignalMarkFail', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.fullSignalMarkFail, SF_PROBE_RULES: 'touchSigFail', SF_PROBE_MARK_FAIL: 'later', SF_PROBE_SIGNAL_ON: watch.fullSigFail.pid, SF_PROBE_SIGNAL: 'SIGINT' });
       cliCase('nestedDir', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.nestedDir, SF_PROBE_RULES: 'touch' });
       // полный прогон прерван SIGINT при прежней зелёной отметке (ревью E0-12AB, круг 3; решение техлида Р7)
       cliCase('fullSignal', [], { SF_PROBE_CHANGED: 'one', SF_PROBE_ROOT: touchRoots.fullSignal, SF_PROBE_RULES: 'touchSig', SF_PROBE_TOUCH: 'new', SF_PROBE_SIGNAL_ON: watch.fullSig.pid, SF_PROBE_SIGNAL: 'SIGINT' });
@@ -627,11 +686,6 @@ function registerGateRunProbes(ctx) {
       for (const k of SEEDED_GREEN) {
         fs.writeFileSync(path.join(state[k], '.qa-state'), JSON.stringify({ lastGates: SEED_GREEN }));
       }
-      // недоступный путь состояния stateLocked: файл только для чтения (Windows: rename и запись поверх - EPERM),
-      // каталог тоже (POSIX: временный файл не создаётся); права вернёт finally до удаления дерева пробы
-      fs.chmodSync(path.join(state.stateLocked, '.qa-state'), 0o444);
-      fs.chmodSync(state.stateLocked, 0o555);
-      lockedState = state.stateLocked;
       // taskkill /T /F с кодом 255 (E0-12AB, шаг 6): путь снятия Windows, на POSIX случаев нет (строки - с заметкой)
       if (process.platform === 'win32') {
         cliCase('killPartial', ['--only=p-stuck-255'], { SF_PROBE_CHANGED: 'none', SF_PROBE_KILL_STATUS: '255' });
@@ -672,6 +726,8 @@ function registerGateRunProbes(ctx) {
         res.spy[k] = fs.existsSync(spies[k]) ? JSON.parse(fs.readFileSync(spies[k], 'utf8')) : null;
       }
       res.grace = grace;
+      res.stateFileBody = fs.readFileSync(stateFile, 'utf8');
+      res.killSeen = fs.existsSync(killSeen) ? JSON.parse(fs.readFileSync(killSeen, 'utf8')) : null;
       // правка «новый файл» в деревьях случаев отметки: была ли она (дифф ушёл от меток до очереди)
       res.during = {};
       for (const k of Object.keys(touchRoots)) res.during[k] = fs.existsSync(path.join(touchRoots[k], 'during.txt'));
@@ -686,16 +742,9 @@ function registerGateRunProbes(ctx) {
       res.existingLogs = fs.existsSync(existingDir) ? fs.readdirSync(existingDir).map((f) => ({ name: f, text: fs.readFileSync(path.join(existingDir, f), 'utf8') })) : [];
       return res;
     } finally {
-      try {
-        if (lockedState !== null) {
-          fs.chmodSync(lockedState, 0o755);
-          fs.chmodSync(path.join(lockedState, '.qa-state'), 0o644);
-        }
-      } finally {
-        // папку держит не снятый процесс - его отказ назван строкой пробы; каталог остаётся в
-        // реестре: его снимет выход процесса, а не снятый назовёт проба «каталоги прогона»
-        releaseTemp(dir);
-      }
+      // папку держит не снятый процесс - его отказ назван строкой пробы; каталог остаётся в
+      // реестре: его снимет выход процесса, а не снятый назовёт проба «каталоги прогона»
+      releaseTemp(dir);
     }
   }
   /** Случай пробы runGate словами для строки отказа. */
@@ -1069,6 +1118,14 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   /**
+   * Отметка g - красная до первого гейта (решение техлида Р-4 E0-12AE): код 1 по меткам до очереди деревьев случаев
+   * отметки (sf/b.txt), отпечаток - по ним, не прежняя зелёная SEED_GREEN.
+   */
+  function redBeforeQueue(g) {
+    const H = require('./diff-hash.js');
+    return Boolean(g && g.code === 1 && g.hash !== SEED_GREEN.hash && Array.isArray(g.files) && g.hash === H.diffHash(g.files) && JSON.stringify(g.files) === JSON.stringify(['sf/b.txt']));
+  }
+  /**
    * Зелёный прогон при прежней зелёной отметке, файл диффа тронут во время прогона (решение техлида Р6 E0-12AB):
    * отметка с кодом 1 по диффу до запуска вместо прежней, замок коммита (gatesProblem) её не пускает, код 1,
    * строка называет файл; extra - причина «Не прочитано» в той же строке. Контроль - дерево без правки.
@@ -1128,15 +1185,16 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   // Запись красной отметки упала (ревью E0-12AB, круг 2, T7): прежняя отметка осталась - так и сказано, код 1
-  check('gates.js из командной строки: сверка диффа бросила и красную отметку записать не удалось - код 1, в stderr обе причины и «прежняя отметка … осталась - не коммить»', () => {
+  check('gates.js из командной строки: сверка диффа бросила и красную отметку записать не удалось - код 1, в stderr обе причины и «осталась красная отметка этого прогона, записанная до первого гейта - не коммить»', () => {
     const all = gateRunCases();
     const x = all.cli.markWriteFail;
     const g = all.marks.markWriteFail;
     const why = [];
     if (x.hung || x.code !== 1) why.push(cliSeen(x));
     if (!/Все гейты прошли/.test(x.out)) why.push('гейты прогона не зелёные - проба ничего не доказывает');
-    if (!/Сверка диффа или отметка о прогоне упала \(diffMoved EIO \(проба\)\): красную отметку записать не удалось \(markGates EIO \(проба\)\), прежняя отметка в \.qa-state осталась - не коммить до полного прогона с отметкой, код прогона 1/.test(x.err)) why.push('обе причины и «не коммить» не названы в stderr: ' + JSON.stringify(x.err.slice(-300)));
-    if (!g || g.hash !== SEED_GREEN.hash) why.push('отметка ' + JSON.stringify(g) + ', а запись падала - ждали прежнюю');
+    if (!/Сверка диффа или отметка о прогоне упала \(diffMoved EIO \(проба\)\): красную отметку записать не удалось \(markGates EIO \(проба\)\), в \.qa-state осталась красная отметка этого прогона, записанная до первого гейта \(код 1\) - не коммить до полного прогона с отметкой, код прогона 1/.test(x.err)) why.push('обе причины и «не коммить» не названы в stderr: ' + JSON.stringify(x.err.slice(-300)));
+    // прежняя - красная до первого гейта (SF_PROBE_MARK_FAIL=later: она записана, следующие записи падают)
+    if (!redBeforeQueue(g)) why.push('отметка ' + JSON.stringify(g) + ', а запись после прогона падала - ждали красную до первого гейта (код 1 по меткам до очереди)');
     return why.length ? why.join('; ') : true;
   });
   // main() бросил в полном прогоне (ревью E0-12AB, круг 2, L-004/T7/D6): прежняя зелёная отметка не переживает сломавшийся прогон
@@ -1169,17 +1227,118 @@ function registerGateRunProbes(ctx) {
     else if (g.hash !== H.diffHash(g.files) || JSON.stringify(g.files) !== JSON.stringify(['sf/b.txt'])) why.push('отметка не по текущему диффу: ' + JSON.stringify(g));
     return why.length ? why.join('; ') : true;
   });
-  // Состояние не записывается (решение техлида Р9 E0-12AB, п.8): writeState отдаёт отказ, markGates бросает - зелёный
-  // прогон не может молча оставить прежнюю зелёную отметку и выйти с 0
-  check('gates.js из командной строки: путь состояния закрыт на запись, гейты зелёные - код 1, в stderr «красную отметку записать не удалось … прежняя отметка в .qa-state осталась - не коммить»', () => {
+  // main() бросил между снимками меток (ревью E0-12AE, круг 2, CR4): отметка по первому снимку, не по текущему диффу
+  check('gates.js из командной строки: main() полного прогона бросил при выборе гейтов (после первого снимка меток), дифф ушёл - код 1, «gates.js сломался», отметка - код 1 по первому снимку меток, а не по текущему диффу', () => {
     const all = gateRunCases();
-    const x = all.cli.stateLocked;
-    const g = all.marks.stateLocked;
+    const x = all.cli.pickFail;
+    const g = all.marks.pickFail;
+    const H = require('./diff-hash.js');
     const why = [];
     if (x.hung || x.code !== 1) why.push(cliSeen(x));
-    if (!/Все гейты прошли/.test(x.out)) why.push('гейты прогона не зелёные - проба ничего не доказывает');
-    if (!g || g.hash !== SEED_GREEN.hash) why.push('отметка ' + JSON.stringify(g) + ' записана - путь состояния не закрыт, проба ничего не доказывает');
-    if (!/Сверка диффа или отметка о прогоне упала \(запись \.qa-state не удалась: [^\n]*\): красную отметку записать не удалось \(запись \.qa-state не удалась: [^\n]*\), прежняя отметка в \.qa-state осталась - не коммить до полного прогона с отметкой, код прогона 1/.test(x.err)) why.push('отказ записи и «не коммить» не названы в stderr: ' + JSON.stringify(x.err.slice(-300)));
+    if (!all.during.pickFail) why.push('during.txt не создан - дифф не ушёл от первого снимка, проба ничего не доказывает');
+    if (!/gates\.js сломался: [^\n]*allChanged EIO \(проба\)/.test(x.err)) why.push('причина не названа в stderr: ' + JSON.stringify(x.err.slice(-300)));
+    if (!/записана отметка о красном прогоне \(код 1\), код прогона 1/.test(x.err)) why.push('запись красной отметки не названа в stderr: ' + JSON.stringify(x.err.slice(-300)));
+    if (!g || g.code !== 1 || g.hash === SEED_GREEN.hash) why.push('отметка ' + JSON.stringify(g) + ', ждали красную (код 1) вместо прежней зелёной');
+    else if (g.hash !== H.diffHash(g.files) || JSON.stringify(g.files) !== JSON.stringify(['sf/b.txt'])) why.push('отметка не по первому снимку меток (sf/b.txt): ' + JSON.stringify(g));
+    return why.length ? why.join('; ') : true;
+  });
+  // Состояние не записывается (решение техлида Р9 E0-12AB, п.8): updateState отдаёт отказ, markGates бросает - прогон
+  // не может молча оставить прежнюю отметку и выйти с 0. Недоступность - обычный файл на месте каталога состояния, а
+  // не chmod: права под uid 0 запись не закрывают (ревью E0-12AB, круг 6)
+  check('gates.js из командной строки: каталог состояния - обычный файл - красную до первого гейта не записать: код 1, ни одного гейта, в stderr «отметку записать не удалось, прежняя осталась (запись .qa-state не удалась: …)», файл не тронут', () => {
+    const all = gateRunCases();
+    const x = all.cli.stateLocked;
+    const why = [];
+    if (x.hung || x.code !== 1) why.push(cliSeen(x));
+    if (/^=== sf \//m.test(x.out)) why.push('гейты запускались при незаписанной отметке');
+    if (!/gates\.js: отметку записать не удалось, прежняя осталась \(запись \.qa-state не удалась: [^\n]*\) - гейты не запускались, код прогона 1; не коммить до полного прогона с отметкой\./.test(x.err)) why.push('отказ записи и «не коммить» не названы в stderr: ' + JSON.stringify(x.err.slice(-300)));
+    if (all.stateFileBody !== STATE_FILE_BODY) why.push('файл на месте каталога состояния изменён: ' + JSON.stringify(all.stateFileBody));
+    return why.length ? why.join('; ') : true;
+  });
+  // Красная до первого гейта (решение техлида Р-4 E0-12AE): не записалась - прогон не начинается, прежняя зелёная на месте
+  check('gates.js из командной строки: красную отметку до первого гейта записать не удалось (SF_PROBE_MARK_FAIL) - код 1, ни одного гейта, «отметку записать не удалось, прежняя осталась» в stderr, прежняя зелёная отметка на месте', () => {
+    const all = gateRunCases();
+    const x = all.cli.preMarkFail;
+    const g = all.marks.preMarkFail;
+    const why = [];
+    if (x.hung || x.code !== 1) why.push(cliSeen(x));
+    if (/^=== sf \//m.test(x.out)) why.push('гейты запускались при незаписанной отметке');
+    if (!/gates\.js: отметку записать не удалось, прежняя осталась \(markGates EIO \(проба\)\) - гейты не запускались, код прогона 1; не коммить до полного прогона с отметкой\./.test(x.err)) why.push('отказ и «прежняя осталась» не названы в stderr: ' + JSON.stringify(x.err.slice(-300)));
+    if (!g || JSON.stringify(g) !== JSON.stringify(SEED_GREEN)) why.push('отметка ' + JSON.stringify(g) + ', а запись падала - ждали прежнюю зелёную нетронутой');
+    return why.length ? why.join('; ') : true;
+  });
+  // Снятие без обработчика (ревью E0-12AB, круг 4; решение техлида Р-4 E0-12AE): во время прогона отметка уже красная,
+  // и SIGKILL/TerminateProcess оставляет её, а не прежнюю зелёную
+  check('gates.js из командной строки: полный прогон при прежней зелёной отметке - во время гейта отметка красная (код 1 по меткам до очереди), снятый без обработчика (SIGKILL, на Windows TerminateProcess) прогон оставляет её красной', () => {
+    const all = gateRunCases();
+    const x = all.cli.fullKill;
+    const g = all.marks.fullKill;
+    const seen = all.killSeen;
+    const why = [];
+    if (x.hung) why.push(cliSeen(x));
+    if (!/^=== sf \/ p-kill:/m.test(x.out)) why.push('гейт p-kill не запускался - проба ничего не доказывает: ' + cliSeen(x));
+    if (x.code === 0 || /Все гейты прошли|Сводка:/.test(x.out)) why.push('gates.js дошёл до итога - снят не был: ' + cliSeen(x));
+    if (/gates\.js прерван/.test(x.err)) why.push('обработчик сигнала сработал - снятие не «без обработчика»: ' + JSON.stringify(x.err.slice(-200)));
+    if (!redBeforeQueue(seen)) why.push('во время гейта отметка ' + JSON.stringify(seen) + ', ждали красную (код 1 по меткам до очереди) вместо прежней зелёной');
+    if (!redBeforeQueue(g)) why.push('после снятия отметка ' + JSON.stringify(g) + ', ждали красную (код 1 по меткам до очереди) вместо прежней зелёной');
+    return why.length ? why.join('; ') : true;
+  });
+  // Файл появился между началом main() и очередью (ревью E0-12AB, круг 6): гейты его видели - не сдвиг, отметка зелёная
+  check('gates.js из командной строки: файл диффа появился до очереди (при выборе гейтов) - не сдвиг: код 0, отметка с кодом 0 по меткам с этим файлом, без «Дифф изменился»', () => {
+    const all = gateRunCases();
+    const x = all.cli.earlyTouch;
+    const g = all.marks.earlyTouch;
+    const H = require('./diff-hash.js');
+    const why = [];
+    if (!all.during.earlyTouch) why.push('during.txt не создан - файл не появился до очереди, проба ничего не доказывает');
+    if (x.hung || x.code !== 0) why.push(cliSeen(x));
+    if (/Дифф изменился/.test(x.out)) why.push('файл, появившийся до очереди, назван сдвигом: ' + JSON.stringify(x.out.slice(-300)));
+    if (!g || g.code !== 0 || g.hash !== H.diffHash(g.files) || JSON.stringify(g.files) !== JSON.stringify(['sf/b.txt', 'sf/during.txt'])) why.push('отметка ' + JSON.stringify(g) + ', ждали код 0 по меткам sf/b.txt, sf/during.txt');
+    return why.length ? why.join('; ') : true;
+  });
+  // Файл появился после выбора гейтов (решение техлида Р-5 E0-12AE): выбор его не видел - гейты не запускаются, красная
+  check('gates.js из командной строки: файл диффа появился после выбора гейтов (второй снимок меток) - код 1, «Дифф изменился во время прогона: sf/during.txt», ни одного гейта, отметка с кодом 1 по меткам с этим файлом вместо прежней зелёной', () => {
+    const all = gateRunCases();
+    const x = all.cli.lateTouch;
+    const g = all.marks.lateTouch;
+    const H = require('./diff-hash.js');
+    const why = [];
+    if (!all.during.lateTouch) why.push('during.txt не создан - файл не появился после выбора, проба ничего не доказывает');
+    if (x.hung || x.code !== 1) why.push(cliSeen(x));
+    if (/^=== sf \//m.test(x.out)) why.push('гейты запускались по выбору, который файла не видел');
+    if (!/Дифф изменился во время прогона: sf\/during\.txt - появились после выбора гейтов, выбор их не видел; гейты не запускались, записана отметка о красном прогоне \(код 1\)/.test(x.out)) why.push('нет строки «Дифф изменился во время прогона: sf/during.txt …»: ' + JSON.stringify(x.out.slice(-300)));
+    if (!g || g.code !== 1 || g.hash !== H.diffHash(g.files) || JSON.stringify(g.files) !== JSON.stringify(['sf/b.txt', 'sf/during.txt'])) why.push('отметка ' + JSON.stringify(g) + ', ждали код 1 по меткам sf/b.txt, sf/during.txt');
+    return why.length ? why.join('; ') : true;
+  });
+  // unseenLabels (решение техлида Р-5 E0-12AE): метка второго снимка вне первого снимка и вне выбора - сдвиг; в любом из них - нет
+  check('gates.js unseenLabels: метка второго снимка, которой нет ни в первом, ни в выборе гейтов (L.label), - сдвиг (отказ); метка из первого снимка или из выбора, в том числе репозитория с вложенным именем, - не сдвиг (пропуск)', () => {
+    const { unseenLabels } = gatesModule();
+    if (typeof unseenLabels !== 'function') return 'gates.js не экспортирует unseenLabels';
+    const sf = { name: 'sf' };
+    const nested = { name: 'sf/x' };
+    const cases = [
+      ['отказ: ни там, ни там', [['sf/b.txt'], ['sf/b.txt', 'sf/late.txt'], [{ repo: sf, files: ['b.txt'] }]], ['sf/late.txt']],
+      ['пропуск: в первом снимке', [['sf/b.txt', 'sf/old.txt'], ['sf/b.txt', 'sf/old.txt'], [{ repo: sf, files: ['b.txt'] }]], []],
+      ['пропуск: в выборе', [['sf/b.txt'], ['sf/b.txt', 'sf/early.txt'], [{ repo: sf, files: ['b.txt', 'early.txt'] }]], []],
+      ['пропуск: выбор вложенного репозитория', [[], ['sf/x/a.txt'], [{ repo: nested, files: ['a.txt'] }]], []],
+      ['отказ: имя файла выбора в другом репозитории', [[], ['sf/a.txt'], [{ repo: nested, files: ['a.txt'] }]], ['sf/a.txt']],
+    ];
+    const miss = cases.map(([form, args, want]) => [form, unseenLabels(...args), want]).filter(([, got, want]) => JSON.stringify(got) !== JSON.stringify(want));
+    return miss.length ? miss.map(([form, got, want]) => form + ': ' + JSON.stringify(got) + ', ждали ' + JSON.stringify(want)).join('; ') : true;
+  });
+  // Отказ записи красной в обработчике сигнала (ревью E0-12AB, круг 4): так и сказано, отметка - красная до первого гейта
+  check('gates.js из командной строки: полный прогон прерван SIGINT, запись красной отметки в обработчике упала - код 130, в stderr «красную отметку записать не удалось (…), осталась красная отметка этого прогона, записанная до первого гейта - не коммить», отметка - красная до первого гейта', () => {
+    const all = gateRunCases();
+    const x = all.cli.fullSignalMarkFail;
+    const g = all.marks.fullSignalMarkFail;
+    const w = all.watch.fullSigFail;
+    const why = [];
+    if (x.hung || x.code !== 130) why.push(cliSeen(x));
+    if (!w.started) why.push('внук гейта не стартовал - сигнал не послан, проба ничего не доказывает');
+    if (w.alive === null) why.push(aliveNullWhy(w));
+    if (w.alive) why.push('внук ' + w.pid + ' жив после выхода gates.js - дерево гейта не снято');
+    if (!/gates\.js прерван \(SIGINT\): снято деревьев гейтов - 1, красную отметку записать не удалось \(markGates EIO \(проба\)\), в \.qa-state осталась красная отметка этого прогона, записанная до первого гейта \(код 1\) - не коммить до полного прогона с отметкой/.test(x.err)) why.push('отказ записи и «не коммить» не названы в stderr: ' + JSON.stringify(x.err.slice(-300)));
+    if (!redBeforeQueue(g)) why.push('отметка ' + JSON.stringify(g) + ', ждали красную до первого гейта (код 1 по меткам до очереди)');
     return why.length ? why.join('; ') : true;
   });
   // Сигнал в полном прогоне (ревью E0-12AB, круг 3; решение техлида Р7): прежняя зелёная отметка не переживает
@@ -2048,32 +2207,6 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   /**
-   * Строковые литералы исходника JS ('…', "…", `…`) через перевод строки - строки вывода и подсказки;
-   * комментарии пропускаются (докблок использования gates.js - справка терминала, не подсказка).
-   * Регэксп-литералы не разбираются: кавычка внутри регэкспа сбила бы разбор (в gates.js таких нет).
-   */
-  function sourceLiterals(src) {
-    const s = String(src);
-    const out = [];
-    let i = 0;
-    while (i < s.length) {
-      const c = s[i];
-      if (c === '/' && s[i + 1] === '/') {
-        const e = s.indexOf('\n', i);
-        i = e < 0 ? s.length : e;
-      } else if (c === '/' && s[i + 1] === '*') {
-        const e = s.indexOf('*/', i + 2);
-        i = e < 0 ? s.length : e + 2;
-      } else if (c === "'" || c === '"' || c === '`') {
-        let j = i + 1;
-        while (j < s.length && s[j] !== c) j += s[j] === '\\' ? 2 : 1;
-        out.push(s.slice(i, j + 1));
-        i = j + 1;
-      } else i++;
-    }
-    return out.join('\n');
-  }
-  /**
    * Вызовы gates.js без фона в тексте name (E0-12AB; строка TECH_DEBT 21.10.2026 T2/T4/L-014): каждый вызов -
    * node, необязательная кавычка, `$CLAUDE_PROJECT_DIR/` или `./`, .claude/hooks/gates.js (разделитель / или \) -
    * вне формы --list этого вызова (флаги вызова - до кавычки, обратной кавычки, скобки, ;, |, & или конца
@@ -2120,7 +2253,7 @@ function registerGateRunProbes(ctx) {
   // Полный прогон дольше предела foreground-вызова Bash: текст, который велит гнать gates.js (команды
   // обвязки, подсказка report-honesty.js и подсказка частичного прогона gates.js), велит гнать его в фоне,
   // иначе инструмент снимет gates.js раньше предела гейта - без имени гейта и сводки (E0-12M, C2, D5).
-  // У gates.js смотрятся строковые литералы (sourceLiterals): докблок использования - справка терминала.
+  // У gates.js смотрятся строковые литералы (sourceLiterals, selftest-source.js): докблок использования - справка терминала.
   check('команды, report-honesty.js и подсказки gates.js, которые велят гнать gates.js, велят гнать его в фоне (run_in_background: true после вызова, на его строке или следующей)', () => {
     const dir = path.join(CLAUDE, 'commands');
     const files = fs.readdirSync(dir).filter((n) => n.endsWith('.md')).sort().map((n) => [n, fs.readFileSync(path.join(dir, n), 'utf8')]);

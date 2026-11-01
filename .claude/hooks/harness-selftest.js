@@ -71,6 +71,26 @@ const SELFTEST_MODULES = [
     exit: 'gateRunner - код дочернего процесса: его exit - выход ребёнка с готовым итогом, а не самопроверки',
   },
   { file: 'selftest-gates-run.js', load: 'gates' },
+  {
+    file: 'selftest-state.js',
+    load: null,
+    why: 'пробы записи .qa-state (ADR 0016): раздел проб Stop-хуков грузит его loadSelftestModule и зовёт registerStateProbes',
+  },
+  {
+    file: 'selftest-state-static.js',
+    load: null,
+    why: 'статические пробы записи .qa-state (запись мимо updateState, реестр писателей ADR 0016): раздел проб Stop-хуков грузит его loadSelftestModule и зовёт registerStateStaticProbes',
+  },
+  {
+    file: 'selftest-source.js',
+    load: null,
+    why: 'общий лексер JS статических проб (codeOnly, sourceLiterals): его берут selftest-state-static.js и selftest-gates-run.js, этот файл - нет',
+  },
+  {
+    file: 'selftest-state-runner.js',
+    load: null,
+    why: 'дочерний node проб записи .qa-state (stateRunner из selftest-state.js); selftest-state.js берёт из него только RESULT_PREFIX и CASE_CAP_MS',
+  },
   { file: 'selftest-tree-graph.js', load: 'gates' },
   { file: 'selftest-roots.js', load: 'gates' },
   { file: 'selftest-int-cases.js', load: 'gates' },
@@ -553,6 +573,7 @@ const REQUIRE_NOT_EDGE = [
   { file: 'selftest-gates-run.js', re: /^' \+ JSON\.stringify\(file\) \+ '\)/, why: 'gates.js пробы require в дочернем node - хук HOOK_FILES' },
   { file: 'selftest-gate-runner.js', re: /^cfg\.gatesFile\)/, why: 'gates.js в дочернем node проб запуска - хук HOOK_FILES' },
   { file: 'selftest-gate-runner.js', re: /^<этот файл>\)/, why: 'текст комментария' },
+  { file: 'selftest-state.js', re: /^' \+ JSON\.stringify\(path\.join\(HOOKS, file\)\) \+ '\)/, why: 'модуль каталога хуков (lib.js, diff-hash.js) в программе дочернего node проб записи состояния (reqOf)' },
 ];
 /**
  * Рёбра текста text модуля хуков file: edges - файлы каталога хуков, которые он грузит (пути без ./);
@@ -856,7 +877,9 @@ function snapshotPrint(abs, ignored, io) {
  */
 const TREE_NOT_COMPARED = [
   { path: '.claude/.qa-state', why: 'боевое состояние хуков сессии: пишут Stop- и PostToolUse-хуки во время фонового прогона; что пробы туда не пишут, держит run (hookStateGuard, решение техлида Р3 E0-12AA)' },
-  { prefix: '.claude/.qa-state.', suffix: '.tmp', why: 'временный файл атомарной записи .qa-state (lib.js: <путь>.<pid>.tmp) тех же хуков сессии' },
+  { prefix: '.claude/.qa-state.', suffix: '.tmp', why: 'временные файлы .qa-state тех же хуков сессии (lib.js: <путь>.<pid>.tmp атомарной записи, <путь>.lock-<токен>.tmp отодвинутой блокировки)' },
+  { path: '.claude/.qa-state.lock', why: 'блокировка read-modify-write .qa-state (lib.js updateState, docs/adr/0016-qa-state-writes.md): её берут и снимают те же хуки сессии во время фонового прогона' },
+  { prefix: '.claude/.qa-state.broken-', suffix: '', why: 'запасной маркер поломки Stop-хука (lib.js noteHookHealth, решение техлида Р-6 E0-12AE): его пишет и снимает guard Stop-хука сессии во время фонового прогона; имя без «/»' },
   { prefix: 'tasks/', why: 'файлы дела: их пишет оркестратор и агенты, пока идут гейты; пробы в tasks/ не пишут' },
   { path: '.claude/.task-current', why: 'путь к файлу дела текущей задачи: его пишет оркестратор (/auto, /task), пока идут гейты; пробы его не пишут' },
 ];
@@ -1056,6 +1079,9 @@ const ctx = Object.freeze({
   run, spawn: LAUNCH.spawn, git, gitStrict, gitLive, inLiveTree, tempDir, put, releaseTemp, holdTemp, unholdTemp, dropFailures: () => DROP_FAILURES.length, absent, readJson, copyHooksTo,
   killLiveChildren, killLiveChildrenOnExit,
   repoRules,
+  // модули самопроверки (перечень и этот файл): вне сверки записи .qa-state мимо updateState (selftest-state-static.js)
+  SELFTEST_FILES: SELFTEST_MODULES.map((m) => m.file).concat(['harness-selftest.js']),
+  mkTranscript,
 });
 /**
  * Модули сборки проб гейтов по ключам deps - из всего перечня по имени, а не из отобранных по load
@@ -2095,6 +2121,11 @@ check('writeState: rename падает EPERM - три попытки, затем
     const left = fs.readdirSync(dir).filter((f) => f.endsWith('.tmp'));
     return left.length ? 'остался временный файл: ' + left.join(',') : true;
   }));
+// Пробы записи .qa-state под блокировкой .qa-state.lock (docs/adr/0016-qa-state-writes.md, E0-12AE)
+const STATE_PROBES = loadSelftestModule('selftest-state.js');
+if (STATE_PROBES) STATE_PROBES.registerStateProbes(ctx);
+const STATE_STATIC_PROBES = loadSelftestModule('selftest-state-static.js');
+if (STATE_STATIC_PROBES) STATE_STATIC_PROBES.registerStateStaticProbes(ctx);
 const SEED_QA = Object.assign({}, SEED, { lastQa: { sentinel: 'selftest' } });
 const keptQa = (st) => kept(st) && st.lastQa && st.lastQa.sentinel === 'selftest';
 check('answer-length и remind-format: испорченные lengthNotes (массив, строка, null, text числом) - код 0, lastQa/lastGates на месте', () =>
@@ -2280,9 +2311,12 @@ check('сверка дерева: отпечаток ссылки на файл 
 
 /**
  * Состав TREE_NOT_COMPARED (TECH_DEBT 23.10.2026 E0-12T, решение техлида B6): только пути, которые
- * пишет сессия, - боевой .qa-state (L.statePath без SF_HOOK_STATE_DIR), его временный файл атомарной
- * записи (lib.js: <путь>.<pid>.tmp), файлы дела tasks/ и .claude/.task-current; каждый из них - в
- * commitGate.forbiddenPaths (rules.common.json: сессия пишет, в коммит не идёт). Запись иной формы
+ * пишет сессия, - боевой .qa-state (L.statePath без SF_HOOK_STATE_DIR), его временные файлы (lib.js:
+ * <путь>.<pid>.tmp атомарной записи и <путь>.lock-<токен>.tmp отодвинутой блокировки), блокировка записи
+ * (<путь>.lock, ADR 0016), запасные маркеры поломки Stop-хуков (<путь>.broken-<имя>, решение техлида Р-6 E0-12AE),
+ * файлы дела tasks/ и .claude/.task-current; каждый из них - своим шаблоном в
+ * commitGate.forbiddenPaths (rules.common.json: сессия пишет, в коммит не идёт; ревью E0-12AE, круг 1, Б8:
+ * шаблон .qa-state временный файл и блокировку не покрывает). Запись иной формы
  * (каталог артефакта .turbo/, dist/, путь с * ? {) - отказ: ложный красный от фонового процесса в
  * игнорируемых файлах принят (B6), исключений каталогов артефактов, glob и флагов нет. Путь сессии,
  * которого в list нет, - тоже отказ: перечень держит каждый из них, а не только допускает (решение
@@ -2292,7 +2326,9 @@ function treeNotComparedViolations(list, forbidden) {
   const stateRel = path.relative(ROOT, LIVE_STATE).split(path.sep).join('/');
   const session = [
     { form: { path: stateRel }, backing: stateRel },
-    { form: { prefix: stateRel + '.', suffix: '.tmp' }, backing: stateRel },
+    { form: { prefix: stateRel + '.', suffix: '.tmp' }, backing: stateRel + '.*.tmp' },
+    { form: { path: stateRel + '.lock' }, backing: stateRel + '.lock' },
+    { form: { prefix: stateRel + '.broken-', suffix: '' }, backing: stateRel + '.broken-*' },
     { form: { prefix: 'tasks/' }, backing: 'tasks/**' },
     { form: { path: '.claude/.task-current' }, backing: '.claude/.task-current' },
   ];
@@ -2307,42 +2343,44 @@ function treeNotComparedViolations(list, forbidden) {
   for (const s of session) if (!list.some((x) => keyOf(x) === keyOf(s.form))) bad.push(keyOf(s.form) + ' - путь, который пишет сессия, нет в перечне');
   return bad;
 }
-check('сверка дерева: TREE_NOT_COMPARED - только пути, которые пишет сессия (боевой .qa-state, его .<pid>.tmp, tasks/, .claude/.task-current; каждый в перечне и в forbiddenPaths), без glob и каталогов артефактов (проба отказа - .turbo/, dist/*.js, недостающие пути сессии)', () => {
+check('сверка дерева: TREE_NOT_COMPARED - только пути, которые пишет сессия (боевой .qa-state, его .<pid>.tmp, .lock и маркеры .broken-<имя>, tasks/, .claude/.task-current; каждый в перечне и в forbiddenPaths), без glob и каталогов артефактов (проба отказа - .turbo/, dist/*.js, .lock без своего шаблона в forbiddenPaths, недостающие пути сессии)', () => {
   const forbidden = (common && common.commitGate && common.commitGate.forbiddenPaths) || [];
   const live = treeNotComparedViolations(TREE_NOT_COMPARED, forbidden);
   if (live.length) return live.join('; ');
-  const got = treeNotComparedViolations([{ prefix: '.turbo/' }, { path: 'dist/*.js' }, { path: '.claude/.task-current' }], forbidden.filter((g) => g !== '.claude/.task-current'));
   const stateRel = path.relative(ROOT, LIVE_STATE).split(path.sep).join('/');
+  const got = treeNotComparedViolations([{ prefix: '.turbo/' }, { path: 'dist/*.js' }, { path: '.claude/.task-current' }, { path: stateRel + '.lock' }], forbidden.filter((g) => g !== '.claude/.task-current' && g !== stateRel + '.lock'));
   const missing = (key) => key + ' - путь, который пишет сессия, нет в перечне';
   const want = [
     '[null,".turbo/",null] - не путь, который пишет сессия (решение B6: каталоги артефактов, glob и флаги не вводить)',
     '["dist/*.js",null,null] - не путь, который пишет сессия (решение B6: каталоги артефактов, glob и флаги не вводить)',
     '[".claude/.task-current",null,null] - .claude/.task-current нет в commitGate.forbiddenPaths',
+    JSON.stringify([stateRel + '.lock', null, null]) + ' - ' + stateRel + '.lock нет в commitGate.forbiddenPaths',
     missing(JSON.stringify([stateRel, undefined, undefined])),
     missing(JSON.stringify([undefined, stateRel + '.', '.tmp'])),
+    missing(JSON.stringify([undefined, stateRel + '.broken-', ''])),
     missing('[null,"tasks/",null]'),
   ];
   return JSON.stringify(got) === JSON.stringify(want) || 'сверка слепа: ' + JSON.stringify(got);
 });
 /**
  * Исключения сверки дерева (ОВ2 техлида E0-12T): на временном репозитории с .gitignore как у
- * репозитория запись в tasks/x.md, .claude/.qa-state и .claude/.qa-state.<pid>.tmp молчит (пропуск),
+ * репозитория запись в tasks/x.md, .claude/.qa-state, .claude/.qa-state.<pid>.tmp и .claude/.qa-state.lock молчит (пропуск),
  * а соседние пути - docs/tasks/x.md, tasks.md, .claude/.qa-state.bak, .claude/x.tmp,
- * .claude/.qa-state.a/b.tmp - названы (охват). У каждой записи перечня - причина.
+ * .claude/.qa-state.a/b.tmp, .claude/.qa-state.lock.bak - названы (охват). У каждой записи перечня - причина.
  */
-check('сверка дерева: TREE_NOT_COMPARED - tasks/, .claude/.qa-state и его .<pid>.tmp молчат, соседние пути названы, у каждой записи причина', () => {
+check('сверка дерева: TREE_NOT_COMPARED - tasks/, .claude/.qa-state, его .<pid>.tmp, .lock и маркер .broken-<имя> молчат, соседние пути названы, у каждой записи причина', () => {
   const noWhy = TREE_NOT_COMPARED.filter((x) => typeof x.why !== 'string' || !x.why);
   if (noWhy.length) return 'запись без причины: ' + JSON.stringify(noWhy);
   const dir = tempDir('repo');
   try {
     const inDir = (args) => gitStrict(['-c', 'user.name=selftest', '-c', 'user.email=selftest@localhost', '-c', 'core.autocrlf=false'].concat(args), { cwd: dir, isolated: true });
     inDir(['init', '-q', '--template=']);
-    fs.writeFileSync(path.join(dir, '.gitignore'), '/tasks/\n.claude/.qa-state\n.claude/.qa-state.*.tmp\n');
+    fs.writeFileSync(path.join(dir, '.gitignore'), '/tasks/\n.claude/.qa-state\n.claude/.qa-state.*.tmp\n.claude/.qa-state.lock\n.claude/.qa-state.broken-*\n');
     inDir(['add', '.']);
     inDir(['commit', '-q', '-m', 'probe']);
     const before = repoSnapshot(dir);
-    const silent = ['tasks/x.md', '.claude/.qa-state', '.claude/.qa-state.123.tmp'];
-    const named = ['docs/tasks/x.md', 'tasks.md', '.claude/.qa-state.bak', '.claude/x.tmp', '.claude/.qa-state.a/b.tmp'];
+    const silent = ['tasks/x.md', '.claude/.qa-state', '.claude/.qa-state.123.tmp', '.claude/.qa-state.lock', '.claude/.qa-state.broken-probe-hook'];
+    const named = ['docs/tasks/x.md', 'tasks.md', '.claude/.qa-state.bak', '.claude/x.tmp', '.claude/.qa-state.a/b.tmp', '.claude/.qa-state.lock.bak', '.claude/.qa-state.broken-a/b'];
     for (const rel of silent.concat(named)) put(dir, rel, 'x\n');
     const diff = treeDiff(before, repoSnapshot(dir));
     const leaked = diff.filter((line) => silent.some((rel) => line.endsWith(' ' + rel)));

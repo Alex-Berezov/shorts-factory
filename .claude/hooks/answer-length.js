@@ -15,7 +15,8 @@
  * (stop_hook_active): сам хук не блокирует, петли нет, а замечание должно описывать
  * ответ, который владелец увидит. Ответ в пределах порога или без текста снимает
  * замечание своей сессии. Без session_id на входе хук ничего не пишет: адресата нет.
- * Состояние пишется, только если оно изменилось.
+ * Состояние пишется, только если оно изменилось, и только через L.updateState (блокировка .qa-state.lock,
+ * docs/adr/0016-qa-state-writes.md): блокировку не взять - замечание не пишется, выход нулевой.
  *
  * Порог один на все репозитории: ответ у агента общий, а не отдельный на каждый проект.
  * Ничего не блокирует, выход всегда нулевой.
@@ -72,9 +73,11 @@ L.guard(async () => {
 
   const note = noteFor(L.lastAssistantText(input && input.transcript_path));
 
-  const s = L.readState();
-  const changed = note
-    ? L.putLengthNote(s, sessionId, note, Date.now())
-    : L.dropLengthNote(s, sessionId);
-  if (changed) L.writeState(s);
+  // read-modify-write под блокировкой состояния (docs/adr/0016-qa-state-writes.md); замечание то же или снимать
+  // нечего - блокировка не берётся (предикат changes - та же операция на копии, прочитанной без блокировки);
+  // отказ записи (блокировка занята дольше предела, состояние недоступно) - молчим и выходим с кодом 0:
+  // советчик не мешает работать
+  const at = Date.now();
+  const apply = (s) => (note ? L.putLengthNote(s, sessionId, note, at) : L.dropLengthNote(s, sessionId));
+  L.updateState(apply, { changes: apply });
 });

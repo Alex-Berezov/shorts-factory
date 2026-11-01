@@ -268,18 +268,43 @@ function movedWhy(moved, before, after) {
   return Array.from(why);
 }
 
-/** Отметка о прогоне /qa по текущему диффу. Зовётся из команды /qa. */
+/**
+ * Записать поля fields в состояние под блокировкой (L.updateState, docs/adr/0016-qa-state-writes.md) и
+ * вернуть записанное состояние. Запись не удалась (блокировка занята, состояние недоступно) - исключение:
+ * прежняя отметка осталась, и вызывающий обязан это сказать (решение техлида Р9 E0-12AB, п.8). Отметка
+ * пишется всегда - updateState без предиката, одно чтение под блокировкой (ревью E0-12AE, круг 2, CR8);
+ * updateState отдаёт только Error.
+ */
+function putMark(fields) {
+  let written = null;
+  const failed = L.updateState((state) => {
+    Object.assign(state, fields);
+    written = state;
+    return true;
+  });
+  if (failed) throw new Error('запись .qa-state не удалась: ' + failed.message);
+  return written;
+}
+
+/**
+ * Отметка о прогоне /qa по текущему диффу. Зовётся только из команды /qa (qa.md §6). Каждый вызов, кроме
+ * отметки, сам обнуляет счётчик правок и список посторонних файлов (edits = 0, strayFiles = []) - той же
+ * записью под блокировкой: новый вызывающий молча сотрёт их, звать markQa вне /qa нельзя. Запись не удалась -
+ * исключение, как у markGates: /qa не скажет «отметка поставлена» над прежним qaDiffHash.
+ */
 function markQa(hash) {
-  const state = L.readState();
+  // метки - до блокировки: git медленный, под блокировкой только файл
   const labels = diffLabels();
-  state.lastQa = new Date().toISOString();
-  state.qaDiffHash = hash || diffHash(labels);
-  // Список файлов, а не только отпечаток: по нему потом видно, что ревьюеры уже видели,
-  // и какие файлы появились после них. Без списка отказ может быть только «набор не тот»,
-  // без имени файла, - а по такому отказу непонятно, чинить его или он законный.
-  state.qaFiles = labels;
-  L.writeState(state);
-  return state;
+  return putMark({
+    lastQa: new Date().toISOString(),
+    qaDiffHash: hash || diffHash(labels),
+    // Список файлов, а не только отпечаток: по нему потом видно, что ревьюеры уже видели,
+    // и какие файлы появились после них. Без списка отказ может быть только «набор не тот»,
+    // без имени файла, - а по такому отказу непонятно, чинить его или он законный.
+    qaFiles: labels,
+    edits: 0,
+    strayFiles: [],
+  });
 }
 
 /**
@@ -287,24 +312,23 @@ function markQa(hash) {
  * диффа, по которому выбраны гейты (gates.js снимает их до очереди): отпечаток и files - по ним, а
  * не по диффу в конце прогона. Без аргумента - текущий дифф. labels не массив (прежняя форма
  * markGates(code, hash)) - исключение до записи: молча поставить отметку по диффу конца прогона нельзя.
- * Запись состояния не удалась (L.writeState вернул ошибку) - исключение: прежняя отметка осталась, и
- * gates.js обязан это сказать, а не «записана» (решение техлида Р9 E0-12AB, п.8).
+ * Запись состояния не удалась (L.updateState вернул ошибку: блокировка занята, состояние недоступно) -
+ * исключение: прежняя отметка осталась, и gates.js обязан это сказать, а не «записана» (решение техлида
+ * Р9 E0-12AB, п.8).
  */
 function markGates(code, labels) {
   if (labels !== undefined && !Array.isArray(labels)) {
     throw new TypeError('markGates(code, labels): labels - массив меток диффа или ничего, дано ' + typeof labels);
   }
-  const state = L.readState();
   const list = Array.isArray(labels) ? labels.slice().sort() : diffLabels();
-  state.lastGates = {
-    hash: diffHash(list),
-    files: list,
-    code: Number.isFinite(Number(code)) ? Number(code) : 1,
-    at: new Date().toISOString(),
-  };
-  const failed = L.writeState(state);
-  if (failed) throw new Error('запись .qa-state не удалась: ' + (failed.message || failed));
-  return state;
+  return putMark({
+    lastGates: {
+      hash: diffHash(list),
+      files: list,
+      code: Number.isFinite(Number(code)) ? Number(code) : 1,
+      at: new Date().toISOString(),
+    },
+  });
 }
 
 /**

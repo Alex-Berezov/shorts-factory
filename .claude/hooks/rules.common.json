@@ -59,6 +59,9 @@
       "data/**",
       "tasks/**",
       ".claude/.qa-state",
+      ".claude/.qa-state.*.tmp",
+      ".claude/.qa-state.lock",
+      ".claude/.qa-state.broken-*",
       ".claude/.task-current",
       ".claude/settings.local.json"
     ],

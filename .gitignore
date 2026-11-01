@@ -17,5 +17,7 @@ coverage/
 .claude/settings.local.json
 .claude/.qa-state
 .claude/.qa-state.*.tmp
+.claude/.qa-state.lock
+.claude/.qa-state.broken-*
 .claude/.task-current
 .claude-snapshots/

@@ -4,10 +4,10 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-11-01. **Не �
 
 ## Сводка
 
-- **Прогресс:** `████████░░░░░░░░░░░░░░░░░░░░░░` 41/158 задач, 40.4 / 174.9 оценочных дней.
+- **Прогресс:** `████████░░░░░░░░░░░░░░░░░░░░░░` 41/161 задач, 40.4 / 178.9 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
 - **В работе:** ничего — возьмите задачу из «Следующие»
-- **Заблокировано:** [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) (стоп 3 (сессия 2): после Б1 текстом по ОВ7 круг /qa нашёл 5 блокеров, внесённых Fix 3/сессией 2 (H7 запись итога без красной посадки, finally Б8, неверный инвариант Б1 о vitest, сигнал null в vitestAnswer, pid-заглушка died/twice); по решению техлида дифф на ветке wip/E0-12AC (33ebd46), main чистый; вопрос техлиду следующей сессии); [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-общим-модулем-harness-selftestjs-вне-weakeningexempt-смысл-weakeningexemptnote) (общие файлы .claude/hooks, ждёт коммита E0-12AC (ветка wip/E0-12AC))
+- **Заблокировано:** [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) (стоп 3 (сессия 2): после Б1 текстом по ОВ7 круг /qa нашёл 5 блокеров, внесённых Fix 3/сессией 2 (H7 запись итога без красной посадки, finally Б8, неверный инвариант Б1 о vitest, сигнал null в vitestAnswer, pid-заглушка died/twice); по решению техлида дифф на ветке wip/E0-12AC (33ebd46), main чистый; вопрос техлиду следующей сессии); [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-общим-модулем-harness-selftestjs-вне-weakeningexempt-смысл-weakeningexemptnote) (общие файлы .claude/hooks, ждёт коммита E0-12AC (ветка wip/E0-12AC)); [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) (стоп 3: после двух /fix и захода по Р-8 точечное /qa нашло новые блокеры (fail-open маркера поломки против HEAD, __proto__ в brokenHooks, ложные тексты про edits); дифф пакета А в рабочем дереве не закоммичен)
 
 ## Сейчас в работе
 
@@ -17,13 +17,13 @@ _Нет задач в работе._
 
 | Задача | Название | Оценка | Эпик |
 |---|---|---|---|
-| [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) | gates.js/diff-hash.js: долг ревью E0-12AB (кругов 1-4) | 1 д | E0 |
 | [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s14-формы-s15s16-сверка-носителей-замок-zod) | rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S14, формы S15/S16, сверка носителей, замок zod | 1 д | E0 |
 | [E0-12W](TECH_DEBT.md#e0-12w-общий-test-support-приложений-sfruntimetest-support-dev-command-child-run-imports-int-хелперы-asserthashed-adr-0011) | Общий test-support приложений: @sf/runtime/test-support (dev-command, child-run, imports), int-хелперы, assertHashed, ADR-0011 | 1.5 д | E0 |
 | [E0-12X](TECH_DEBT.md#e0-12x-трекер-и-ссылки-на-долг-optset-якорь-render---check-zod-tasksjson-filelinerefs-форма-ссылок-на-techdebt) | Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT | 1 д | E0 |
 | [E0-12Y](TECH_DEBT.md#e0-12y-appsapi-sfconfig-разрез-request-log-маршруты-отказов-в-одном-месте-requestid-сокетного-отказа-clientwentaway-под-замком-auth-без-броска-на-порядок-регистрации-loadenv-без-копии-processenv) | apps/api, @sf/config: разрез request-log, маршруты отказов в одном месте, requestId сокетного отказа, clientWentAway под замком, auth без броска на порядок регистрации, loadEnv без копии process.env | 1 д | E0 |
+| [E0-12Z](TECH_DEBT.md#e0-12z-sfcore-worker-healthcheck-api-test-support-один-ответ-на-неверные-часы-причина-healthcheck-по-классу-без-текста-клиента-waitforline-по-событию-и-responsetime-докблоки-queue-stats-и-порядок-стадий) | @sf/core, worker healthcheck, api, test-support: один ответ на неверные часы, причина healthcheck по классу без текста клиента, waitForLine по событию и responseTime, докблоки queue-stats и порядок стадий | 0.5 д | E0 |
 
-Взять в работу: `node scripts/tasks.mjs start E0-12AE`
+Взять в работу: `node scripts/tasks.mjs start E0-12V`
 
 ## Заблокировано
 
@@ -31,12 +31,13 @@ _Нет задач в работе._
 |---|---|---|
 | [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) | harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке) | стоп 3 (сессия 2): после Б1 текстом по ОВ7 круг /qa нашёл 5 блокеров, внесённых Fix 3/сессией 2 (H7 запись итога без красной посадки, finally Б8, неверный инвариант Б1 о vitest, сигнал null в vitestAnswer, pid-заглушка died/twice); по решению техлида дифф на ветке wip/E0-12AC (33ebd46), main чистый; вопрос техлиду следующей сессии |
 | [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-общим-модулем-harness-selftestjs-вне-weakeningexempt-смысл-weakeningexemptnote) | harness-selftest: статические пробы по AST общим модулем, harness-selftest.js вне weakeningExempt, смысл weakeningExemptNote | общие файлы .claude/hooks, ждёт коммита E0-12AC (ветка wip/E0-12AC) |
+| [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) | gates.js/diff-hash.js: долг ревью E0-12AB (кругов 1-4) | стоп 3: после двух /fix и захода по Р-8 точечное /qa нашло новые блокеры (fail-open маркера поломки против HEAD, __proto__ в brokenHooks, ложные тексты про edits); дифф пакета А в рабочем дереве не закоммичен |
 
 ## Прогресс по эпикам
 
 | | Эпик | Задачи | Дни (сделано / всего) | Документ |
 |---|---|---|---|---|
-| 🔄 | **E0** Каркас проекта и инфраструктура | `██████████░░` 41/49 | 40.4 / 48.4 | [30_E0_TASKS.md](30_E0_TASKS.md) |
+| 🔄 | **E0** Каркас проекта и инфраструктура | `█████████░░░` 41/52 | 40.4 / 52.4 | [30_E0_TASKS.md](30_E0_TASKS.md) |
 | ⬜ | **E12** Импорт ручной фазы (Phase 0) | `░░░░░░░░░░░░` 0/5 | 0 / 4 | [42_E12_TASKS.md](42_E12_TASKS.md) |
 | ⬜ | **E1** Source Radar | `░░░░░░░░░░░░` 0/12 | 0 / 15.5 | [31_E1_TASKS.md](31_E1_TASKS.md) |
 | ⬜ | **E2** Video Intelligence / Content DNA | `░░░░░░░░░░░░` 0/10 | 0 / 11 | [32_E2_TASKS.md](32_E2_TASKS.md) |
@@ -81,7 +82,10 @@ _Нет задач в работе._
 | ✅ | [E0-12AB](TECH_DEBT.md#e0-12ab-gatesjs-хвосты-e0-12m-lastgates-по-диффу-до-очереди-матрица-вердиктов-в-одном-месте-дубли-предиката-мёртвые-ветки---only-на-чистом-дереве-страж-exited-проба-фона) | gates.js: хвосты E0-12M (lastGates по диффу до очереди, матрица вердиктов в одном месте, дубли предиката, мёртвые ветки, --only на чистом дереве, страж exited, проба фона) | 1 д | ✅E0-12U ✅E0-12M | 2026-10-28 | 2026-11-01 |
 | ⛔ | [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) | harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке) | 1 д | ✅E0-12U ✅E0-12AA |  |  |
 | ⛔ | [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-общим-модулем-harness-selftestjs-вне-weakeningexempt-смысл-weakeningexemptnote) | harness-selftest: статические пробы по AST общим модулем, harness-selftest.js вне weakeningExempt, смысл weakeningExemptNote | 1 д | ✅E0-12AA |  |  |
-| ⬜ | [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) | gates.js/diff-hash.js: долг ревью E0-12AB (кругов 1-4) | 1 д | ✅E0-12AB |  |  |
+| ⛔ | [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) | gates.js/diff-hash.js: долг ревью E0-12AB (кругов 1-4) | 1 д | ✅E0-12AB | 2026-11-01 |  |
+| ⬜ | [E0-12AF](TECH_DEBT.md#e0-12af-diff-hashjs-отпечаток-диффа-по-содержимому-a-b-a-в-diffmoved-toctou-pathprint-метки-вложенных-репозиториев-репозиторий-без-коммитов-метка-каталог-gitlink) | diff-hash.js: отпечаток диффа по содержимому, A->B->A в diffMoved, TOCTOU pathPrint, метки вложенных репозиториев, репозиторий без коммитов, метка-каталог gitlink | 1.5 д | ⛔E0-12AE |  |  |
+| ⬜ | [E0-12AG](TECH_DEBT.md#e0-12ag-gatesjs-разрез-на-модули-ownheldbytes-verdicts-шаблоном-откат-isfull-вердикт-255-по-потомкам-копии-в-libjs-nonasciinames-через-envbylist-readwatch-при-pid-null) | gates.js: разрез на модули, own()/heldBytes, VERDICTS шаблоном, откат isFull, вердикт 255 по потомкам, копии в lib.js, nonAsciiNames через envByList, readWatch при pid null | 1.5 д | ⛔E0-12AC ⛔E0-12AE |  |  |
+| ⬜ | [E0-12AH](TECH_DEBT.md#e0-12ah-stop-хуки-fail-closed-guard-{stop-failclosed-name}-в-боевых-хуках-qa-statejs-из-libjs-хвосты-блокировки-qa-state) | Stop-хуки fail-closed: guard {stop, failClosed, name} в боевых хуках, qa-state.js из lib.js, хвосты блокировки .qa-state | 1 д | ⛔E0-12AE |  |  |
 | ✅ | [E0-12B](TECH_DEBT.md#e0-12b-общий-пакет-инфраструктуры-apiworker-logger-redact-redis-shutdown-фабрика-queue-примитив-дедлайна-чистка-публичных-экспортов) | Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-18 |
 | ✅ | [E0-12C](TECH_DEBT.md#e0-12c-гейт-compose-и-cli-migrate-таблица-правил-обязательные-postgresredis-юнит-check-compose-шаги-и-классы-ошибок-migrate-единый-appdockerfile-exec-форма-cmd) | Гейт compose и CLI migrate: таблица правил, обязательные postgres/redis, юнит check-compose, шаги и классы ошибок migrate, единый app.Dockerfile, exec-форма CMD | 1 д | ✅E0-13 ✅E0-12A | 2026-10-18 | 2026-10-18 |
 | ✅ | [E0-12D](TECH_DEBT.md#e0-12d-обвязка-harness-selftest-без-vm-u3-экспорт-selectgates-замки-на-форму-роутов-и-направление-зависимостей-contractsapi-client) | Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client | 0.5 д | ✅E0-13 | 2026-10-19 | 2026-10-19 |
