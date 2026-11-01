@@ -3,8 +3,9 @@
  * selftest-gate-runner.js - тело дочернего node проб запуска gates.js (E0-12AA, TECH_DEBT 23.10.2026
  * E0-12U круг 2: gateRunner вынесен из selftest-gates-run.js). Не хук: модуль самопроверки, который
  * исполняет только дочерний процесс (`node -e` пробы делает `require(<этот файл>).gateRunner(cfg)`, как
- * selftest-temp.js в решении техлида B4 E0-12T); процесс самопроверки берёт из него только суффикс
- * отметки старта STARTED_SUFFIX (selftest-gates-run.js) - при require модуль ничего не исполняет.
+ * selftest-temp.js в решении техлида B4 E0-12T); процесс самопроверки берёт из него только строки
+ * протокола - суффикс отметки старта STARTED_SUFFIX и строку выхода RUNNER_EXIT_MARK
+ * (selftest-gates-run.js) - при require модуль ничего не исполняет.
  *
  * Exit процесса здесь законен (поле exit записи в SELFTEST_MODULES): это выход ребёнка с готовым
  * итогом пробы. selftest-gates-run.js, который пишет строки проб в процессе самопроверки, - в
@@ -13,7 +14,7 @@
 
 const fs = require('fs');
 const L = require('./lib.js');
-const { envByList, makeChildRegistry, makeLauncher } = require('./selftest-children.js');
+const { envByList, exitLineHook, makeChildRegistry, makeLauncher } = require('./selftest-children.js');
 
 /**
  * Суффикс файла отметки старта внука проб (<pid-файл><STARTED_SUFFIX>): его пишет программа внука
@@ -21,6 +22,14 @@ const { envByList, makeChildRegistry, makeLauncher } = require('./selftest-child
  * одна строка протокола на обе стороны (решение техлида Р9 E0-12AA).
  */
 const STARTED_SUFFIX = '.started';
+
+/**
+ * Начало строки выхода ребёнка проб запуска (E0-12AC, как VITEST_EXIT_MARK дочернего vitest): ребёнок
+ * идёт в фоне (startDetached), и конец его ответа - целая строка <RUNNER_EXIT_MARK><код> после строки
+ * probe {…}, которую пишет обработчик exit, - и при готовом итоге, и при падении ребёнка. Ту же строку
+ * пишет ребёнок пробы runGate с поддельным процессом (selftest-gates-run.js берёт её отсюда).
+ */
+const RUNNER_EXIT_MARK = 'selftest-gate-runner-exit ';
 
 /**
  * Текст файла f или null, только если пути нет (L.statIfPresent - помощник «путь есть» обвязки, своей
@@ -58,6 +67,8 @@ function readIfPresent(f) {
  * Каждый случай ограничен capMs: зависший runGate - { hung }, а не зависшая самопроверка.
  */
 function gateRunner(cfg) {
+  // строка выхода - и после итога, и при падении ребёнка: процесс самопроверки ждёт её (awaitDetached)
+  exitLineHook(RUNNER_EXIT_MARK);
   const { runGate } = require(cfg.gatesFile);
   const launch = makeLauncher({ liveState: cfg.liveState });
   const reaper = makeChildRegistry({ kill: (c) => process.kill(c.pid, 'SIGKILL') });
@@ -206,4 +217,4 @@ function gcStartedAt(pidFile, read = readIfPresent) {
   return Number.isFinite(at) && at > 0 ? at : null;
 }
 
-module.exports = { NEXT_MS_LIMIT, STARTED_SUFFIX, gateRunner, gcStartedAt, nextMs, watchAlive };
+module.exports = { NEXT_MS_LIMIT, RUNNER_EXIT_MARK, STARTED_SUFFIX, gateRunner, gcStartedAt, nextMs, watchAlive };

@@ -17,7 +17,7 @@ const path = require('path');
 
 function registerGraphCases(ctx, gates) {
   const {
-    G, LISTING_MAX_BUFFER, ROOT, SKIPPED, check, refusalVerdict, refusedCheck, run, snapshotGate,
+    G, LISTING_MAX_BUFFER, ROOT, SKIPPED, check, put, refusalVerdict, refusedCheck, run, snapshotGate,
   } = ctx;
   const {
     GRAPH_GATE, graphVerdict, inputsGapBlind, manifestGapBlind, relUnder, rootsRefusal, trackedFiles,
@@ -250,6 +250,10 @@ function registerGraphCases(ctx, gates) {
   // shared идёт мимо (Р9 E0-12AA); запуск - только точка запуска самопроверки (opts.run), своей точки у
   // модуля нет. Кейс ставит shared при подменённом run только на своём временном корне - снимка корня
   // репозитория в кэше он не касается
+  // Ключ кэша (строка ниже, TECH_DEBT 28.10.2026 E0-12AA круг 3, Р9) - на том же временном корне: свой
+  // корень строке ниже дал бы ещё один каталог реестра (note «N каталогов» не меняется, решение техлида Р2
+  // E0-12AC); null - кейс ключа не дошёл до вопросов (их отказ назван в строке ниже)
+  let dryKeyCase = null;
   check('граф turbo: кэш dry прогона - только окружение процесса без подмены (снимок с opts.env кэш не читает и не пополняет); без opts.run - отказ', () => withTempRoot(FIXTURE, (root) => {
     let calls = 0;
     const run = () => {
@@ -264,10 +268,29 @@ function registerGraphCases(ctx, gates) {
     // build: процесс, процесс (кэш), env (мимо кэша); lint: env, затем процесс (env кэш не пополнил),
     // затем без shared (подменённый run - мимо кэша, хотя снимок lint в нём есть)
     const got = [ask(['build'], false), ask(['build'], false), ask(['build'], true), ask(['lint'], true), ask(['lint'], false), ask(['lint'], false, false)];
+    // ключ: build linux-x64 уже в кэше; win32-x64 - свой запуск, второй раз - из кэша; linux-arm64 - свой запуск
+    try {
+      put(root, 'node_modules/@turbo/linux-arm64/package.json', '{"name":"@turbo/linux-arm64"}');
+      put(root, 'node_modules/@turbo/linux-arm64/bin/turbo', '');
+      const before = calls;
+      const at = (platform, arch) => {
+        G.turboDry(['build'], { root, platform, arch, run, shared: true });
+        return calls - before;
+      };
+      dryKeyCase = { got: [at('linux', 'x64'), at('win32', 'x64'), at('win32', 'x64'), at('linux', 'arm64')] };
+    } catch (e) {
+      dryKeyCase = { error: (e && e.message) || String(e) };
+    }
     if (got.join() !== '1,1,2,3,4,5') return 'запусков после каждого вопроса ' + got.join(',') + ', ожидалось 1,1,2,3,4,5 (процесс, процесс из кэша, env мимо кэша, env, процесс после env, без shared мимо кэша)';
     return refusalVerdict(() => G.turboDry(['test'], { root, platform: 'linux', arch: 'x64' }),
       'turbo run test --dry=json: нет точки запуска (opts.run) - turbo зовётся только через run самопроверки');
   }));
+  check('граф turbo: кэш dry прогона - ключ с платформой и архитектурой (другая платформа или архитектура на том же корне - свой запуск turbo, та же - снимок из кэша)', () => {
+    if (!dryKeyCase) return 'кейс ключа не гонялся: корень строки «кэш dry прогона» выше не собрался (её отказ назван)';
+    if (dryKeyCase.error) return 'кейс ключа: ' + dryKeyCase.error;
+    const want = '0,1,1,2';
+    return dryKeyCase.got.join() === want || 'новых запусков turbo после вопросов linux-x64, win32-x64, win32-x64, linux-arm64: ' + dryKeyCase.got.join(',') + ', ожидалось ' + want + ' (снимок linux-x64 - из кэша, другая платформа и архитектура - свой запуск)';
+  });
   // dry из двух пакетов и постороннего: a#build (next build) зависит от b#build, c#build вне графа
   const task = (id, extra) => Object.assign({
     taskId: id,

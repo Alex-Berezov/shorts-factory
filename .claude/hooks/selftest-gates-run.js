@@ -6,7 +6,8 @@
  * вывода, сигналы, stdin), фон вызова gates.js в командах. Не хук: модуль самопроверки.
  *
  * При require модуль только объявляет: registerGateRunProbes(ctx) пишет строки через check из ctx в
- * прежнем порядке и отдаёт gatesModule - загрузчик gates.js для проб выбора гейтов (только после
+ * прежнем порядке (строки, которым нужен ответ ребёнка в фоне, - через checkLater: место то же, вердикт - в
+ * точке сбора прогона, E0-12AC) и отдаёт gatesModule - загрузчик gates.js для проб выбора гейтов (только после
  * зелёной пробы require). Тело дочернего node проб запуска - selftest-gate-runner.js (E0-12AA): этот
  * модуль работает в процессе самопроверки и выходит из процесса только через report() (NO_EXIT_FILES
  * harness-selftest.js); exit процесса в программах дочерних node собирается из частей (EXIT).
@@ -15,13 +16,20 @@
 const fs = require('fs');
 const path = require('path');
 // имя exit процесса для программ дочерних node - склеено один раз в selftest-children.js (L-042)
-const { PROCESS_EXIT: EXIT } = require('./selftest-children.js');
-// суффикс отметки старта внука - одна строка протокола с gcStartedAt (решение техлида Р9 E0-12AA); при
-// require модуль ничего не исполняет, exit - только в gateRunner дочернего node
-const { STARTED_SUFFIX } = require('./selftest-gate-runner.js');
+const { PROCESS_EXIT: EXIT, childFailure, childProgram, exitLineHook } = require('./selftest-children.js');
+// суффикс отметки старта внука - одна строка протокола с gcStartedAt (решение техлида Р9 E0-12AA), строка
+// выхода ребёнка в фоне (E0-12AC); при require модуль ничего не исполняет, exit - только в gateRunner
+// дочернего node
+const { RUNNER_EXIT_MARK, STARTED_SUFFIX } = require('./selftest-gate-runner.js');
+
+/**
+ * Предел пробы мелких кусков outputBuffer: 125 000 кусков - 0,1 с со срезом хвоста сдвигом индекса и 13,8 с
+ * с tail.shift на каждом (замер E0-12AC); 2 с - запас в 20 раз к первому и в 7 раз ниже второго.
+ */
+const OUTPUT_PIECES_LIMIT_MS = 2000;
 
 function registerGateRunProbes(ctx) {
-  const { CLAUDE, HOOKS, LIVE_STATE, ROOT, check, copyHooksTo, gitStrict, put, releaseTemp, repoRules, run, tempDir } = ctx;
+  const { CLAUDE, HOOKS, LIVE_STATE, ROOT, awaitDetached, check, checkLater, copyHooksTo, gitStrict, lazyStart, put, releaseTemp, repoRules, run, startDetached, tempDir } = ctx;
 
   /**
    * gates.js - модуль для проб и скрипт для человека: main() под require.main === module.
@@ -252,20 +260,17 @@ function registerGateRunProbes(ctx) {
    * Шпион считает и снимки диффа (H.diffSnapshot копии diff-hash.js) и аргументы taskkill.
    * Случаи E0-12AB (CLI_STAGE_TWO) - этап 2 ребёнка проб: после возврата всех случаев runGate и прежних
    * запусков (решение техлида Р4 E0-12AB), их нагрузка не сдвигает окна проб runGate.
-   * Результат и ошибка запоминаются: строки одного прогона не гоняют дочерний node заново.
+   * Результат и ошибка запоминаются (lazyStart): строки одного прогона не гоняют дочерний node заново.
    */
-  let gateRunResult = null;
-  function gateRunCases() {
-    if (!gateRunResult) {
-      try {
-        gateRunResult = { value: buildGateRunCases() };
-      } catch (e) {
-        gateRunResult = { error: e };
-      }
-    }
-    if (gateRunResult.error) throw gateRunResult.error;
-    return gateRunResult.value;
-  }
+  /**
+   * Старт ребёнка проб запуска в фоне (E0-12AC): подготовка дерева и startDetached - в точке прогона, где
+   * стоит первая строка-потребитель (после зелёной пробы require gates.js); отказ подготовки или старта
+   * запоминается и встаёт в каждую строку-потребитель тем же текстом. Ответ забирает gateRunCases() в
+   * точке сбора отложенных строк (checkLater) - ребёнок идёт параллельно остальным пробам прогона.
+   */
+  const gateRun = lazyStart(() => buildGateRunCases());
+  const startGateRunCases = gateRun.start;
+  const gateRunCases = gateRun.collect;
   const PROBE_SIGNALS = [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]];
   /** Запуски gates.js этапа 2 ребёнка проб (решение техлида Р4 E0-12AB); killPartial* - только на Windows. */
   const CLI_STAGE_TWO = ['touchNone', 'touched', 'touchedContent', 'touchedRed', 'markFail', 'markWriteFail', 'mainFail', 'labelsFail', 'stateLocked', 'nestedDir', 'fullSignal', 'remnant', 'onlyBothDirty', 'killPartial', 'killPartialOpen', 'killStatusOne'];
@@ -285,6 +290,18 @@ function registerGateRunProbes(ctx) {
     const dir = tempDir('rungate');
     // каталог состояния stateLocked, закрытый на запись: права возвращаются до удаления дерева пробы
     let lockedState = null;
+    const release = () => {
+      try {
+        if (lockedState !== null) {
+          fs.chmodSync(lockedState, 0o755);
+          fs.chmodSync(path.join(lockedState, '.qa-state'), 0o644);
+        }
+      } finally {
+        // папку держит не снятый процесс - его отказ назван строкой пробы; каталог остаётся в
+        // реестре: его снимет выход процесса, а не снятый назовёт проба «каталоги прогона»
+        releaseTemp(dir);
+      }
+    };
     try {
       const q = (p) => '"' + p + '"';
       const cmd = (...args) => [process.execPath].concat(args).map(q).join(' ');
@@ -650,52 +667,55 @@ function registerGateRunProbes(ctx) {
       const treeBefore = JSON.parse(String(before.stdout));
       const cfg = { gatesFile: path.join(HOOKS, 'gates.js'), cliGates: path.join(hooks, 'gates.js'), preload, dir, gates, cli, watch, watchMs: 1500, gcLifeMs: GC_LIFE_MS, liveState: LIVE_STATE };
       // настройки ребёнка - файлом, а не текстом -e: командная строка Windows - до 32 767 символов, и случаи
-      // круга 2 E0-12AB её переросли (spawnSync ENAMETOOLONG)
+      // круга 2 E0-12AB её переросли (spawnSync ENAMETOOLONG); форма программы - одна (childProgram)
       const cfgFile = put(dir, 'gate-runner.json', JSON.stringify(cfg));
-      const code = 'require(' + JSON.stringify(path.join(HOOKS, 'selftest-gate-runner.js')) + ').gateRunner(JSON.parse(require("fs").readFileSync(' + JSON.stringify(cfgFile) + ', "utf8")));';
-      // SF_SELFTEST_LEAK - метка окружения ребёнка вне белого списка: до gates.js она доходить не должна
-      const r = run(process.execPath, ['-e', code], { cwd: dir, timeout: 120000, killSignal: 'SIGKILL', env: Object.assign({}, process.env, { SF_SELFTEST_LEAK: 'leak' }) });
-      const m = /(?:^|\n)probe (\{.*\})$/.exec(String(r.stdout || ''));
-      if (!m) throw new Error('проба запуска гейтов не дошла до итога (код ' + r.status + '): ' + String(r.stderr || r.stdout || (r.error && r.error.message)).slice(0, 200));
-      const res = JSON.parse(m[1]);
-      res.markerWritten = fs.existsSync(marker);
-      res.sleepStarted = fs.existsSync(sleepStarted) ? Number(fs.readFileSync(sleepStarted, 'utf8')) : null;
-      res.cliMarkerWritten = fs.existsSync(cliMarker);
-      res.lastGates = {};
-      res.marks = {};
-      res.treeBefore = treeBefore;
-      res.spy = {};
-      for (const k of Object.keys(state)) {
-        const g = lastGatesIn(state[k]);
-        res.lastGates[k] = g ? g.code : null;
-        res.marks[k] = g;
-        res.spy[k] = fs.existsSync(spies[k]) ? JSON.parse(fs.readFileSync(spies[k], 'utf8')) : null;
-      }
-      res.grace = grace;
-      // правка «новый файл» в деревьях случаев отметки: была ли она (дифф ушёл от меток до очереди)
-      res.during = {};
-      for (const k of Object.keys(touchRoots)) res.during[k] = fs.existsSync(path.join(touchRoots[k], 'during.txt'));
-      // файлы вывода гейтов (saveLog) в каталоге sf-gates TEMP дерева пробы - до его удаления
-      res.logs = fs.readdirSync(logDir).filter((f) => /^gates-/.test(f)).map((f) => ({ name: f, text: fs.readFileSync(path.join(logDir, f), 'utf8') }));
-      res.tmpNames = fs.readdirSync(tmp);
-      res.logDirNames = fs.readdirSync(logDir);
-      res.logStats = res.logs.map((l) => ({ name: l.name, mode: fs.statSync(path.join(logDir, l.name)).mode }));
-      res.pruneLogNames = {};
-      for (const k of Object.keys(tmpPrune)) res.pruneLogNames[k] = fs.readdirSync(path.join(tmpPrune[k], 'sf-gates'));
-      const existingDir = path.join(tmpExisting, 'sf-gates');
-      res.existingLogs = fs.existsSync(existingDir) ? fs.readdirSync(existingDir).map((f) => ({ name: f, text: fs.readFileSync(path.join(existingDir, f), 'utf8') })) : [];
-      return res;
-    } finally {
-      try {
-        if (lockedState !== null) {
-          fs.chmodSync(lockedState, 0o755);
-          fs.chmodSync(path.join(lockedState, '.qa-state'), 0o644);
+      const code = childProgram(path.join(HOOKS, 'selftest-gate-runner.js'), 'gateRunner', JSON.stringify(cfgFile));
+      // SF_SELFTEST_LEAK - метка окружения ребёнка вне белого списка: до gates.js она доходить не должна;
+      // ребёнок - в фоне (startDetached), его ответ забирает collect() в точке сбора отложенных строк
+      const handle = startDetached(process.execPath, ['-e', code], {
+        dir, name: 'gate-runner', cwd: dir, env: Object.assign({}, process.env, { SF_SELFTEST_LEAK: 'leak' }),
+        exitMark: RUNNER_EXIT_MARK, what: 'selftest-gate-runner.js', label: 'selftest-gate-runner.js', timeoutMs: 120000,
+      });
+      return () => {
+        try {
+          const r = awaitDetached(handle);
+          const m = /(?:^|\n)probe (\{.*\})$/.exec(r.body);
+          if (!m) throw new Error('проба запуска гейтов не дошла до итога (код ' + r.status + '): ' + childFailure(r));
+          const res = JSON.parse(m[1]);
+          res.markerWritten = fs.existsSync(marker);
+          res.sleepStarted = fs.existsSync(sleepStarted) ? Number(fs.readFileSync(sleepStarted, 'utf8')) : null;
+          res.cliMarkerWritten = fs.existsSync(cliMarker);
+          res.lastGates = {};
+          res.marks = {};
+          res.treeBefore = treeBefore;
+          res.spy = {};
+          for (const k of Object.keys(state)) {
+            const g = lastGatesIn(state[k]);
+            res.lastGates[k] = g ? g.code : null;
+            res.marks[k] = g;
+            res.spy[k] = fs.existsSync(spies[k]) ? JSON.parse(fs.readFileSync(spies[k], 'utf8')) : null;
+          }
+          res.grace = grace;
+          // правка «новый файл» в деревьях случаев отметки: была ли она (дифф ушёл от меток до очереди)
+          res.during = {};
+          for (const k of Object.keys(touchRoots)) res.during[k] = fs.existsSync(path.join(touchRoots[k], 'during.txt'));
+          // файлы вывода гейтов (saveLog) в каталоге sf-gates TEMP дерева пробы - до его удаления
+          res.logs = fs.readdirSync(logDir).filter((f) => /^gates-/.test(f)).map((f) => ({ name: f, text: fs.readFileSync(path.join(logDir, f), 'utf8') }));
+          res.tmpNames = fs.readdirSync(tmp);
+          res.logDirNames = fs.readdirSync(logDir);
+          res.logStats = res.logs.map((l) => ({ name: l.name, mode: fs.statSync(path.join(logDir, l.name)).mode }));
+          res.pruneLogNames = {};
+          for (const k of Object.keys(tmpPrune)) res.pruneLogNames[k] = fs.readdirSync(path.join(tmpPrune[k], 'sf-gates'));
+          const existingDir = path.join(tmpExisting, 'sf-gates');
+          res.existingLogs = fs.existsSync(existingDir) ? fs.readdirSync(existingDir).map((f) => ({ name: f, text: fs.readFileSync(path.join(existingDir, f), 'utf8') })) : [];
+          return res;
+        } finally {
+          release();
         }
-      } finally {
-        // папку держит не снятый процесс - его отказ назван строкой пробы; каталог остаётся в
-        // реестре: его снимет выход процесса, а не снятый назовёт проба «каталоги прогона»
-        releaseTemp(dir);
-      }
+      };
+    } catch (e) {
+      release();
+      throw e;
     }
   }
   /** Случай пробы runGate словами для строки отказа. */
@@ -731,7 +751,10 @@ function registerGateRunProbes(ctx) {
     if (windowMs >= boundMs) return { why: 'вернулся через ' + (windowMs / 1000).toFixed(1) + ' с ' + from + ' - дольше окна и запаса' };
     return { note: (windowMs / 1000).toFixed(1) + ' с ' + from + ', ' + (x.ms / 1000).toFixed(1) + ' с от вызова' };
   }
-  check('gates.js runGate: команда дольше timeoutSec снята по пределу (код не 0, «снят по пределу», вернулся за предел + запас)', () => {
+  // ребёнок проб запуска - в фоне с этой точки (после зелёной пробы require gates.js); строки, которым
+  // нужен его ответ, - checkLater: их места в порядке объявления, вердикт - в точке сбора прогона
+  startGateRunCases();
+  checkLater('gates.js runGate: команда дольше timeoutSec снята по пределу (код не 0, «снят по пределу», вернулся за предел + запас)', () => {
     const all = gateRunCases();
     const x = all.gates.sleep;
     if (x.hung || x.code === 0 || !/снят по пределу 1 с/.test(x.tail)) return runGateSeen(x);
@@ -777,7 +800,7 @@ function registerGateRunProbes(ctx) {
       releaseTemp(dir);
     }
   });
-  check('gates.js runGate: снято всё дерево - внук, держащий вывод, мёртв после возврата', () => {
+  checkLater('gates.js runGate: снято всё дерево - внук, держащий вывод, мёртв после возврата', () => {
     const all = gateRunCases();
     const x = all.gates.tree;
     const w = all.watch.tree;
@@ -789,7 +812,7 @@ function registerGateRunProbes(ctx) {
   });
   // Оболочка вышла с 0, а остаток жил: код 0 только при закрывшемся самом выводе без снятия (D2/D3),
   // поэтому здесь код 1 на обеих системах, код оболочки - в тексте
-  check('gates.js runGate: оболочка вышла с 0, внук держит вывод - код 1, без «снят по пределу», остаток назван (POSIX - снят)', () => {
+  checkLater('gates.js runGate: оболочка вышла с 0, внук держит вывод - код 1, без «снят по пределу», остаток назван (POSIX - снят)', () => {
     const all = gateRunCases();
     const x = all.gates.orphan;
     const w = all.watch.orphan;
@@ -808,19 +831,19 @@ function registerGateRunProbes(ctx) {
     if (!/вышла с кодом 0, оставшиеся процессы её группы сняты/.test(x.tail)) return 'снятие остатка не названо: ' + runGateSeen(x);
     return { note: 'внук снят, ' + (x.ms / 1000).toFixed(1) + ' с' };
   });
-  check('gates.js runGate: команда в пределе - её код 0 и вывод, без слова «предел»', () => {
+  checkLater('gates.js runGate: команда в пределе - её код 0 и вывод, без слова «предел»', () => {
     const x = gateRunCases().gates.pass;
     if (x.hung || x.code !== 0 || !/\bok\b/.test(x.tail) || /предел/.test(x.tail)) return runGateSeen(x);
     return true;
   });
-  check('gates.js runGate: гейт без timeoutSec красный «нет предела timeoutSec», команда не запускалась', () => {
+  checkLater('gates.js runGate: гейт без timeoutSec красный «нет предела timeoutSec», команда не запускалась', () => {
     const all = gateRunCases();
     const x = all.gates.noLimit;
     if (x.hung || x.code === 0 || !/нет предела timeoutSec/.test(x.tail)) return runGateSeen(x);
     if (all.markerWritten) return 'команда гейта без предела запускалась (маркер-файл создан)';
     return true;
   });
-  check('gates.js runGate: болтливый гейт - вывод не больше головы и хвоста, обе границы на месте, срез назван и не режет символ', () => {
+  checkLater('gates.js runGate: болтливый гейт - вывод не больше головы и хвоста, обе границы на месте, срез назван и не режет символ', () => {
     const { limits } = gatesModule();
     const x = gateRunCases().gates.flood;
     if (x.hung || x.code !== 0) return runGateSeen(x);
@@ -833,7 +856,7 @@ function registerGateRunProbes(ctx) {
     if (x.replaced) why.push('в тексте U+FFFD - срез головы или хвоста разрезал символ UTF-8');
     return why.length ? why.join('; ') : { note: x.bytes + ' байт; ' + x.cut.slice(0, 60) };
   });
-  check('gates.js runGate: символ UTF-8, разрезанный между кусками stdout с куском stderr между ними, цел', () => {
+  checkLater('gates.js runGate: символ UTF-8, разрезанный между кусками stdout с куском stderr между ними, цел', () => {
     const x = gateRunCases().gates.split;
     if (x.hung || x.code !== 0) return runGateSeen(x);
     if (x.replaced || x.tail.indexOf('ПРИВЕТ-ЮНИКОД') === -1) return 'символ испорчен: ' + JSON.stringify(x.tail);
@@ -841,13 +864,13 @@ function registerGateRunProbes(ctx) {
   });
   // Окружение gates.js из командной строки - по белому списку (envByList, как у git проб; замечание ревью
   // E0-12AA L-030): метка окружения ребёнка проб вне списка до gates.js не доходит, переменные случая - доходят
-  check('gates.js из командной строки: окружение по белому списку - переменная родителя вне списка до gates.js не доходит, переменные случая доходят', () => {
+  checkLater('gates.js из командной строки: окружение по белому списку - переменная родителя вне списка до gates.js не доходит, переменные случая доходят', () => {
     const all = gateRunCases();
     const spy = all.spy.onlyClean;
     if (!spy) return 'шпион случая onlyClean не записан - SF_PROBE_SPY случая не дошёл до gates.js; ' + cliSeen(all.cli.onlyClean);
     return spy.leak === null || 'переменная родителя вне белого списка дошла до gates.js: SF_SELFTEST_LEAK=' + spy.leak;
   });
-  check('gates.js из командной строки: --only на чистом дереве гонит названный glob-гейт, код 0, прогон частичный', () => {
+  checkLater('gates.js из командной строки: --only на чистом дереве гонит названный glob-гейт, код 0, прогон частичный', () => {
     const all = gateRunCases();
     const x = all.cli.onlyClean;
     const why = [];
@@ -858,7 +881,7 @@ function registerGateRunProbes(ctx) {
     if (all.lastGates.onlyClean !== null) why.push('частичный прогон поставил lastGates ' + all.lastGates.onlyClean);
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: неизвестный id в --only - код 1, ничего не запускалось', () => {
+  checkLater('gates.js из командной строки: неизвестный id в --only - код 1, ничего не запускалось', () => {
     const all = gateRunCases();
     const x = all.cli.onlyTypo;
     const why = [];
@@ -868,7 +891,7 @@ function registerGateRunProbes(ctx) {
     if (all.lastGates.onlyTypo !== null) why.push('поставлена отметка lastGates ' + all.lastGates.onlyTypo);
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: пустой --only= - код 1, ничего не запускалось', () => {
+  checkLater('gates.js из командной строки: пустой --only= - код 1, ничего не запускалось', () => {
     const all = gateRunCases();
     const x = all.cli.onlyEmpty;
     const why = [];
@@ -878,7 +901,7 @@ function registerGateRunProbes(ctx) {
     if (all.lastGates.onlyEmpty !== null) why.push('поставлена отметка lastGates ' + all.lastGates.onlyEmpty);
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: id гейта другого репозитория в --only - не опечатка, код 1 с подсказкой --repo, ничего не запускалось', () => {
+  checkLater('gates.js из командной строки: id гейта другого репозитория в --only - не опечатка, код 1 с подсказкой --repo, ничего не запускалось', () => {
     const all = gateRunCases();
     const x = all.cli.onlyElsewhere;
     const why = [];
@@ -889,7 +912,7 @@ function registerGateRunProbes(ctx) {
     if (/^=== /m.test(x.out)) why.push('гейт запускался');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: --repo назвал репозиторий без гейта из --only - код 1, подсказка --repo не повторяет переданный флаг', () => {
+  checkLater('gates.js из командной строки: --repo назвал репозиторий без гейта из --only - код 1, подсказка --repo не повторяет переданный флаг', () => {
     const x = gateRunCases().cli.onlyElsewhereRepo;
     const why = [];
     if (x.hung || x.code !== 1) why.push(cliSeen(x));
@@ -900,7 +923,7 @@ function registerGateRunProbes(ctx) {
   });
   // На чистом дереве --only гонит гейт там, где он объявлен (В2, вариант C): позиция репозитория
   // в repos.json не участвует - other второй, и его гейт идёт в other, а sf не трогается
-  check('gates.js из командной строки: --only на чистом дереве гонит гейт в репозитории, где он объявлен (не первом в repos.json)', () => {
+  checkLater('gates.js из командной строки: --only на чистом дереве гонит гейт в репозитории, где он объявлен (не первом в repos.json)', () => {
     const x = gateRunCases().cli.onlyCleanOther;
     const why = [];
     if (x.hung || x.code !== 0) why.push(cliSeen(x));
@@ -909,7 +932,7 @@ function registerGateRunProbes(ctx) {
     if (!/там, где они объявлены: other \(/.test(x.out)) why.push('репозиторий прогона не назван');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: --only на чистом дереве с id, объявленным в двух репозиториях, гонит его в обоих', () => {
+  checkLater('gates.js из командной строки: --only на чистом дереве с id, объявленным в двух репозиториях, гонит его в обоих', () => {
     const x = gateRunCases().cli.onlyCleanBoth;
     const why = [];
     if (x.hung || x.code !== 0) why.push(cliSeen(x));
@@ -917,7 +940,7 @@ function registerGateRunProbes(ctx) {
     if (!/--- other \/ p-both: ok/.test(x.out)) why.push('p-both не прогнан в other');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: --only=p-pass,o-only на чистом дереве гонит p-pass в sf и o-only в other', () => {
+  checkLater('gates.js из командной строки: --only=p-pass,o-only на чистом дереве гонит p-pass в sf и o-only в other', () => {
     const x = gateRunCases().cli.onlyCleanMixed;
     const why = [];
     if (x.hung || x.code !== 0) why.push(cliSeen(x));
@@ -925,7 +948,7 @@ function registerGateRunProbes(ctx) {
     if (!/--- other \/ o-only: ok/.test(x.out)) why.push('o-only не прогнан в other');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: снятый по пределу гейт - «СНЯТ ПО ПРЕДЕЛУ» в итоге и сводке, код 1, lastGates не зелёный', () => {
+  checkLater('gates.js из командной строки: снятый по пределу гейт - «СНЯТ ПО ПРЕДЕЛУ» в итоге и сводке, код 1, lastGates не зелёный', () => {
     const all = gateRunCases();
     const x = all.cli.full;
     const why = [];
@@ -938,7 +961,7 @@ function registerGateRunProbes(ctx) {
   });
   // Отметка по диффу до очереди (E0-12AB, шаг 1; строка TECH_DEBT 21.10.2026 E1): hash и files lastGates -
   // дифф, снятый до запуска, а не в конце прогона
-  check('gates.js из командной строки: полный прогон ставит отметку по диффу, снятому до запуска (hash и files lastGates - дифф дерева пробы до запуска)', () => {
+  checkLater('gates.js из командной строки: полный прогон ставит отметку по диффу, снятому до запуска (hash и files lastGates - дифф дерева пробы до запуска)', () => {
     const all = gateRunCases();
     const g = all.marks.full;
     const b = all.treeBefore;
@@ -954,7 +977,7 @@ function registerGateRunProbes(ctx) {
   });
   // Этап 2 ребёнка проб (решение техлида Р4 E0-12AB): запуски E0-12AB стартуют после возврата всех случаев
   // runGate и запусков этапа 1 - их нагрузка не ложится на окна проб runGate (окно orphan под нагрузкой)
-  check('gates.js из командной строки: запуски этапа 2 (случаи E0-12AB) стартуют после возврата всех случаев runGate и запусков этапа 1', () => {
+  checkLater('gates.js из командной строки: запуски этапа 2 (случаи E0-12AB) стартуют после возврата всех случаев runGate и запусков этапа 1', () => {
     const all = gateRunCases();
     const why = [];
     const two = CLI_STAGE_TWO.filter((k) => all.cli[k]);
@@ -973,7 +996,7 @@ function registerGateRunProbes(ctx) {
   });
   // Пульс внуков читается после своего этапа (ревью E0-12AB, круг 3; решение техлида Р7): внук gc.js выходит сам
   // через GC_LIFE_MS, и пульс внука этапа 1, прочитанный после этапа 2, доказывал бы срок жизни, а не снятие
-  check('gates.js из командной строки: пульс внуков этапа 1 прочитан до старта первого запуска этапа 2, внуков этапа 2 - после возврата последнего', () => {
+  checkLater('gates.js из командной строки: пульс внуков этапа 1 прочитан до старта первого запуска этапа 2, внуков этапа 2 - после возврата последнего', () => {
     const all = gateRunCases();
     const why = [];
     const two = CLI_STAGE_TWO.filter((k) => all.cli[k]);
@@ -1094,15 +1117,15 @@ function registerGateRunProbes(ctx) {
     if (!new RegExp(line).test(x.out)) why.push('нет строки «Дифф изменился во время прогона (sf/' + file + '): записана отметка «не зелено» (код 1) …»: …' + JSON.stringify(x.out.slice(-300)));
     return why.length ? why.join('; ') : true;
   }
-  check('gates.js из командной строки: прежняя зелёная отметка, гейт создал файл во время зелёного полного прогона - отметка с кодом 1, замок коммита её не пускает, «Дифф изменился во время прогона» с именем файла, код 1', () => touchedVerdict(gateRunCases(), 'touched', 'during\\.txt'));
+  checkLater('gates.js из командной строки: прежняя зелёная отметка, гейт создал файл во время зелёного полного прогона - отметка с кодом 1, замок коммита её не пускает, «Дифф изменился во время прогона» с именем файла, код 1', () => touchedVerdict(gateRunCases(), 'touched', 'during\\.txt'));
   // Остаток дыры строки E1 (решение техлида Р1 E0-12AB): набор файлов тот же, содержимое другое
-  check('gates.js из командной строки: прежняя зелёная отметка, гейт дописал уже изменённый файл во время зелёного полного прогона (набор файлов тот же) - отметка с кодом 1, замок коммита её не пускает, «Дифф изменился» с именем файла, код 1', () => touchedVerdict(gateRunCases(), 'touchedContent', 'b\\.txt'));
+  checkLater('gates.js из командной строки: прежняя зелёная отметка, гейт дописал уже изменённый файл во время зелёного полного прогона (набор файлов тот же) - отметка с кодом 1, замок коммита её не пускает, «Дифф изменился» с именем файла, код 1', () => touchedVerdict(gateRunCases(), 'touchedContent', 'b\\.txt'));
   // Метка-каталог (решение техлида Р6 E0-12AB): отпечатка у каталога нет - fail-closed, причина в строке вывода
   // Совет причины снимает метку (ревью E0-12AB, круг 3; решение техлида Р7): запись в repos.json её не снимает
-  check('gates.js из командной строки: метка-каталог (вложенный репозиторий) - отметка с кодом 1, код 1, причина «метка-каталог … внеси каталог в .gitignore внешнего репозитория или убери …» в строке «Дифф изменился»', () => touchedVerdict(gateRunCases(), 'nestedDir', 'sub/', '\\. Не прочитано: метка-каталог sf/sub/: вложенный репозиторий: внеси каталог в \\.gitignore внешнего репозитория или убери \\(отдельный репозиторий - ещё и в repos\\.json\\)\\.'));
+  checkLater('gates.js из командной строки: метка-каталог (вложенный репозиторий) - отметка с кодом 1, код 1, причина «метка-каталог … внеси каталог в .gitignore внешнего репозитория или убери …» в строке «Дифф изменился»', () => touchedVerdict(gateRunCases(), 'nestedDir', 'sub/', '\\. Не прочитано: метка-каталог sf/sub/: вложенный репозиторий: внеси каталог в \\.gitignore внешнего репозитория или убери \\(отдельный репозиторий - ещё и в repos\\.json\\)\\.'));
   // Красный прогон при изменившемся диффе (ревью E0-12AB, D6): прежняя зелёная отметка с тем же набором имён
   // пустила бы коммит после красного прогона - красный прогон пишется и тогда
-  check('gates.js из командной строки: прежняя зелёная отметка, затем красный прогон с правкой файла во время него - записана красная отметка, «Дифф изменился» с именем файла, код 1', () => {
+  checkLater('gates.js из командной строки: прежняя зелёная отметка, затем красный прогон с правкой файла во время него - записана красная отметка, «Дифф изменился» с именем файла, код 1', () => {
     const all = gateRunCases();
     const x = all.cli.touchedRed;
     const g = all.marks.touchedRed;
@@ -1116,7 +1139,7 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   // Сбой сверки диффа после прогона (ревью E0-12AB, L-004): молчать нельзя - прежняя зелёная отметка пустила бы коммит
-  check('gates.js из командной строки: сверка диффа после прогона бросила - код 1, причина в stderr, прежняя зелёная отметка заменена красной', () => {
+  checkLater('gates.js из командной строки: сверка диффа после прогона бросила - код 1, причина в stderr, прежняя зелёная отметка заменена красной', () => {
     const all = gateRunCases();
     const x = all.cli.markFail;
     const g = all.marks.markFail;
@@ -1128,7 +1151,7 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   // Запись красной отметки упала (ревью E0-12AB, круг 2, T7): прежняя отметка осталась - так и сказано, код 1
-  check('gates.js из командной строки: сверка диффа бросила и красную отметку записать не удалось - код 1, в stderr обе причины и «прежняя отметка … осталась - не коммить»', () => {
+  checkLater('gates.js из командной строки: сверка диффа бросила и красную отметку записать не удалось - код 1, в stderr обе причины и «прежняя отметка … осталась - не коммить»', () => {
     const all = gateRunCases();
     const x = all.cli.markWriteFail;
     const g = all.marks.markWriteFail;
@@ -1141,7 +1164,7 @@ function registerGateRunProbes(ctx) {
   });
   // main() бросил в полном прогоне (ревью E0-12AB, круг 2, L-004/T7/D6): прежняя зелёная отметка не переживает сломавшийся прогон
   // Отметка catch main() - по меткам до очереди (redMark), когда они сняты, а дифф с тех пор ушёл (решение техлида Р9 E0-12AB, п.1)
-  check('gates.js из командной строки: main() полного прогона бросил после снятия меток, дифф ушёл - код 1, «gates.js сломался» и запись красной отметки в stderr, прежняя зелёная отметка заменена красной по меткам до очереди', () => {
+  checkLater('gates.js из командной строки: main() полного прогона бросил после снятия меток, дифф ушёл - код 1, «gates.js сломался» и запись красной отметки в stderr, прежняя зелёная отметка заменена красной по меткам до очереди', () => {
     const all = gateRunCases();
     const x = all.cli.mainFail;
     const g = all.marks.mainFail;
@@ -1156,7 +1179,7 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   // main() бросил до снятия меток (fullLabels null): отметка по текущему диффу, а не отказ записи (Р9 п.2)
-  check('gates.js из командной строки: main() полного прогона бросил до снятия меток - код 1, «gates.js сломался» и запись красной отметки в stderr, отметка - код 1 по текущему диффу', () => {
+  checkLater('gates.js из командной строки: main() полного прогона бросил до снятия меток - код 1, «gates.js сломался» и запись красной отметки в stderr, отметка - код 1 по текущему диффу', () => {
     const all = gateRunCases();
     const x = all.cli.labelsFail;
     const g = all.marks.labelsFail;
@@ -1171,7 +1194,7 @@ function registerGateRunProbes(ctx) {
   });
   // Состояние не записывается (решение техлида Р9 E0-12AB, п.8): writeState отдаёт отказ, markGates бросает - зелёный
   // прогон не может молча оставить прежнюю зелёную отметку и выйти с 0
-  check('gates.js из командной строки: путь состояния закрыт на запись, гейты зелёные - код 1, в stderr «красную отметку записать не удалось … прежняя отметка в .qa-state осталась - не коммить»', () => {
+  checkLater('gates.js из командной строки: путь состояния закрыт на запись, гейты зелёные - код 1, в stderr «красную отметку записать не удалось … прежняя отметка в .qa-state осталась - не коммить»', () => {
     const all = gateRunCases();
     const x = all.cli.stateLocked;
     const g = all.marks.stateLocked;
@@ -1184,7 +1207,7 @@ function registerGateRunProbes(ctx) {
   });
   // Сигнал в полном прогоне (ревью E0-12AB, круг 3; решение техлида Р7): прежняя зелёная отметка не переживает
   // прерванный прогон - иначе правка, сделанная после неё, ушла бы в коммит по старой зелёной
-  check('gates.js из командной строки: полный прогон прерван SIGINT при прежней зелёной отметке - код 130, дерево гейта снято, «записана отметка о красном прогоне (код 1)» в stderr, отметка - код 1 по диффу до запуска', () => {
+  checkLater('gates.js из командной строки: полный прогон прерван SIGINT при прежней зелёной отметке - код 130, дерево гейта снято, «записана отметка о красном прогоне (код 1)» в stderr, отметка - код 1 по диффу до запуска', () => {
     const all = gateRunCases();
     const x = all.cli.fullSignal;
     const g = all.marks.fullSignal;
@@ -1201,7 +1224,7 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   // Снимок диффа (sha1 файлов) - только у прогона, который ставит отметку (ревью E0-12AB): частичный и --list его не берут
-  check('gates.js из командной строки: снимок диффа берёт только полный прогон с непустой очередью (до первого гейта и после последнего), частичный и прогон без работы - ни одного', () => {
+  checkLater('gates.js из командной строки: снимок диффа берёт только полный прогон с непустой очередью (до первого гейта и после последнего), частичный и прогон без работы - ни одного', () => {
     const all = gateRunCases();
     const why = [];
     const seen = (k) => (all.spy[k] ? all.spy[k].snapshots : null);
@@ -1213,7 +1236,7 @@ function registerGateRunProbes(ctx) {
   });
   // Текст «ОСТАТОК ЖИВ» в итоге и сводке (строка TECH_DEBT 21.10.2026 T6): оболочка вышла с 0, вывод держит
   // detached-внук (POSIX - своя сессия)
-  check('gates.js из командной строки: оболочка вышла с 0, а остаток держит вывод - «ОСТАТОК ЖИВ, СНЯТЬ РУКАМИ» в итоге и сводке, код 1', () => {
+  checkLater('gates.js из командной строки: оболочка вышла с 0, а остаток держит вывод - «ОСТАТОК ЖИВ, СНЯТЬ РУКАМИ» в итоге и сводке, код 1', () => {
     const all = gateRunCases();
     const x = all.cli.remnant;
     const why = [];
@@ -1225,7 +1248,7 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   // Одна строка о чистом дереве при --only (строка TECH_DEBT 21.10.2026 «два сообщения»)
-  check('gates.js из командной строки: --only на чистом дереве - одна строка «Изменений нет ни в одном репозитории», без «Пойдём по репозиториям»', () => {
+  checkLater('gates.js из командной строки: --only на чистом дереве - одна строка «Изменений нет ни в одном репозитории», без «Пойдём по репозиториям»', () => {
     const x = gateRunCases().cli.onlyClean;
     const why = [];
     const n = (x.out.match(/Изменений нет ни в одном репозитории/g) || []).length;
@@ -1234,7 +1257,7 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') + '; ' + cliSeen(x) : true;
   });
   // --only при диффе идёт только в изменённые репозитории; владелец без изменений назван (решение техлида Р3 E0-12AB)
-  check('gates.js из командной строки: --only при диффе гонит гейт в изменённом репозитории и называет владельца без изменений с --repo; все владельцы в прогоне или чистое дерево - строки нет', () => {
+  checkLater('gates.js из командной строки: --only при диффе гонит гейт в изменённом репозитории и называет владельца без изменений с --repo; все владельцы в прогоне или чистое дерево - строки нет', () => {
     const all = gateRunCases();
     const x = all.cli.onlyBothDirty;
     const why = [];
@@ -1248,7 +1271,7 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   // taskkill /T /F с ненулевым кодом (E0-12AB, шаг 6; решение техлида Р2): вердикт по эффекту
-  check('gates.js из командной строки: taskkill /T /F вышел с кодом 255, а оболочка вышла и вывод закрылся - «СНЯТ ПО ПРЕДЕЛУ», код 255 в тексте, внук мёртв, не «СНЯТЬ РУКАМИ» (только Windows)', () => {
+  checkLater('gates.js из командной строки: taskkill /T /F вышел с кодом 255, а оболочка вышла и вывод закрылся - «СНЯТ ПО ПРЕДЕЛУ», код 255 в тексте, внук мёртв, не «СНЯТЬ РУКАМИ» (только Windows)', () => {
     if (process.platform !== 'win32') return { note: 'только Windows: taskkill - путь снятия Windows' };
     const all = gateRunCases();
     const x = all.cli.killPartial;
@@ -1268,7 +1291,7 @@ function registerGateRunProbes(ctx) {
     if (/СНЯТЬ РУКАМИ|снять руками/.test(x.out)) why.push('снятое дерево названо «снять руками»');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: taskkill /T /F вышел с кодом 255, а вывод не закрылся - «ПРЕДЕЛ 1 с, СНЯТЬ РУКАМИ», код 255 в тексте (только Windows)', () => {
+  checkLater('gates.js из командной строки: taskkill /T /F вышел с кодом 255, а вывод не закрылся - «ПРЕДЕЛ 1 с, СНЯТЬ РУКАМИ», код 255 в тексте (только Windows)', () => {
     if (process.platform !== 'win32') return { note: 'только Windows: taskkill - путь снятия Windows' };
     const x = gateRunCases().cli.killPartialOpen;
     const why = [];
@@ -1279,7 +1302,7 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   // Код taskkill, не разобранный замером (решение техлида Р5 E0-12AB): дерево снято и вывод закрылся, но код 1 - отказ снятия
-  check('gates.js из командной строки: taskkill /T /F вышел с кодом 1, а оболочка вышла и вывод закрылся - «ПРЕДЕЛ 1 с, СНЯТЬ РУКАМИ», код 1 в тексте (только Windows)', () => {
+  checkLater('gates.js из командной строки: taskkill /T /F вышел с кодом 1, а оболочка вышла и вывод закрылся - «ПРЕДЕЛ 1 с, СНЯТЬ РУКАМИ», код 1 в тексте (только Windows)', () => {
     if (process.platform !== 'win32') return { note: 'только Windows: taskkill - путь снятия Windows' };
     const x = gateRunCases().cli.killStatusOne;
     const why = [];
@@ -1298,7 +1321,7 @@ function registerGateRunProbes(ctx) {
     const eol = out.indexOf('\n', end);
     return eol < 0 ? out.slice(start) : out.slice(start, eol);
   }
-  check('gates.js из командной строки: файл вывода болтливого гейта подписан как срезанный, не «Полный вывод»', () => {
+  checkLater('gates.js из командной строки: файл вывода болтливого гейта подписан как срезанный, не «Полный вывод»', () => {
     const x = gateRunCases().cli.full;
     if (x.hung) return cliSeen(x);
     // красный p-hang того же прогона подписан «Полный вывод» по праву - смотрим только p-flood
@@ -1309,7 +1332,7 @@ function registerGateRunProbes(ctx) {
     if (!/Вывод в файле - первые и последние байты, середина \(\d+ байт\) срезана пределом памяти gates\.js: /.test(flood)) why.push('нет подписи о срезе');
     return why.length ? why.join('; ') + '; ' + cliSeen(x) : true;
   });
-  check('gates.js из командной строки: короткий красный гейт - полный вывод в файле, путь напечатан под выводом', () => {
+  checkLater('gates.js из командной строки: короткий красный гейт - полный вывод в файле, путь напечатан под выводом', () => {
     const all = gateRunCases();
     const x = all.cli.failShort;
     const why = [];
@@ -1322,7 +1345,7 @@ function registerGateRunProbes(ctx) {
     else if (log && path.basename(printed[1].trim()) !== log.name) why.push('напечатан не тот путь: ' + printed[1].trim());
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: короткий зелёный гейт файла вывода не оставляет и пути не печатает', () => {
+  checkLater('gates.js из командной строки: короткий зелёный гейт файла вывода не оставляет и пути не печатает', () => {
     const all = gateRunCases();
     const x = all.cli.onlyClean;
     const glob = gateRunOutput(x.out, 'sf', 'p-glob');
@@ -1334,7 +1357,7 @@ function registerGateRunProbes(ctx) {
     if (left.length) why.push('зелёный гейт оставил файл: ' + JSON.stringify(left));
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: длинный зелёный гейт - файл вывода есть и путь напечатан (исключение из «зелёный лог не пишет»: экранный вывод срезан)', () => {
+  checkLater('gates.js из командной строки: длинный зелёный гейт - файл вывода есть и путь напечатан (исключение из «зелёный лог не пишет»: экранный вывод срезан)', () => {
     const all = gateRunCases();
     const x = all.cli.longGreen;
     const section = gateRunOutput(x.out, 'sf', 'p-long-green');
@@ -1348,7 +1371,7 @@ function registerGateRunProbes(ctx) {
     if (!printed) why.push('путь файла не напечатан');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: граница FULL_LIMIT - 200 строк зелёного гейта целиком и без файла, 201 - срез и файл вывода', () => {
+  checkLater('gates.js из командной строки: граница FULL_LIMIT - 200 строк зелёного гейта целиком и без файла, 201 - срез и файл вывода', () => {
     const all = gateRunCases();
     const why = [];
     const at = gateRunOutput(all.cli.green200.out, 'sf', 'p-green-200');
@@ -1364,7 +1387,7 @@ function registerGateRunProbes(ctx) {
     if (!all.logs.some((l) => /^gates-sf-p-green-201-\d+\.log$/.test(l.name) && /edge-line-100\b/.test(l.text))) why.push('у 201 строки нет файла с серединой');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: файл вывода с тем же pid от прошлого прогона заменён файлом этого прогона', () => {
+  checkLater('gates.js из командной строки: файл вывода с тем же pid от прошлого прогона заменён файлом этого прогона', () => {
     const all = gateRunCases();
     const x = all.cli.existingLog;
     const section = gateRunOutput(x.out, 'sf', 'p-fail-short');
@@ -1380,7 +1403,7 @@ function registerGateRunProbes(ctx) {
     if (!/Полный вывод: /.test(section)) why.push('путь файла не напечатан');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: сбой записи файла у срезанного вывода говорит, что потеряно, а не «выше - всё»', () => {
+  checkLater('gates.js из командной строки: сбой записи файла у срезанного вывода говорит, что потеряно, а не «выше - всё»', () => {
     const all = gateRunCases();
     const why = [];
     const long = gateRunOutput(all.cli.longGreenNoLog.out, 'sf', 'p-long-green');
@@ -1396,7 +1419,7 @@ function registerGateRunProbes(ctx) {
     if (/всё, что есть|весь вывод/.test(long + flood)) why.push('срезанный вывод назван полным');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: красный гейт без вывода файла не оставляет и пути не печатает', () => {
+  checkLater('gates.js из командной строки: красный гейт без вывода файла не оставляет и пути не печатает', () => {
     const all = gateRunCases();
     const x = all.cli.failSilent;
     const section = gateRunOutput(x.out, 'sf', 'p-fail-silent');
@@ -1408,7 +1431,7 @@ function registerGateRunProbes(ctx) {
     if (left.length) why.push('оставлен файл пустого вывода: ' + JSON.stringify(left));
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: сбой записи файла вывода назван, пути нет, вердикт гейта прежний', () => {
+  checkLater('gates.js из командной строки: сбой записи файла вывода назван, пути нет, вердикт гейта прежний', () => {
     const all = gateRunCases();
     const x = all.cli.failShortNoLog;
     const section = gateRunOutput(x.out, 'sf', 'p-fail-short');
@@ -1422,7 +1445,7 @@ function registerGateRunProbes(ctx) {
     if (!/ПАДАЕТ/.test(section)) why.push('вердикт гейта не «ПАДАЕТ»');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: файл вывода пишется только владельцу (mode 0o600) и создаётся заново (flag wx)', () => {
+  checkLater('gates.js из командной строки: файл вывода пишется только владельцу (mode 0o600) и создаётся заново (flag wx)', () => {
     const all = gateRunCases();
     const spy = all.spy.failShort;
     const writes = spy ? spy.logWrites : [];
@@ -1439,7 +1462,7 @@ function registerGateRunProbes(ctx) {
     }
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: файлы вывода старше недели удалены, свежий, чужой файл каталога и файл TEMP с тем же именем на месте', () => {
+  checkLater('gates.js из командной строки: файлы вывода старше недели удалены, свежий, чужой файл каталога и файл TEMP с тем же именем на месте', () => {
     const all = gateRunCases();
     const names = all.logDirNames || [];
     const why = [];
@@ -1449,7 +1472,7 @@ function registerGateRunProbes(ctx) {
     if (!(all.tmpNames || []).includes('gates-other-tool-1.log')) why.push('удалён чужой файл TEMP вне каталога sf-gates');
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: каталог файлов вывода читается для чистки один раз за прогон, не на каждый файл', () => {
+  checkLater('gates.js из командной строки: каталог файлов вывода читается для чистки один раз за прогон, не на каждый файл', () => {
     const all = gateRunCases();
     const spy = all.spy.full;
     const why = [];
@@ -1458,7 +1481,7 @@ function registerGateRunProbes(ctx) {
     if (!spy || spy.logDirReads !== 1) why.push('чтений каталога sf-gates: ' + (spy ? spy.logDirReads : 'нет шпиона'));
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: сбой чистки (чтение каталога, удаление старого файла) гейт не роняет - вердикт прежний, файл вывода записан', () => {
+  checkLater('gates.js из командной строки: сбой чистки (чтение каталога, удаление старого файла) гейт не роняет - вердикт прежний, файл вывода записан', () => {
     const all = gateRunCases();
     const why = [];
     for (const k of ['readdir', 'unlink']) {
@@ -1476,7 +1499,7 @@ function registerGateRunProbes(ctx) {
     }
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js из командной строки: гейт без предела - «ПАДАЕТ, нет предела timeoutSec» в сводке, код 1, команда не запускалась', () => {
+  checkLater('gates.js из командной строки: гейт без предела - «ПАДАЕТ, нет предела timeoutSec» в сводке, код 1, команда не запускалась', () => {
     const all = gateRunCases();
     const x = all.cli.onlyNoLimit;
     const why = [];
@@ -1487,7 +1510,7 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   for (const [signal, exitCode] of PROBE_SIGNALS) {
-    check('gates.js из командной строки: ' + signal + ' снимает дерево идущего гейта, код ' + exitCode + ', отметки нет', () => {
+    checkLater('gates.js из командной строки: ' + signal + ' снимает дерево идущего гейта, код ' + exitCode + ', отметки нет', () => {
       const all = gateRunCases();
       const x = all.cli[signal];
       const w = all.watch[signal];
@@ -1501,7 +1524,7 @@ function registerGateRunProbes(ctx) {
       return why.length ? why.join('; ') : { note: (x.ms / 1000).toFixed(1) + ' с' };
     });
   }
-  check('gates.js из командной строки: сигнал после выхода оболочки гейта не снимает ничего повторно (POSIX - одно снятие группы, Windows - ни одного taskkill)', () => {
+  checkLater('gates.js из командной строки: сигнал после выхода оболочки гейта не снимает ничего повторно (POSIX - одно снятие группы, Windows - ни одного taskkill)', () => {
     const all = gateRunCases();
     const x = all.cli.afterExit;
     const s = all.spy.afterExit;
@@ -1517,7 +1540,7 @@ function registerGateRunProbes(ctx) {
   });
   // После предела «снят» - только когда снятие подтверждено и вывод закрылся в окне ожидания; иначе
   // «СНЯТЬ РУКАМИ» с обоими фактами (D2): отказ снятия, закрылся ли вывод
-  check('gates.js из командной строки: снятие по пределу отказало, вывод не закрылся - код 1, оба факта, в сводке «СНЯТЬ РУКАМИ», не «снят»', () => {
+  checkLater('gates.js из командной строки: снятие по пределу отказало, вывод не закрылся - код 1, оба факта, в сводке «СНЯТЬ РУКАМИ», не «снят»', () => {
     const x = gateRunCases().cli.killFail;
     const why = [];
     if (x.hung || x.code !== 1) why.push(cliSeen(x));
@@ -1528,7 +1551,7 @@ function registerGateRunProbes(ctx) {
   });
   // Отказ снятия, после которого вывод закрылся: закрывшийся пайп не доказывает, что дерева нет -
   // «СНЯТЬ РУКАМИ», в тексте отказ и «вывод закрылся» фактом
-  check('gates.js из командной строки: снятие по пределу отказало, а вывод закрылся - код 1, «СНЯТЬ РУКАМИ», отказ и закрытие названы', () => {
+  checkLater('gates.js из командной строки: снятие по пределу отказало, а вывод закрылся - код 1, «СНЯТЬ РУКАМИ», отказ и закрытие названы', () => {
     const x = gateRunCases().cli.killFailClosed;
     const why = [];
     if (x.hung || x.code !== 1) why.push(cliSeen(x));
@@ -1538,7 +1561,7 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   // Снятие ответило успехом, а вывод не закрылся: держатель пайпа жив - «СНЯТЬ РУКАМИ», не «снят»
-  check('gates.js из командной строки: снятие по пределу ответило успехом, вывод не закрылся - код 1, «СНЯТЬ РУКАМИ», не «снят»', () => {
+  checkLater('gates.js из командной строки: снятие по пределу ответило успехом, вывод не закрылся - код 1, «СНЯТЬ РУКАМИ», не «снят»', () => {
     const x = gateRunCases().cli.killNoop;
     const why = [];
     if (x.hung || x.code !== 1) why.push(cliSeen(x));
@@ -1549,7 +1572,7 @@ function registerGateRunProbes(ctx) {
   });
   // stdin гейту не даётся: команда, читающая ввод до конца, получает конец сразу, даже когда у самого
   // gates.js stdin - открытый пайп (inherit или свой pipe держали бы гейт до предела)
-  check('gates.js из командной строки: гейт, читающий stdin до конца, при открытом stdin gates.js получает конец ввода сразу - ok', () => {
+  checkLater('gates.js из командной строки: гейт, читающий stdin до конца, при открытом stdin gates.js получает конец ввода сразу - ok', () => {
     const x = gateRunCases().cli.stdin;
     const why = [];
     if (x.hung || x.code !== 0) why.push(cliSeen(x));
@@ -1578,24 +1601,19 @@ function registerGateRunProbes(ctx) {
    *   abortTwo - два runGate параллельно, abortRunning: сняты оба;
    *   abort255 - путь Windows, abortRunning при коде taskkill 255: отказ снятия с кодом в причине (Р2, Р7).
    */
-  let fakeRunResult = null;
-  function fakeRunCases() {
-    if (!fakeRunResult) {
-      try {
-        fakeRunResult = { value: buildFakeRunCases() };
-      } catch (e) {
-        fakeRunResult = { error: e };
-      }
-    }
-    if (fakeRunResult.error) throw fakeRunResult.error;
-    return fakeRunResult.value;
-  }
+  /** Старт ребёнка поддельного процесса в фоне - как startGateRunCases: отказ запоминается, ответ - fakeRunCases(). */
+  const fakeRun = lazyStart(() => buildFakeRunCases());
+  const startFakeRunCases = fakeRun.start;
+  const fakeRunCases = fakeRun.collect;
   function buildFakeRunCases() {
     // ребёнок грузит gates.js require - только после зелёной пробы require
     const { limits } = gatesModule();
     const dir = tempDir('fake-run');
     try {
       const code = [
+        // строка выхода ребёнка в фоне (startDetached) - после итога и при падении; то же тело, что у ребёнка
+        // проб запуска и пакета (exitLineHook, selftest-children.js), - его текст
+        '(' + exitLineHook.toString() + ')(' + JSON.stringify(RUNNER_EXIT_MARK) + ');',
         "const cp = require('child_process');",
         "const { EventEmitter } = require('events');",
         "const { PassThrough } = require('stream');",
@@ -1710,12 +1728,24 @@ function registerGateRunProbes(ctx) {
         '  ' + EXIT + '(0);',
         '})();',
       ].join('\n');
-      const r = run(process.execPath, ['-e', code], { cwd: dir, timeout: 60000, killSignal: 'SIGKILL', env: Object.assign({}, process.env, { SF_HOOK_STATE_DIR: dir }) });
-      const m = /(?:^|\n)probe (\{.*\})$/.exec(String(r.stdout || ''));
-      if (!m) throw new Error('проба runGate с поддельным процессом не дошла до итога (код ' + r.status + '): ' + String(r.stderr || r.stdout || (r.error && r.error.message)).slice(0, 200));
-      return JSON.parse(m[1]);
-    } finally {
+      // ребёнок - в фоне; файлы его вывода - в каталоге пробы, их снимает releaseTemp после ответа
+      const handle = startDetached(process.execPath, ['-e', code], {
+        dir, name: 'fake-run', cwd: dir, env: Object.assign({}, process.env, { SF_HOOK_STATE_DIR: dir }),
+        exitMark: RUNNER_EXIT_MARK, what: 'проба runGate с поддельным процессом', label: 'ребёнок пробы runGate с поддельным процессом', timeoutMs: 60000,
+      });
+      return () => {
+        try {
+          const r = awaitDetached(handle);
+          const m = /(?:^|\n)probe (\{.*\})$/.exec(r.body);
+          if (!m) throw new Error('проба runGate с поддельным процессом не дошла до итога (код ' + r.status + '): ' + childFailure(r));
+          return JSON.parse(m[1]);
+        } finally {
+          releaseTemp(dir);
+        }
+      };
+    } catch (e) {
       releaseTemp(dir);
+      throw e;
     }
   }
   /** Случай поддельного процесса словами для строки отказа. */
@@ -1730,7 +1760,9 @@ function registerGateRunProbes(ctx) {
   // Предел рядом с выходом оболочки (строки TECH_DEBT 21.10.2026 «страж entry.exited» и «предел в одном обороте
   // с выходом cmd.exe»): снятие отложено на фазу check - выход, отданный до неё, страж видит; выход после неё -
   // нет (снятие одно). Фаза, в которой Windows отдаёт выход cmd.exe, не замерялась (комментарий в gates.js).
-  check('gates.js runGate: выход оболочки после колбэка предела, но до фазы check этого оборота (process.nextTick; setImmediate, поставленный раньше снятия), - снятий 0, код оболочки, не «снят по пределу»', () => {
+  // ребёнок поддельного процесса - в фоне с этой точки; строки ниже, которым нужен его ответ, - checkLater
+  startFakeRunCases();
+  checkLater('gates.js runGate: выход оболочки после колбэка предела, но до фазы check этого оборота (process.nextTick; setImmediate, поставленный раньше снятия), - снятий 0, код оболочки, не «снят по пределу»', () => {
     const all = fakeRunCases();
     const why = [];
     for (const k of ['sameTurn', 'beforeCheck']) {
@@ -1741,19 +1773,19 @@ function registerGateRunProbes(ctx) {
     if (err) why.push(err);
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js runGate: выход оболочки после отложенного снятия (позже в фазе check) - снятие одно, «снят по пределу»: окно стража сужено, а не снято', () => {
+  checkLater('gates.js runGate: выход оболочки после отложенного снятия (позже в фазе check) - снятие одно, «снят по пределу»: окно стража сужено, а не снято', () => {
     const x = fakeRunCases().cases.afterCheck;
     if (x.hung || x.kills !== 1 || x.code !== 1 || !x.timedOut || !/гейт снят по пределу 1 с/.test(x.text)) return fakeSeen(x);
     return true;
   });
-  check('gates.js runGate: предел без выхода оболочки - снятие ровно одно, «снят по пределу»', () => {
+  checkLater('gates.js runGate: предел без выхода оболочки - снятие ровно одно, «снят по пределу»', () => {
     const x = fakeRunCases().cases.late;
     if (x.hung || x.kills !== 1 || x.code !== 1 || !x.timedOut || !/гейт снят по пределу 1 с/.test(x.text)) return fakeSeen(x);
     return true;
   });
   // Вердикт по эффекту (решения техлида Р2 и Р5 E0-12AB) - путь Windows с подменённым taskkill на любой ОС:
   // только код 255 при вышедшей оболочке и закрывшемся выводе - «снят по пределу»
-  check('gates.js runGate (taskkill подменён, любая ОС): код 255, оболочка вышла и вывод закрылся - «снят по пределу», код в тексте, не «снять руками»; аргументы taskkill - /pid <pid> /T /F', () => {
+  checkLater('gates.js runGate (taskkill подменён, любая ОС): код 255, оболочка вышла и вывод закрылся - «снят по пределу», код в тексте, не «снять руками»; аргументы taskkill - /pid <pid> /T /F', () => {
     const all = fakeRunCases();
     const x = all.cases.kill255Closed;
     const why = [];
@@ -1764,18 +1796,18 @@ function registerGateRunProbes(ctx) {
     if (err) why.push(err);
     return why.length ? why.join('; ') : true;
   });
-  check('gates.js runGate (taskkill подменён, любая ОС): код 255, вывод не закрылся - «снять руками», код и открытый вывод в тексте', () => {
+  checkLater('gates.js runGate (taskkill подменён, любая ОС): код 255, вывод не закрылся - «снять руками», код и открытый вывод в тексте', () => {
     const x = fakeRunCases().cases.kill255Open;
     if (x.hung || x.code !== 1 || !x.timedOut || !x.manual || !/taskkill \/T \/F вышел с кодом 255; вывод не закрылся за [^;]*; снять руками/.test(String(x.text))) return fakeSeen(x);
     return true;
   });
-  check('gates.js runGate (taskkill подменён, любая ОС): код 1, хоть оболочка вышла и вывод закрылся, - «снять руками»: вердикт по эффекту только у кода 255', () => {
+  checkLater('gates.js runGate (taskkill подменён, любая ОС): код 1, хоть оболочка вышла и вывод закрылся, - «снять руками»: вердикт по эффекту только у кода 255', () => {
     const x = fakeRunCases().cases.kill1Closed;
     if (x.hung || x.code !== 1 || !x.timedOut || !x.manual || !/taskkill \/T \/F вышел с кодом 1; вывод закрылся; снять руками/.test(String(x.text))) return fakeSeen(x);
     return true;
   });
   // runGate экспортирован и идёт параллельно в ребёнке проб: обработчик сигнала снимает каждое идущее дерево (ревью E0-12AB)
-  check('gates.js abortRunning: два параллельных runGate - сняты оба, оба вернулись', () => {
+  checkLater('gates.js abortRunning: два параллельных runGate - сняты оба, оба вернулись', () => {
     const all = fakeRunCases();
     const x = all.cases.abortTwo;
     const why = [];
@@ -1787,7 +1819,7 @@ function registerGateRunProbes(ctx) {
   });
   // Ctrl+C при коде taskkill 255 (решения техлида Р2 и Р7 E0-12AB): эффект снятия обработчик сигнала проверить не
   // может (вывод не ждётся) - отказ с кодом в причине, обработчик печатает его с «снять руками»
-  check('gates.js abortRunning (taskkill подменён, любая ОС): код 255 - отказ снятия, «taskkill /T /F вышел с кодом 255» в причине, не «снято» и не третий исход', () => {
+  checkLater('gates.js abortRunning (taskkill подменён, любая ОС): код 255 - отказ снятия, «taskkill /T /F вышел с кодом 255» в причине, не «снято» и не третий исход', () => {
     const all = fakeRunCases();
     const x = all.cases.abort255;
     const why = [];
@@ -1800,12 +1832,12 @@ function registerGateRunProbes(ctx) {
     return why.length ? why.join('; ') : true;
   });
   // close без exit (строка TECH_DEBT 21.10.2026 A8): код из close гейт зелёным не делает (fail-closed)
-  check('gates.js runGate: вывод закрылся без выхода оболочки (close без exit и error) - код 1, «не сообщила о выходе»', () => {
+  checkLater('gates.js runGate: вывод закрылся без выхода оболочки (close без exit и error) - код 1, «не сообщила о выходе»', () => {
     const x = fakeRunCases().cases.closeOnly;
     if (x.hung || x.code !== 1 || !/вывод закрылся, а оболочка гейта не сообщила о выходе/.test(x.text)) return fakeSeen(x);
     return true;
   });
-  check('gates.js runGate: ошибка запуска, затем close - код 1, «не удалось запустить команду», исключений нет', () => {
+  checkLater('gates.js runGate: ошибка запуска, затем close - код 1, «не удалось запустить команду», исключений нет', () => {
     const all = fakeRunCases();
     const x = all.cases.errorClose;
     if (x.hung || x.code !== 1 || !/не удалось запустить команду: spawn fake ENOENT/.test(x.text)) return fakeSeen(x);
@@ -1813,7 +1845,7 @@ function registerGateRunProbes(ctx) {
   });
   // Хвост незаконченного символа у каждого потока (E0-12AB, шаг 9): куски - событиями data поддельного
   // процесса, без пайпа - их не склеит занятый цикл событий, как куски пробы split через настоящий пайп
-  check('gates.js runGate: символ UTF-8, разрезанный между кусками stdout поддельного процесса с куском stderr между ними, цел (куски - событиями, без пайпа)', () => {
+  checkLater('gates.js runGate: символ UTF-8, разрезанный между кусками stdout поддельного процесса с куском stderr между ними, цел (куски - событиями, без пайпа)', () => {
     const x = fakeRunCases().cases.splitFake;
     if (x.hung || x.code !== 0) return fakeSeen(x);
     return /^E\nПРИВЕТ-ЮНИКОД\s*$/.test(x.text) || 'вывод ' + JSON.stringify(x.text) + ', ждали "E\\nПРИВЕТ-ЮНИКОД\\n"';
@@ -2045,6 +2077,48 @@ function registerGateRunProbes(ctx) {
     const why = [];
     if (copied > 2 * pushed) why.push('скопировано ' + copied + ' байт за ' + pushed + ' байт вывода');
     if (!/b{1000}$/.test(t.replace(/\s+$/, '')) || ob.cutBytes !== 1024 * 1024 + pushed) why.push('срез ' + ob.cutBytes + ', хвост текста ' + JSON.stringify(t.slice(-20)));
+    return why.length ? why.join('; ') : true;
+  });
+  // Мелкие куски (TECH_DEBT 28.10.2026 E0-12AB круг 3, C8; E0-12AC): хвост, набранный мелкими кусками, при
+  // срезе начала снимает куски сдвигом индекса - tail.shift на каждом куске квадратичен (замер в деле
+  // E0-12AC: 125 000 кусков - 13,8 с против 0,1 с). После головы - 1,75 МиБ кусками по 13-15 байт: граница
+  // куска режет кириллицу (carry), хвост набирается мелкими кусками и срезается; ответ тот же, что у
+  // одного куска тех же байт, а время - в пределе, в разы меньшем квадратичного
+  check('gates.js outputBuffer: 125 000 кусков по 13-15 байт (кириллица на границах) - голова, хвост и срез те же, что у одного куска, время не квадратичное', () => {
+    const { outputBuffer, limits } = gatesModule();
+    const { EventEmitter } = require('events');
+    const n = 125000;
+    const sizes = [13, 14, 15];
+    const unit = Buffer.from('жёa', 'utf8');
+    let total = 0;
+    for (let i = 0; i < n; i++) total += sizes[i % 3];
+    const body = Buffer.alloc(total);
+    for (let i = 0; i < total; i++) body[i] = unit[i % unit.length];
+    const feed = (pieces) => {
+      const ob = outputBuffer();
+      const s = new EventEmitter();
+      ob.attach(s);
+      s.emit('data', Buffer.alloc(limits.OUTPUT_HEAD_BYTES, 0x61));
+      for (const piece of pieces) s.emit('data', piece);
+      // память - до flush и text: в хвосте мелких кусков есть снятые, ещё не сжатые куски (сдвиг индекса)
+      const held = ob.heldBytes;
+      ob.flush();
+      return { text: ob.text(), cut: ob.cutBytes, held };
+    };
+    const pieces = [];
+    for (let i = 0, at = 0; i < n; at += sizes[i % 3], i++) pieces.push(body.subarray(at, at + sizes[i % 3]));
+    const t0 = performance.now();
+    const small = feed(pieces);
+    const ms = performance.now() - t0;
+    const whole = feed([body]);
+    const why = [];
+    if (!whole.cut) why.push('один кусок не срезан - кейс не набрал хвост');
+    if (small.cut !== whole.cut || small.text !== whole.text) why.push('мелкие куски: срез ' + small.cut + ' против ' + whole.cut + (small.text === whole.text ? '' : ', текст иной'));
+    if (ms > OUTPUT_PIECES_LIMIT_MS) why.push(n + ' кусков - ' + (ms / 1000).toFixed(1) + ' с, предел ' + OUTPUT_PIECES_LIMIT_MS / 1000 + ' с (квадратичный срез хвоста?)');
+    // heldBytes мелких кусков - по живым кускам (снятые не в счёт и не ломают обход); куски-копии делят буферы
+    // пула Buffer с хвостами символа, поэтому верхней границы здесь нет - её держит проба большого куска
+    const live = limits.OUTPUT_HEAD_BYTES + limits.OUTPUT_TAIL_BYTES;
+    if (!(Number.isFinite(small.held) && small.held >= live)) why.push('мелкие куски: heldBytes ' + small.held + ', ожидалось не меньше головы и хвоста ' + live);
     return why.length ? why.join('; ') : true;
   });
   /**

@@ -23,7 +23,7 @@ const fs = require('fs');
 const path = require('path');
 
 function registerGateProbes(ctx, deps) {
-  const { G, L, LISTING_MAX_BUFFER, ROOT, ROUTE_FORMS, check, gitLive, outcome, put, readJson, refusalVerdict, releaseTemp, repoRules, run, snapshotGate, tempDir } = ctx;
+  const { G, L, LISTING_MAX_BUFFER, ROOT, ROUTE_FORMS, check, gitLive, outcome, put, readJson, refusalVerdict, releaseTemp, rememberOnce, repoRules, run, snapshotGate, tempDir } = ctx;
   const { int, gateRun, treeGraph, roots, intCases, cases } = deps;
   const { gatesModule } = gateRun;
   const { intForbidden, INT_PROBE_STATIC, intProbeReads, relUnder } = int;
@@ -189,9 +189,10 @@ function registerGateProbes(ctx, deps) {
    *     граф turbo настоящего дерева (GRAPH_GATE) и без него не гоняется; int - ещё и test/imports.ts
    *     с дочерним vitest или require(esm) - та же граница Node (extraProbe по снимкам gateSnaps).
    * id - идентификатор гейта в правилах; spec - описание пробы выше; sink - приёмник строк (по
-   * умолчанию check; кейс TDZ берёт свой).
+   * умолчанию check; кейс TDZ берёт свой); snaps - снимки extra-строк (по умолчанию ленивый gateSnaps; кейс
+   * TDZ берёт свой геттер).
    */
-  function checkGateSelection(id, spec, sink = check) {
+  function checkGateSelection(id, spec, sink = check, snaps = gateSnaps) {
     sink('гейт ' + id + ': gates.js выбирает его на ' + spec.runWhat, () => {
       const { runs } = gateProbe(id);
       const missed = spec.mustRun.filter((f) => !runs(f));
@@ -212,42 +213,108 @@ function registerGateProbes(ctx, deps) {
     for (const x of spec.extra || []) {
       const name = 'гейт ' + id + ': ' + x.name;
       const fn = () => x.fn(gateProbe(id), spec);
-      sink(name, extraProbe(x, name, fn, gateSnaps));
+      sink(name, extraProbe(x, name, fn, snaps));
     }
   }
 
   /**
-   * Снимки прогона для extra-строк checkGateSelection: { graph, imports } (GRAPH_GATE и IMPORTS_GATE)
-   * после graph.takeLive() и intRun.start ниже, до них - null. Объявлены здесь, до первого вызова
-   * checkGateSelection (TECH_DEBT 23.10.2026 E0-12U круг 2: чтение GRAPH_GATE до его объявления - TDZ).
+   * Снимки прогона для extra-строк checkGateSelection - ленивый геттер (TECH_DEBT 28.10.2026 E0-12AA, C1;
+   * E0-12AC): gateSnaps() отдаёт { graph, imports, vitest } (GRAPH_GATE, IMPORTS_GATE и VITEST_GATE) после
+   * точки снимков ниже (openSnaps: graph.takeLive() и intRun.start - старт дочернего vitest - при первом
+   * вызове, тот же объект на каждый следующий), до неё - null. Описание гейта снимков не берёт (TDZ: память
+   * объявлена здесь, до первого вызова checkGateSelection, TECH_DEBT 23.10.2026 E0-12U круг 2); строка
+   * extra-пробы, которая гонится до точки снимков, - красная с причиной «перенеси описание гейта ниже»
+   * (решение техлида Р2 E0-12AC), а не тихий старт тяжёлого снимка и дочернего vitest внутри чужой строки.
+   * Сбой снятия запоминается (rememberOnce из ctx, L-043): сбой intRun.start после снятого графа не зовёт
+   * takeLive и дочерний vitest заново на каждой extra-строке.
    */
-  let gateSnaps = null;
+  let snapsOpen = false;
+  const takeSnaps = rememberOnce(() => {
+    const GRAPH = graph.takeLive();
+    const { IMPORTS_GATE, VITEST_GATE } = intRun.start(GRAPH);
+    return { graph: GRAPH, imports: IMPORTS_GATE, vitest: VITEST_GATE };
+  });
+  const gateSnaps = () => (snapsOpen ? takeSnaps() : null);
+  function openSnaps() {
+    snapsOpen = true;
+    return takeSnaps();
+  }
+  /** Причина красной строки extra-пробы kind ('графа', 'int'), которая гонится до точки снимков. */
+  const snapsTooEarly = (kind) => 'проба ' + kind + ' в описании гейта до снимков графа turbo и test/imports.ts - перенеси описание гейта ниже graph.takeLive() (selftest-gates.js)';
   /**
-   * Проба extra-строки x по снимкам s (E0-12AA; TECH_DEBT 23.10.2026 E0-12T F7): int - под guard графа
-   * и test/imports.ts (как intGuard), graph - под guard графа, иначе fn как есть. Снимков нет (описание
-   * гейта стоит до них, как compose, tracker, schema-drift) - строка пробы называет порядок, а не
-   * ReferenceError.
+   * Проба extra-строки x по снимкам snaps() (E0-12AA; TECH_DEBT 23.10.2026 E0-12T F7): int - под guard
+   * графа и test/imports.ts (как intGuard), graph - под guard графа, иначе fn как есть. Снимки берутся,
+   * когда строка гонится, а не когда гейт описан (snaps - ленивый геттер, gateSnaps); снимков ещё нет
+   * (null - строка гонится до точки снимков) - строка называет порядок.
    */
-  function extraProbe(x, name, fn, s) {
+  function extraProbe(x, name, fn, snaps) {
     if (!x.int && !x.graph) return fn;
-    if (!s) return () => 'проба ' + (x.int ? 'int' : 'графа') + ' в описании гейта до снимков графа turbo и test/imports.ts - перенеси описание гейта ниже graph.takeLive() (selftest-gates.js)';
-    return x.int ? s.graph.guard(name, s.imports.guard(name, fn)) : s.graph.guard(name, fn);
+    return (...args) => {
+      const s = snaps();
+      if (!s) return snapsTooEarly(x.int ? 'int' : 'графа');
+      return (x.int ? s.graph.guard(name, s.imports.guard(name, fn)) : s.graph.guard(name, fn))(...args);
+    };
   }
 
-  // TDZ (TECH_DEBT 23.10.2026 E0-12U круг 2, E0-12T F4): описание гейта с graph: true и int: true до
-  // снимков (там, где стоят compose, tracker, schema-drift) - строки проб с причиной, а не исключение
+  // TDZ (TECH_DEBT 23.10.2026 E0-12U круг 2, E0-12T F4; ленивый снимок E0-12AC): описание гейта с graph:
+  // true и int: true до снимков (там, где стоят compose, tracker, schema-drift) - строки проб получают
+  // снимок, когда гонятся; описание само снимков не берёт. Снимки - подменённый геттер со счётчиком.
+  // Строка, которая гонится до точки снимков (геттер отдаёт null; настоящий gateSnaps здесь - тоже null), -
+  // красная «перенеси описание гейта ниже» (решение техлида Р2 E0-12AC)
   check('checkGateSelection: проба graph и int в описании гейта до снимка графа (место compose, tracker, schema-drift) - строка с причиной, а не ReferenceError', () => {
     const rows = [];
-    const extra = [{ name: 'g', graph: true, fn: () => true }, { name: 'i', int: true, fn: () => true }];
+    const extra = [{ name: 'g', graph: true, fn: () => true }, { name: 'i', int: true, fn: () => ({ note: 'int' }) }];
+    let taken = 0;
+    const snap = { graph: snapshotGate(() => ({})), imports: snapshotGate(() => ({})) };
+    const snaps = () => {
+      taken++;
+      return snap;
+    };
     try {
-      checkGateSelection('compose', { runWhat: 'x', skipWhat: 'y', mustRun: [], mustSkip: [], extra }, (name, fn) => rows.push({ name, fn }));
+      checkGateSelection('compose', { runWhat: 'x', skipWhat: 'y', mustRun: [], mustSkip: [], extra }, (name, fn) => rows.push({ name, fn }), snaps);
     } catch (e) {
       return 'исключение вместо строк: ' + ((e && e.message) || String(e));
     }
+    if (taken) return 'описание гейта взяло снимки ' + taken + ' раз - снимок должен браться, когда гонится строка пробы';
     const got = rows.filter((r) => /: [gi]$/.test(r.name)).map((r) => outcome(r.name, r.fn));
-    const why = (kind) => 'проба ' + kind + ' в описании гейта до снимков графа turbo и test/imports.ts - перенеси описание гейта ниже graph.takeLive() (selftest-gates.js)';
-    const want = JSON.stringify([{ ok: false, name: 'гейт compose: g', note: why('графа') }, { ok: false, name: 'гейт compose: i', note: why('int') }]);
-    return JSON.stringify(got) === want || 'ожидалось ' + want + ', получено ' + JSON.stringify(got);
+    const want = JSON.stringify([{ ok: true, name: 'гейт compose: g', note: '' }, { ok: true, name: 'гейт compose: i', note: 'int' }]);
+    if (JSON.stringify(got) !== want) return 'ожидалось ' + want + ', получено ' + JSON.stringify(got);
+    if (taken !== 2) return 'строки проб взяли снимки ' + taken + ' раз, ожидалось 2';
+    if (gateSnaps() !== null) return 'gateSnaps до точки снимков отдал снимок - строка выше неё тихо сняла бы граф и стартовала vitest';
+    const early = [];
+    checkGateSelection('compose', { runWhat: 'x', skipWhat: 'y', mustRun: [], mustSkip: [], extra }, (name, fn) => early.push({ name, fn }), () => null);
+    const gotEarly = early.filter((r) => /: [gi]$/.test(r.name)).map((r) => outcome(r.name, r.fn));
+    const wantEarly = JSON.stringify([{ ok: false, name: 'гейт compose: g', note: snapsTooEarly('графа') }, { ok: false, name: 'гейт compose: i', note: snapsTooEarly('int') }]);
+    if (JSON.stringify(gotEarly) !== wantEarly) return 'до точки снимков: ожидалось ' + wantEarly + ', получено ' + JSON.stringify(gotEarly);
+    // сбой снятия запоминается (L-043): второй вызов геттера - то же исключение без нового снятия
+    let calls = 0;
+    const once = rememberOnce(() => {
+      calls++;
+      throw new Error('снимок: сбой');
+    });
+    const seen = [once, once].map((f) => {
+      try {
+        f();
+        return 'ответ';
+      } catch (e) {
+        return e.message;
+      }
+    });
+    if (calls !== 1 || seen.join() !== 'снимок: сбой,снимок: сбой') return 'сбой снимков: снятий ' + calls + ' (ожидалось 1), ответы ' + JSON.stringify(seen);
+    // исключение без значения (throw undefined) - тоже сбой: память по исходу, а не по истинности исключения
+    let blanks = 0;
+    const blank = rememberOnce(() => {
+      blanks++;
+      throw undefined;
+    });
+    const blankSeen = [blank, blank].map((f) => {
+      try {
+        return 'ответ ' + JSON.stringify(f());
+      } catch (e) {
+        return 'исключение ' + String(e);
+      }
+    });
+    return (blanks === 1 && blankSeen.join() === 'исключение undefined,исключение undefined') || 'throw undefined: снятий ' + blanks + ', ответы ' + JSON.stringify(blankSeen);
   });
   // Диспетчер (TECH_DEBT 23.10.2026 E0-12T F7): на подменённых снимках с ошибкой проба int уходит в
   // перечень снимка test/imports.ts, проба graph - в перечень снимка графа; своей строки нет
@@ -261,10 +328,10 @@ function registerGateProbes(ctx, deps) {
     ];
     const bad = [];
     for (const [label, x, s, owner] of cases) {
-      const r = outcome(label, extraProbe(x, label, () => true, s));
+      const r = outcome(label, extraProbe(x, label, () => true, () => s));
       if (r !== null || s[owner].blocked.join() !== label) bad.push(label + ': строка ' + JSON.stringify(r) + ', перечень снимка ' + JSON.stringify(s[owner].blocked));
     }
-    const live = outcome('с снимками', extraProbe({ int: true }, 'с снимками', () => true, { graph: ok(), imports: ok() }));
+    const live = outcome('с снимками', extraProbe({ int: true }, 'с снимками', () => true, () => ({ graph: ok(), imports: ok() })));
     if (!live || !live.ok) bad.push('со снятыми снимками: ' + JSON.stringify(live));
     return !bad.length || bad.join('; ');
   });
@@ -797,10 +864,10 @@ function registerGateProbes(ctx, deps) {
 
   // Снимок графа настоящего дерева (selftest-tree-graph.js) и начало int-пробы прогона
   // (selftest-int-cases.js: снимок test/imports.ts, старт дочернего vitest) - здесь, до синтетических
-  // кейсов графа: дочерний vitest идёт параллельно с ними.
-  const GRAPH_GATE = graph.takeLive();
-  const { IMPORTS_GATE, VITEST_GATE } = intRun.start(GRAPH_GATE);
-  gateSnaps = { graph: GRAPH_GATE, imports: IMPORTS_GATE };
+  // кейсов графа: дочерний vitest идёт параллельно с ними. Точка снимков (openSnaps) - здесь: строки выше,
+  // которым нужны снимки, нет (строка extra-пробы выше неё - красная «перенеси описание гейта ниже»), порядок
+  // строк вывода прежний
+  const { graph: GRAPH_GATE, imports: IMPORTS_GATE, vitest: VITEST_GATE } = openSnaps();
   const rootProbes = roots.createRootProbes(ctx, { gateProbe, selects, GRAPH_GATE });
   // Мемо корневого package.json (TECH_DEBT 23.10.2026 E0-12T C23): на подменённом источнике второй
   // вопрос не читает, ответ - тот же объект

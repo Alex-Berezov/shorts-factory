@@ -218,20 +218,25 @@ const dryCache = new Map();
  * process.env), opts.spawn - подмена запуска для кейсов веток отказа. Результат кэшируется на прогон
  * (пробы build, test:int и harness-selftest видят один снимок) только по явному opts.shared - его
  * ставит один вызов, чья точка запуска - run самопроверки (liveSnap, selftest-tree-graph.js), - и в
- * окружении процесса без подмены: ключ - корень и скрипты, а снимок без opts.shared (кейс с подменённым
+ * окружении процесса без подмены: ключ - корень, платформа, архитектура и скрипты (TECH_DEBT 28.10.2026
+ * E0-12AA круг 3, Р9: без платформы вызов другой платформы на том же корне получил бы чужой снимок), а
+ * снимок без opts.shared (кейс с подменённым
  * opts.run), с opts.env или opts.spawn кэш не читает и не пополняет (замечание ревью E0-12AA: кейс с
  * окружением или фальшивым run получал чужой снимок или травил кэш прогона; решение техлида Р9).
  */
 function turboDry(scripts, opts) {
   const o = opts || {};
   const root = o.root || ROOT;
-  const key = root + '\0' + scripts.join(' ');
+  const platform = o.platform || process.platform;
+  const arch = o.arch || process.arch;
+  // бинарь turbo другой платформы или архитектуры - другой снимок: они в ключе
+  const key = [root, platform, arch, scripts.join(' ')].join('\0');
   const shared = o.shared === true && o.env === undefined && !o.spawn;
   if (shared && dryCache.has(key)) return dryCache.get(key);
   const what = 'turbo run ' + scripts.join(' ') + ' --dry=json';
   let bin;
   try {
-    bin = turboBinary(root, o.platform || process.platform, o.arch || process.arch);
+    bin = turboBinary(root, platform, arch);
   } catch (e) {
     throw new Error(what + ': ' + ((e && e.message) || String(e)));
   }

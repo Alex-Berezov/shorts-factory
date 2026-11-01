@@ -6,24 +6,26 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-11-01. **Не �
 
 - **Прогресс:** `████████░░░░░░░░░░░░░░░░░░░░░░` 41/158 задач, 40.4 / 174.9 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** ничего — возьмите задачу из «Следующие»
+- **В работе:** [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке)
 - **Заблокировано:** нет
 
 ## Сейчас в работе
 
-_Нет задач в работе._
+| Задача | Название | Оценка | Начата |
+|---|---|---|---|
+| [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) | harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке) | 1 д | 2026-11-01 |
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
 | Задача | Название | Оценка | Эпик |
 |---|---|---|---|
-| [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) | harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке) | 1 д | E0 |
 | [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-общим-модулем-harness-selftestjs-вне-weakeningexempt-смысл-weakeningexemptnote) | harness-selftest: статические пробы по AST общим модулем, harness-selftest.js вне weakeningExempt, смысл weakeningExemptNote | 1 д | E0 |
 | [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) | gates.js/diff-hash.js: долг ревью E0-12AB (кругов 1-4) | 1 д | E0 |
 | [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s14-формы-s15s16-сверка-носителей-замок-zod) | rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S14, формы S15/S16, сверка носителей, замок zod | 1 д | E0 |
 | [E0-12W](TECH_DEBT.md#e0-12w-общий-test-support-приложений-sfruntimetest-support-dev-command-child-run-imports-int-хелперы-asserthashed-adr-0011) | Общий test-support приложений: @sf/runtime/test-support (dev-command, child-run, imports), int-хелперы, assertHashed, ADR-0011 | 1.5 д | E0 |
+| [E0-12X](TECH_DEBT.md#e0-12x-трекер-и-ссылки-на-долг-optset-якорь-render---check-zod-tasksjson-filelinerefs-форма-ссылок-на-techdebt) | Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT | 1 д | E0 |
 
-Взять в работу: `node scripts/tasks.mjs start E0-12AC`
+Взять в работу: `node scripts/tasks.mjs start E0-12AD`
 
 ## Прогресс по эпикам
 
@@ -72,7 +74,7 @@ _Нет задач в работе._
 | ✅ | [E0-12A](TECH_DEBT.md#e0-12a-общий-пресет-vitest-и-test-support-sfdb-фикстура-int-наборов-общий-страж-стека-чистка-тестовых-хелперов-корневой-vitest-проект-scripts) | Общий пресет vitest и test-support @sf/db: фикстура int-наборов, общий страж стека, чистка тестовых хелперов, корневой vitest-проект scripts/** | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-17 |
 | ✅ | [E0-12AA](TECH_DEBT.md#e0-12aa-harness-selftest-пробы-и-кейсы-группы-b-w01w02w08-на-запись-граф-импортов-trackercompose-протокол-ребёнка-vitest-в-одном-модуле-мемо-через-opts-один-помощник-файл-есть-pidgone-после-sigkill-кейс-tdz) | harness-selftest: пробы и кейсы группы B (W01/W02/W08 на запись, граф импортов tracker/compose, протокол ребёнка vitest в одном модуле, мемо через opts, один помощник «файл есть», pidGone после SIGKILL, кейс TDZ) | 1.5 д | ✅E0-12U | 2026-10-28 | 2026-10-28 |
 | ✅ | [E0-12AB](TECH_DEBT.md#e0-12ab-gatesjs-хвосты-e0-12m-lastgates-по-диффу-до-очереди-матрица-вердиктов-в-одном-месте-дубли-предиката-мёртвые-ветки---only-на-чистом-дереве-страж-exited-проба-фона) | gates.js: хвосты E0-12M (lastGates по диффу до очереди, матрица вердиктов в одном месте, дубли предиката, мёртвые ветки, --only на чистом дереве, страж exited, проба фона) | 1 д | ✅E0-12U ✅E0-12M | 2026-10-28 | 2026-11-01 |
-| ⬜ | [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) | harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке) | 1 д | ✅E0-12U ✅E0-12AA |  |  |
+| 🔄 | [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) | harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке) | 1 д | ✅E0-12U ✅E0-12AA | 2026-11-01 |  |
 | ⬜ | [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-общим-модулем-harness-selftestjs-вне-weakeningexempt-смысл-weakeningexemptnote) | harness-selftest: статические пробы по AST общим модулем, harness-selftest.js вне weakeningExempt, смысл weakeningExemptNote | 1 д | ✅E0-12AA |  |  |
 | ⬜ | [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) | gates.js/diff-hash.js: долг ревью E0-12AB (кругов 1-4) | 1 д | ✅E0-12AB |  |  |
 | ✅ | [E0-12B](TECH_DEBT.md#e0-12b-общий-пакет-инфраструктуры-apiworker-logger-redact-redis-shutdown-фабрика-queue-примитив-дедлайна-чистка-публичных-экспортов) | Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-18 |

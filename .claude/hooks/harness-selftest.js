@@ -67,8 +67,14 @@ const SELFTEST_MODULES = [
   {
     file: 'selftest-gate-runner.js',
     load: null,
-    why: 'дочерний node проб запуска gates.js (gateRunner из selftest-gates-run.js); этот файл его не require, selftest-gates-run.js берёт только STARTED_SUFFIX',
+    why: 'дочерний node проб запуска gates.js (gateRunner из selftest-gates-run.js); этот файл его не require, selftest-gates-run.js берёт только строки протокола STARTED_SUFFIX и RUNNER_EXIT_MARK',
     exit: 'gateRunner - код дочернего процесса: его exit - выход ребёнка с готовым итогом, а не самопроверки',
+  },
+  {
+    file: 'selftest-batch.js',
+    load: null,
+    why: 'дочерний node пакетного запуска (batchRunner); этот файл его не require - программу ребёнка, строки протокола и разбор итога держит selftest-children.js (makeBatch)',
+    exit: 'batchRunner - код дочернего процесса: его exit - выход ребёнка с готовым итогом, а не самопроверки',
   },
   { file: 'selftest-gates-run.js', load: 'gates' },
   { file: 'selftest-tree-graph.js', load: 'gates' },
@@ -132,6 +138,41 @@ function check(name, fn, onRow = (row) => results.push(row)) {
   const r = outcome(name, fn);
   if (r) onRow(r);
 }
+/**
+ * Отложенные строки (E0-12AC): проба, которой нужен ребёнок в фоне (startDetached), объявляет строку
+ * checkLater(name, fn) там, где стояла бы её строка check, - место в rows резервируется в порядке
+ * объявления, а fn зовётся в точке сбора settleLater() (перед конечными пробами прогона), когда ребёнок
+ * уже отработал параллельно остальным пробам. Итог outcome встаёт на зарезервированное место, null
+ * (SKIPPED, GateBlocked) - место снимается. Незаполненное место - строка FAIL с LATER_PENDING: report(),
+ * позванный до сбора (сейчас его зовёт только конец прогона, после settleLater; страховка правки порядка),
+ * печатает её, а не пропускает строку и не пишет ok. Выход процесса до сбора (process.exit внутри пробы,
+ * Ctrl+C - SIGINT -> exit(130)) report() не зовёт и строк не печатает вовсе: детей в фоне снимает
+ * обработчик exit (набор детей), прогон - без итога.
+ * rows - приёмник строк (по умолчанию results прогона; кейс берёт свой), order(slots) - порядок вызова
+ * fn при сборе (кейс обращает его: место строки от порядка сбора не зависит).
+ */
+const LATER_PENDING = 'проба не дождалась ребёнка в фоне';
+function makeLater(rows, order = (slots) => slots) {
+  const pending = new Map();
+  const checkLater = (name, fn) => {
+    const slot = { ok: false, name, note: LATER_PENDING };
+    pending.set(slot, fn);
+    rows.push(slot);
+  };
+  const settleLater = () => {
+    const got = new Map();
+    for (const slot of order(Array.from(pending.keys()))) got.set(slot, outcome(slot.name, pending.get(slot)));
+    pending.clear();
+    const next = [];
+    for (const row of rows) {
+      if (!got.has(row)) next.push(row);
+      else if (got.get(row)) next.push(got.get(row));
+    }
+    rows.splice(0, rows.length, ...next);
+  };
+  return { checkLater, settleLater };
+}
+const { checkLater, settleLater } = makeLater(results);
 
 /**
  * Снимок, без которого группа проб не гоняется, - один на прогон: getSnap() зовётся один раз, его
@@ -264,6 +305,13 @@ process.on('exit', killLiveChildrenOnExit);
 process.on('exit', TEMP.dropAll);
 process.on('SIGINT', () => process.exit(130));
 
+/**
+ * Каталоги прошлых прогонов старше суток (E0-12AC, решение техлида Р3): снимаются до первого tempDir
+ * этого прогона; сбой снятия одного прогон не роняет - его называет note строки «tempDir: sweepStale …».
+ */
+const STALE_TEMP_MS = 24 * 60 * 60 * 1000;
+const STALE_SWEEP = TEMP.sweepStale(STALE_TEMP_MS);
+
 const PROBE_STATE_DIR = tempDir('state');
 process.env.SF_HOOK_STATE_DIR = PROBE_STATE_DIR;
 
@@ -275,7 +323,7 @@ process.env.SF_HOOK_STATE_DIR = PROBE_STATE_DIR;
  */
 const DROP_FAILURES = [];
 /**
- * Каталоги, которые держит живой ребёнок после отказа снятия (killAndWait, selftest-int.js):
+ * Каталоги, которые держит живой ребёнок после отказа снятия (killAndWait, selftest-children.js):
  * holdTemp(dir, why) - releaseTemp их не снимает и сбоем не пишет (EBUSY на Windows - вторая красная
  * строка без новой причины); их снимает выход прогона после SIGKILL набора детей, пометку даёт проба
  * «временные каталоги прогона сняты». unholdTemp(dir) - кейс, который сам снял своего ребёнка.
@@ -297,6 +345,22 @@ function releaseTemp(dir, opts) {
     return false;
   }
 }
+/**
+ * Ребёнок в фоне (E0-12AC; selftest-children.js, makeDetached): старт без ожидания через точку запуска
+ * самопроверки, ответ - синхронным опросом файла вывода в точке, где он нужен (дочерний vitest пробы
+ * test:int, дети проб запуска gates.js и поддельного процесса - их строки через checkLater). Ребёнок до
+ * ответа - в LIVE_CHILDREN, каталог не снятого после SIGKILL - в holdTemp.
+ */
+const { startDetached, awaitDetached, killAndWait } = CHILDREN_MOD.makeDetached({ spawn: LAUNCH.spawn, spawnSync: run, live: LIVE_CHILDREN, holdTemp });
+/**
+ * Пакетный запуск (E0-12AC; selftest-children.js, makeBatch): задания - node в одном дочернем node
+ * параллельно; runBatch - синхронно, startBatch - в фоне. Подготовка проб standards (startStandardsBatch)
+ * и живые пробы commit-gate (liveCommitGate) - ниже.
+ */
+const BATCH_LIMIT = CHILDREN_MOD.BATCH_LIMIT;
+/** Запоминание старта в фоне и сбора (selftest-children.js): живые пробы commit-gate, пакет standards, модули через ctx. */
+const { rememberOnce, lazyStart } = CHILDREN_MOD;
+const { runBatch, startBatch } = CHILDREN_MOD.makeBatch({ run, startDetached, awaitDetached, put, liveState: LIVE_STATE, cwd: ROOT });
 
 /**
  * Пути p нет: lstat отвечает ENOENT или ENOTDIR (L.statIfPresent - один помощник «путь есть»
@@ -552,6 +616,7 @@ const REQUIRE_NOT_EDGE = [
   { file: 'selftest-gates.js', re: /^esm\)/, why: 'текст комментария и имени строки: require для ESM (require-esm) - механизм Node, а не вызов' },
   { file: 'selftest-gates-run.js', re: /^' \+ JSON\.stringify\(file\) \+ '\)/, why: 'gates.js пробы require в дочернем node - хук HOOK_FILES' },
   { file: 'selftest-gate-runner.js', re: /^cfg\.gatesFile\)/, why: 'gates.js в дочернем node проб запуска - хук HOOK_FILES' },
+  { file: 'selftest-children.js', re: /^' \+ JSON\.stringify\(file\) \+ '\)/, why: 'программа -e дочернего node (childProgram): модуль тела - путь от вызывающего, тела детей (selftest-gate-runner.js, selftest-batch.js) - в перечне' },
   { file: 'selftest-gate-runner.js', re: /^<этот файл>\)/, why: 'текст комментария' },
 ];
 /**
@@ -945,6 +1010,111 @@ function withScratchTree(fn) {
   }
 }
 
+/**
+ * Тела проб standards пакетом в фоне (E0-12AC, решение техлида по ОВ2): groups - [{ rel, bodies }]; на
+ * группу - один каталог tempDir('tree') (каталоги групп, кроме первой, пусты - держат note Р2 E0-12AC, снять в E0-12AE). Подкорни
+ * <s>/ с полной копией хуков (copyHooksTo: корень репозитория для хука - подкорень, glob правил те же) -
+ * общий набор на пакет, не больше BATCH_LIMIT, в каталоге первой группы: тело j (сквозной номер по
+ * группам) идёт в подкорне j % k, тела одного подкорня - по очереди (slot пакета), файл тела по своему rel
+ * пишет ребёнок пакета перед запуском хука (файлы прежних тел подкорня хук не читает - только свой путь).
+ * Свежая копия хуков - первый запуск node по новым файлам (на Windows - их проверка антивирусом, замер в
+ * деле E0-12AC), поэтому копий не больше, чем процессов разом. Хук идёт с CLAUDE_HOOK_DEBUG (см.
+ * withScratchTree) и каталогом состояния своего подкорня (state-<s>, не каталог проб): standards.js пишет
+ * счётчик правок (L.bumpEdits - чтение, правка, rename одного .qa-state), и тела, идущие разом, в общем
+ * каталоге гонялись бы за один файл (на Windows readState бросает на EPERM/EBUSY - ложная красная
+ * «упал внутри guard»), а каталог проб сверяют и подменяют пробы answer-length и remind-format. Тела
+ * одного подкорня идут по очереди - в его каталоге счётчик правок равен числу его тел; иное - отказ
+ * пакета (каталог состояния не свой; standardsAnswers). Все тела - один пакет startBatch, его настройки и
+ * вывод - в каталоге первой группы. Ответ отдаёт возвращённая функция сбора: по группам массивы
+ * { code, signal, hung, out, err } в порядке тел; каталоги снимает она же (finally), отказ подготовки или
+ * старта снимает их сразу.
+ */
+const STANDARDS_CAP_MS = 60 * 1000;
+function startStandardsBatch(groups) {
+  const dirs = [];
+  try {
+    for (let i = 0; i < groups.length; i++) dirs.push(tempDir('tree'));
+    const total = groups.reduce((n, g) => n + g.bodies.length, 0);
+    const roots = [];
+    for (let s = 0; s < Math.min(total, BATCH_LIMIT); s++) {
+      const root = path.join(dirs[0], String(s));
+      const state = path.join(dirs[0], 'state-' + s);
+      fs.mkdirSync(state);
+      roots.push({ root, hooks: copyHooksTo(root), state, jobs: [], files: new Map() });
+    }
+    const jobs = [];
+    for (const g of groups) {
+      for (const body of g.bodies) {
+        const slot = jobs.length % roots.length;
+        const at = roots[slot];
+        // файл тела - заготовка put (каталоги по rel), текст пишет ребёнок пакета перед запуском хука
+        const file = at.files.get(g.rel) || put(at.root, g.rel, '');
+        at.files.set(g.rel, file);
+        at.jobs.push(jobs.length);
+        jobs.push({
+          args: [path.join(at.hooks, 'standards.js')],
+          input: JSON.stringify({ tool_input: { file_path: file } }),
+          cwd: at.root,
+          env: { CLAUDE_HOOK_DEBUG: '1', SF_HOOK_STATE_DIR: at.state },
+          capMs: STANDARDS_CAP_MS,
+          slot,
+          write: { file, text: body },
+        });
+      }
+    }
+    const answer = startBatch(jobs, dirs[0]);
+    return () => {
+      try {
+        const answers = standardsAnswers(roots, answer(), stateEdits);
+        let k = 0;
+        return groups.map((g) => g.bodies.map(() => answers[k++]));
+      } finally {
+        for (const dir of dirs) releaseTemp(dir);
+      }
+    };
+  } catch (e) {
+    for (const dir of dirs) releaseTemp(dir);
+    throw e;
+  }
+}
+
+/**
+ * Ответы пакета standards answers (по заданиям) со сверкой каталогов состояния подкорней roots ({ state,
+ * jobs - номера заданий подкорня }): счётчик правок подкорня (editsOf(state)) обязан равняться числу его
+ * тел - иначе отказ пакета одним текстом. Подкорень, где хоть одно тело не дошло до своего ответа (снято по
+ * пределу или сигналом, отказ запуска, код вне 0/2, крах внутри L.guard - HOOK_ERROR), не сверяется: тело
+ * могло не дойти до счётчика правок, и причину называет вердикт этого тела (standardsVerdict), а не ложное
+ * «каталог состояния не свой» во всех строках. Ответ - { code, signal, hung, out, err } по заданиям.
+ */
+function standardsAnswers(roots, answers, editsOf) {
+  const list = answers.map((r) => ({ code: r.code, signal: r.signal || null, hung: Boolean(r.hung), out: String(r.out || ''), err: String(r.err || '') }));
+  roots.forEach((at, s) => {
+    if (at.jobs.some((j) => standardsCut(list[j]))) return;
+    const edits = editsOf(at.state);
+    if (edits !== at.jobs.length) throw new Error('пакет standards: в каталоге состояния подкорня ' + s + ' правок ' + edits + ', тел подкорня ' + at.jobs.length + ' - каталог состояния не свой у тел, идущих разом');
+  });
+  return list;
+}
+/**
+ * Тело standards не дошло до своего ответа (ответ пакета r): снято по пределу или сигналом, код вне 0/2,
+ * крах внутри L.guard (HOOK_ERROR, код 0). Причина с началом stderr - продолжение текста «standards.js …»,
+ * иначе ''. Один предикат на сверку каталогов состояния (standardsAnswers) и вердикт тела
+ * (standardsVerdict): новый класс отказа вписывается здесь - и сверка его пропускает, и вердикт его называет.
+ */
+function standardsCut(r) {
+  const err = r.err.slice(0, 160);
+  if (r.hung) return 'снят по пределу ' + STANDARDS_CAP_MS / 1000 + ' с - ' + err;
+  if (r.signal) return 'снят сигналом ' + r.signal + ' - ' + err;
+  if (r.code !== 0 && r.code !== 2) return 'упал, код ' + r.code + ' ' + err;
+  if (r.err.includes(HOOK_ERROR)) return 'упал внутри guard - ' + err;
+  return '';
+}
+/** Счётчик правок в каталоге состояния хуков state: .qa-state нет - 0 (ни одно тело до счётчика не дошло). */
+function stateEdits(state) {
+  const file = path.join(state, '.qa-state');
+  return absent(file) ? 0 : readJson(file).edits || 0;
+}
+
 /** Файлы каталога dir рекурсивно, пути от него с `/`, по алфавиту. */
 function filesUnder(dir) {
   const out = [];
@@ -1052,8 +1222,8 @@ const ROUTE_FORMS = ['apps/api/src/routes/health/index.ts', 'apps/api/src/routes
 const tempView = Object.freeze({ dropAll: TEMP.dropAll });
 const ctx = Object.freeze({
   L, HOOKS, CLAUDE, ROOT, G, SYNTAX_OK, SKIPPED, LISTING_MAX_BUFFER, LIVE_CHILDREN, LIVE_STATE, tempView, ROUTE_FORMS,
-  results, check, outcome, snapshotGate, gateVerdict, refusedCheck, refusalVerdict,
-  run, spawn: LAUNCH.spawn, git, gitStrict, gitLive, inLiveTree, tempDir, put, releaseTemp, holdTemp, unholdTemp, dropFailures: () => DROP_FAILURES.length, absent, readJson, copyHooksTo,
+  results, check, checkLater, outcome, snapshotGate, gateVerdict, refusedCheck, refusalVerdict,
+  run, spawn: LAUNCH.spawn, startDetached, awaitDetached, rememberOnce, lazyStart, git, gitStrict, gitLive, inLiveTree, tempDir, put, releaseTemp, holdTemp, unholdTemp, dropFailures: () => DROP_FAILURES.length, absent, readJson, copyHooksTo,
   killLiveChildren, killLiveChildrenOnExit,
   repoRules,
 });
@@ -1187,20 +1357,53 @@ check('снятых замков нет: protect-files, scope, diff-boundaries, 
   const back = ['protect-files.js', 'scope.js', 'diff-boundaries.js', 'qa-lock.js'].filter((h) => text.includes(h) || fs.existsSync(path.join(HOOKS, h)));
   return back.length ? 'вернулись: ' + back.join(', ') : true;
 });
+/**
+ * Живые пробы commit-gate на дереве репозитория (E0-12AC, решение техлида по ОВ2): четыре запуска хука
+ * независимы - один синхронный пакет runBatch (cwd и окружение - как у probe: каталог состояния проб
+ * поверх окружения процесса, через белый список пакета), каждая строка - свой вердикт по своему элементу
+ * ответа. Время хука растёт с диффом рабочего дерева (TECH_DEBT 23.10.2026 E0-12U, остаток в E0-12AE) -
+ * параллельно их четыре разом. Ответ и отказ пакета запоминаются (rememberOnce): отказ - одним текстом в
+ * каждой строке.
+ */
+const LIVE_COMMIT_COMMANDS = {
+  noVerify: 'git commit --no-verify -m "feat: x"',
+  message: 'git commit -m "поправил всё"',
+  force: 'git push --force origin main',
+  wrapped: 'bash -c "git commit -n -m \'feat: x\'"',
+};
+const LIVE_COMMIT_CAP_MS = 60 * 1000;
+const liveCommitRuns = rememberOnce(() => {
+  const keys = Object.keys(LIVE_COMMIT_COMMANDS);
+  const got = runBatch(keys.map((k) => ({
+    args: [path.join(HOOKS, 'commit-gate.js')],
+    input: JSON.stringify({ tool_input: { command: LIVE_COMMIT_COMMANDS[k] } }),
+    cwd: CWD,
+    env: { SF_HOOK_STATE_DIR: PROBE_STATE_DIR },
+    capMs: LIVE_COMMIT_CAP_MS,
+  })));
+  const value = {};
+  keys.forEach((k, i) => {
+    value[k] = { code: got[i].code, out: String(got[i].out || ''), err: String(got[i].err || '') };
+  });
+  return value;
+});
+function liveCommitGate(key) {
+  return liveCommitRuns()[key];
+}
 check('commit-gate: отказ на --no-verify', () => {
-  const r = probe('commit-gate.js', { tool_input: { command: 'git commit --no-verify -m "feat: x"' } }, CWD);
+  const r = liveCommitGate('noVerify');
   return /deny/.test(r.out) && /no-verify/.test(r.out) ? true : 'нет отказа: ' + (r.out || r.err).slice(0, 120);
 });
 check('commit-gate: отказ на неконвенциональное сообщение', () => {
-  const r = probe('commit-gate.js', { tool_input: { command: 'git commit -m "поправил всё"' } }, CWD);
+  const r = liveCommitGate('message');
   return /deny/.test(r.out) && /conventional/.test(r.out) ? true : 'нет отказа: ' + (r.out || r.err).slice(0, 120);
 });
 check('commit-gate: отказ на push --force', () => {
-  const r = probe('commit-gate.js', { tool_input: { command: 'git push --force origin main' } }, CWD);
+  const r = liveCommitGate('force');
   return /deny/.test(r.out) && /истори/.test(r.out) ? true : 'нет отказа';
 });
 check('commit-gate: bash -c обёртка не обходит замок', () => {
-  const r = probe('commit-gate.js', { tool_input: { command: 'bash -c "git commit -n -m \'feat: x\'"' } }, CWD);
+  const r = liveCommitGate('wrapped');
   return /deny/.test(r.out) ? true : 'обёртка прошла';
 });
 /**
@@ -1271,10 +1474,11 @@ check('commitGate.weakeningExempt - ровно ожидаемый перечен
 /**
  * Живая проба замка ослаблений на копии хуков (withScratchTree, репозиторий без коммитов - isBootstrap,
  * /qa и гейты не спрашиваются). Пропуск и отказ - по решению хука, а не по строкам [W..] (E0-12U,
- * решение техлида B1 после круга 3): чистая копия - не deny; строка с W02 в конце исключённого
- * harness-selftest.js - не deny; та же строка в конце selftest-gates.js (вне исключений) - deny,
- * отказ называет его с номером строки и не называет исключённый файл. Литерал склеен: иначе его
- * поймал бы замок на этом файле.
+ * решение техлида B1 после круга 3): строка с W02 в конце исключённого harness-selftest.js - не deny;
+ * та же строка в конце selftest-gates.js (вне исключений) - deny, отказ называет его с номером строки и
+ * не называет исключённый файл (чистую копию держит этот же отказ: лишний [W..] - красная строка; запуска
+ * на чистой копии нет - TECH_DEBT 23.10.2026 E0-12U Fix 1, E0-12AC). Литерал склеен: иначе его поймал бы
+ * замок на этом файле.
  *
  * Сторона пропуска засчитывается только по разобранному решению (TECH_DEBT 23.10.2026 E0-12U после
  * Fix 3): код 0, stdout пуст или JSON с решением allow/без решения, нет HOOK_ERROR; падение хука (код не
@@ -1311,20 +1515,19 @@ function weakeningLockProbe(prep) {
     const weak = (r) => r.out.match(/[\w./-]+:\d+ {2}\[W0\d\]/g) || [];
     const ownLines = (r) => weak(r).map((x) => /^sf\/\.claude\/hooks\/selftest-gates\.js:(\d+) {2}\[W02\]$/.exec(x)).filter(Boolean).map((m) => Number(m[1]));
     const undecidable = (n) => 'в файле уже есть W02 на строке ' + n + ', проба неопределима (замок печатает один пример на файл и правило)';
-    const first = commit();
-    const firstDecision = commitDecision(first);
-    // чужой W02 в selftest-gates.js до строки пробы: замок назовёт его, а не строку пробы
-    if (firstDecision.decision === 'deny' && ownLines(first).length) return undecidable(ownLines(first)[0]);
-    const clean = commitPassed(first, 'чистая копия хуков');
-    if (clean !== true) return clean + (weak(first).length ? ' - ' + weak(first).join(', ') : '');
     const planted = (file) => {
       const p = path.join(hooks, file);
       fs.appendFileSync(p, '\n' + W02_PLANTED + '\n');
       return fs.readFileSync(p, 'utf8').split(/\r?\n/).lastIndexOf(W02_PLANTED) + 1;
     };
+    // запуска «чистая копия хуков» нет (TECH_DEBT 23.10.2026 E0-12U Fix 1, E0-12AC): чистую сторону держит
+    // фильтр stray отказного запуска, падение хука на стороне пропуска - этот запуск
     planted('harness-selftest.js');
-    const exempt = commitPassed(commit(), 'ослабление в исключённом harness-selftest.js');
-    if (exempt !== true) return exempt;
+    const exemptRun = commit();
+    // чужой W02 в selftest-gates.js до строки пробы: замок назовёт его, а не строку пробы
+    if (commitDecision(exemptRun).decision === 'deny' && ownLines(exemptRun).length) return undecidable(ownLines(exemptRun)[0]);
+    const exempt = commitPassed(exemptRun, 'ослабление в исключённом harness-selftest.js');
+    if (exempt !== true) return exempt + (weak(exemptRun).length ? ' - ' + weak(exemptRun).join(', ') : '');
     const at = planted('selftest-gates.js');
     const refused = commit();
     const d = commitDecision(refused);
@@ -1345,7 +1548,7 @@ check('commit-gate: W02 в модуле самопроверки вне weakenin
 // «проба неопределима» (решение техлида Р4 E0-12AA)
 check('commit-gate: живая проба W02 - падение хука на стороне пропуска и чужой W02 выше строки пробы - отказ пробы с причиной', () => {
   const crashed = weakeningLockProbe((hooks) => fs.writeFileSync(path.join(hooks, 'commit-gate.js'), "throw new Error('selftest');\n"));
-  const wantCrash = 'чистая копия хуков: commit-gate.js: код 1 ';
+  const wantCrash = 'ослабление в исключённом harness-selftest.js: commit-gate.js: код 1 ';
   if (typeof crashed !== 'string' || !crashed.startsWith(wantCrash)) return 'бросающий commit-gate: ожидалось «' + wantCrash + '…», получено ' + JSON.stringify(crashed);
   let foreign = 0;
   const shadowed = weakeningLockProbe((hooks) => {
@@ -1362,6 +1565,244 @@ function missingDirs(rels) {
   return gone.length ? 'нет ' + gone.join(', ') : '';
 }
 
+// Пакетный запуск (E0-12AC, L-008; ревью E0-12AC - L-014, L-005, T5, T7, C4): упавшее и зависшее задание
+// отдают свой код и stderr, а не «0»; итоги - в порядке заданий, хотя первое завершается последним (оно ждёт
+// конца снятого по пределу: файл pid и kill 0, а не окно); задания одного slot - по очереди, файл write - перед
+// своим запуском, отказ write - итог задания; не больше limit разом; пустой пакет - пустой итог; отказ точки
+// запуска (каталог состояния на чужом liveState) - итог задания; задание, чьи пайпы держит внук, - итог по
+// пределу, пока внук жив; отказ настроек (limit, capMs, capAfterOutput, input, jobs) и предел ответа runBatch -
+// исключение с кодом и началом stderr; выход пакета по исключению снимает идущие задания и называет их;
+// оборванный итог (не JSON) - тот же отказ «не дошёл до итога», а не SyntaxError.
+// Предел снятия зависшего и задания с внуком - BATCH_CASE_CAP_MS от их первого вывода (capAfterOutput:
+// рукопожатие - pid и stderr записаны до того, как предел заведён): 1 мс - от часов итог не зависит, а предел
+// от запуска снял бы задание до старта node.
+// Там же - ребёнок в фоне (awaitDetached): строка выхода - последняя целая строка с меткой (exitSplit), строка
+// с меткой раньше неё - тело; предел ответа - от запуска, а ответ сверяется раньше предела: ответивший
+// ребёнок, собранный позже предела, отдаёт ответ (рукопожатие: строка выхода в файле и конец процесса - до
+// сбора), не ответивший - снят тут же, без нового предела от начала ожидания, его stderr - в ответе и тексте
+// отказа (childFailure); вышедший без строки выхода - отказ сразу, без ожидания предела.
+const BATCH_CASE_CAP_MS = 1;
+/** Предел ответа ребёнка «сбор позже предела»: 1 мс от запуска - к сбору он прошёл всегда (ответ - после строки ready). */
+const BATCH_LATE_MS = 1;
+/**
+ * Предел ответа ребёнка без ответа (кейс «снят тут же»): сбор позже предела - старт ребёнка сдвинут назад на
+ * предел, без ожидания часов; сбор, давший ребёнку новый предел от начала ожидания, длится не меньше предела,
+ * а снятие тут же - не дольше DETACHED_KILL_GONE_MS (10 с) ожидания конца после SIGKILL.
+ */
+const BATCH_MUTE_MS = 20000;
+/**
+ * Внук задания пробы пакета: держит пайпы задания (stdio inherit), задание пишет его pid и выходит; внука
+ * снимает проба, а без неё он выходит сам, когда процесса самопроверки (pid - аргумент задания) не стало.
+ * detached - иначе на Windows внук уходит вместе с заданием (объект задания node снимает детей на выходе).
+ */
+const BATCH_HOLDER = "const c = require('child_process').spawn(process.execPath, ['-e', 'const t = setInterval(() => { try { process.kill(Number(process.argv[1]), 0); } catch (e) { clearInterval(t); } }, 200)', process.argv[1]], { stdio: 'inherit', detached: true }); process.stdout.write(String(c.pid)); c.unref();";
+check('selftest-batch.js batchRunner: задание с кодом 3 и задание, снятое по пределу, - их код и stderr, а не 0; порядок итогов - порядок заданий при обратном порядке завершения; ребёнок пакета без итога - исключение с кодом и началом stderr', () => {
+  const box = path.join(PROBE_STATE_DIR, 'batch-case');
+  fs.mkdirSync(box, { recursive: true });
+  const holders = [];
+  const NL = '\n';
+  // дети кейса в фоне: не собранных (исключение пробы) снимает finally
+  const detached = [];
+  try {
+    const job = (code, capMs, extra) => Object.assign({ args: ['-e', code], input: '', cwd: ROOT, env: { SF_HOOK_STATE_DIR: PROBE_STATE_DIR }, capMs }, extra || {});
+    // ребёнок в фоне, который отвечает только по файлу go: стартует сейчас, собирается после пакетов ниже -
+    // позже своего предела BATCH_LATE_MS от старта
+    const goFile = path.join(box, 'go');
+    const lateMark = 'selftest-case-late-exit ';
+    const late = startDetached(process.execPath, ['-e', 'const fs = require("fs"); process.stdout.write("ready" + String.fromCharCode(10)); const t = setInterval(() => { if (fs.existsSync(' +
+      JSON.stringify(goFile) + ')) { clearInterval(t); process.stdout.write(String.fromCharCode(10) + ' + JSON.stringify(lateMark) + ' + "0" + String.fromCharCode(10)); } }, 20);'], {
+      dir: box, name: 'late', cwd: ROOT, exitMark: lateMark, what: 'ребёнок кейса «сбор позже предела»', label: 'ребёнок кейса «сбор позже предела»', timeoutMs: BATCH_LATE_MS,
+    });
+    detached.push(late);
+    // ребёнок в фоне без ответа: пишет stderr и висит - собирается позже своего предела BATCH_MUTE_MS
+    const mute = startDetached(process.execPath, ['-e', 'process.stderr.write("stuck"); setInterval(() => {}, 1000);'], {
+      dir: box, name: 'mute', cwd: ROOT, exitMark: lateMark, what: 'ребёнок кейса «без ответа»', label: 'ребёнок кейса «без ответа»', timeoutMs: BATCH_MUTE_MS,
+    });
+    detached.push(mute);
+    const pidFile = path.join(box, 'hang.pid');
+    const shared = put(box, 'w.txt', '');
+    // тело задания: текст файла write на старте (read), отметки старта и конца (пауза 400 мс)
+    const timed = (read) => 'const a = Date.now(); const t = ' + (read ? 'require("fs").readFileSync(' + JSON.stringify(shared) + ', "utf8")' : '""') +
+      '; setTimeout(() => process.stdout.write(JSON.stringify([t, a, Date.now()])), 400);';
+    const slow = 'const fs = require("fs"); const t0 = Date.now(); const tick = () => { let pid = 0; try { pid = Number(fs.readFileSync(' + JSON.stringify(pidFile) +
+      ', "utf8")); } catch (_) {} let gone = false; if (pid > 0) { try { process.kill(pid, 0); } catch (e) { gone = e.code === "ESRCH"; } } if (gone || Date.now() - t0 > 20000) process.stdout.write("slow"); else setTimeout(tick, 20); }; tick();';
+    const hang = 'require("fs").writeFileSync(' + JSON.stringify(pidFile) + ', String(process.pid)); process.stderr.write("hang"); setInterval(() => {}, 1000);';
+    const got = runBatch([
+      job(slow, 30000),
+      job(hang, BATCH_CASE_CAP_MS, { capAfterOutput: true }),
+      job('process.stderr.write("boom"); process.exitCode = 3;', 30000),
+      job(timed(true), 30000, { slot: 0, write: { file: shared, text: 'one' } }),
+      job(timed(true), 30000, { slot: 0, write: { file: shared, text: 'two' } }),
+      job(BATCH_HOLDER, BATCH_CASE_CAP_MS, { capAfterOutput: true, args: ['-e', BATCH_HOLDER, String(process.pid)] }),
+    ], { limit: 4, timeoutMs: 20000 });
+    const why = [];
+    const seen = got.slice(0, 3).map((r) => [r.code, r.signal, r.hung, r.out, r.err]);
+    const want = [[0, null, false, 'slow', ''], [null, 'SIGKILL', true, '', 'hang'], [3, null, false, '', 'boom']];
+    if (JSON.stringify(seen) !== JSON.stringify(want)) why.push('итоги ' + JSON.stringify(seen) + ', ожидалось ' + JSON.stringify(want));
+    const marks = (r) => {
+      try {
+        return JSON.parse(r.out);
+      } catch (_) {
+        return null;
+      }
+    };
+    const [w1, w2] = [marks(got[3]), marks(got[4])];
+    if (!w1 || !w2 || w1[0] !== 'one' || w2[0] !== 'two') why.push('slot: тексты write ' + JSON.stringify([got[3].out || got[3].err, got[4].out || got[4].err]) + ', ожидалось «one», «two»');
+    else if (w2[1] < w1[2]) why.push('slot: второе задание стартовало до конца первого (' + w2[1] + ' < ' + w1[2] + ')');
+    const holder = got[5];
+    const pid = Number(holder.out);
+    if (Number.isInteger(pid) && pid > 0) holders.push(pid);
+    if (!holder.hung || !holders.length) why.push('задание с внуком: ' + JSON.stringify(holder) + ', ожидался итог по пределу с pid внука');
+    else if (CHILDREN_MOD.pidGone(pid, 0)) why.push('задание с внуком: внук ' + pid + ' вышел до ответа пакета - пакет ждал внука, держащего пайпы');
+    // limit 1: второе задание - после конца первого; третье - отказ точки запуска на чужом liveState;
+    // четвёртое - отказ write (каталога файла нет): итог задания, задание не запущено
+    const live = path.join(box, 'live');
+    const noDir = path.join(box, 'no-such', 'f.txt');
+    const serial = runBatch([
+      job(timed(false), 30000),
+      job(timed(false), 30000),
+      job('process.stdout.write("ran");', 30000, { env: { SF_HOOK_STATE_DIR: live } }),
+      job('process.stdout.write("ran");', 30000, { write: { file: noDir, text: 'x' } }),
+    ], { limit: 1, liveState: path.join(live, '.qa-state') });
+    const [s1, s2] = [marks(serial[0]), marks(serial[1])];
+    if (!s1 || !s2) why.push('limit 1: ответы ' + JSON.stringify([serial[0].out || serial[0].err, serial[1].out || serial[1].err]));
+    else if (s2[1] < s1[2]) why.push('limit 1: второе задание стартовало до конца первого (' + s2[1] + ' < ' + s1[2] + ')');
+    const guardWant = 'запуск задания: дочерний процесс с SF_HOOK_STATE_DIR на каталоге боевого .qa-state (' + live + ') - хук в нём писал бы состояние сессии';
+    if (serial[2].code !== null || serial[2].out || serial[2].err !== guardWant) why.push('чужой liveState: ' + JSON.stringify(serial[2]) + ', ожидался отказ «' + guardWant + '»');
+    if (serial[3].code !== null || serial[3].out || !serial[3].err.startsWith('запуск задания: ENOENT')) why.push('отказ write: ' + JSON.stringify(serial[3]) + ', ожидался итог «запуск задания: ENOENT …» без запуска');
+    const none = runBatch([], { timeoutMs: 10000 });
+    if (JSON.stringify(none) !== '[]') why.push('пустой пакет: ' + JSON.stringify(none) + ', ожидалось []');
+    const refused = (text) => 'пакетный запуск не дошёл до итога (код 1): batchRunner: ' + text + NL;
+    const refusals = [
+      [() => runBatch(null), refused('jobs не массив - null')],
+      [() => runBatch([job('', 30000)], { limit: 1.5 }), refused('limit не целое больше 0 - 1.5')],
+      [() => runBatch([job('', 30000), job('', undefined)]), refused('задание 1: capMs не число больше 0 и не больше 2147483647 - undefined')],
+      [() => runBatch([job('', 3e9)]), refused('задание 0: capMs не число больше 0 и не больше 2147483647 - 3000000000')],
+      [() => runBatch([job('', 30000, { capAfterOutput: 'yes' })]), refused('задание 0: capAfterOutput не true/false - "yes"')],
+      [() => runBatch([job('', 30000), job('', 30000, { input: 5 })]), refused('задание 1: input не строка - 5')],
+    ];
+    for (const [fn, wantText] of refusals) {
+      const verdict = refusalVerdict(fn, wantText);
+      if (verdict !== true) why.push(verdict);
+    }
+    let timedOut = 'ответ без исключения - предела ответа нет';
+    try {
+      runBatch([job('setTimeout(() => {}, 3000);', 30000)], { timeoutMs: 400 });
+    } catch (e) {
+      timedOut = (e && e.message) || String(e);
+    }
+    if (!/^пакетный запуск не дошёл до итога \(код null\): .*ETIMEDOUT/.test(timedOut)) why.push('предел ответа runBatch 400 мс: ' + timedOut);
+    // исключение в ребёнке пакета после запуска задания (программа пакета бросает на следующем такте): выход
+    // снимает идущее задание и называет его в stderr
+    const reapCfg = JSON.stringify({ jobs: [job('setInterval(() => {}, 1000);', 30000)], limit: 1, liveState: LIVE_STATE });
+    const reapProgram = CHILDREN_MOD.childProgram(path.join(HOOKS, 'selftest-batch.js'), 'batchRunner', '0') + ' setImmediate(() => { throw new Error("selftest: исключение пакета"); });';
+    const reap = run(process.execPath, ['-e', reapProgram], { cwd: ROOT, input: reapCfg, timeout: 20000, killSignal: 'SIGKILL' });
+    const reapErr = String(reap.stderr || '');
+    if (reap.status !== 1 || !reapErr.includes('selftest: исключение пакета') || !reapErr.includes('batchRunner: на выходе сняты задания - 1')) why.push('выход пакета по исключению: код ' + reap.status + ', stderr ' + JSON.stringify(reapErr.slice(-300)) + ', ожидалось «… на выходе сняты задания - 1»');
+    // оборванный итог пакета (вывод не дописан до выхода): тот же отказ «не дошёл до итога» с началом итога
+    const cutBatch = CHILDREN_MOD.makeBatch({ run: () => ({ status: 0, stdout: CHILDREN_MOD.BATCH_MARK + '[{"code":0' + NL + CHILDREN_MOD.BATCH_EXIT_MARK + '0' + NL, stderr: '' }), cwd: ROOT });
+    const cutVerdict = refusalVerdict(() => cutBatch.runBatch([]), 'пакетный запуск не дошёл до итога (код 0): ' + CHILDREN_MOD.BATCH_MARK + '[{"code":0');
+    if (cutVerdict !== true) why.push('оборванный итог пакета: ' + cutVerdict);
+    // ребёнок в фоне на подменённом запуске (pid вышедшего процесса, вывод пишет подмена): строка с меткой
+    // выхода до настоящей - тело, код - с последней; вышедший без строки выхода - отказ сразу, не через предел
+    const gonePid = run(process.execPath, ['-e', '']).pid;
+    const stub = (name, write) => {
+      const fake = { pid: gonePid, on: () => fake, unref: () => {} };
+      return startDetached(process.execPath, [], {
+        dir: box, name, cwd: ROOT, exitMark: 'selftest-case-exit ', what: name, label: name, timeoutMs: BATCH_MUTE_MS, goneMs: 0, killGoneMs: 0, kill: () => {},
+        spawn: (cmd, args, o) => {
+          write(o.stdio);
+          return fake;
+        },
+      });
+    };
+    const died = awaitDetached(stub('died', (fds) => {
+      fs.writeSync(fds[1], 'partial');
+      fs.writeSync(fds[2], 'died');
+    }));
+    if (died.error || died.status !== null || died.body !== 'partial' || CHILDREN_MOD.childFailure(died) !== 'died') {
+      why.push('ребёнок в фоне вышел без строки выхода: ' + JSON.stringify({ status: died.status, error: died.error && died.error.code, body: died.body, stderr: died.stderr }) + ', ожидался отказ сразу: код null, без ошибки, тело «partial», причина «died»');
+    }
+    try {
+      const twice = awaitDetached(stub('twice', (fds) => fs.writeSync(fds[1], 'selftest-case-exit 1x' + NL + 'body' + NL + NL + 'selftest-case-exit 0' + NL)));
+      if (twice.status !== 0 || twice.body !== 'selftest-case-exit 1x' + NL + 'body' + NL) why.push('строка выхода не последняя: код ' + twice.status + ', тело ' + JSON.stringify(twice.body));
+    } catch (e) {
+      why.push('строка с меткой выхода до настоящей принята за конец ответа: ' + ((e && e.message) || String(e)));
+    }
+    // сбор позже предела: ребёнок готов (ready), отвечает по go; строка выхода в файле и конец процесса - до
+    // сбора (рукопожатие, предел ожидания 30 с, как у ready) - ответ, а не снятие по пределу
+    const until = (done) => {
+      const by = performance.now() + 30000;
+      while (!done() && performance.now() < by) L.pauseSync(20);
+    };
+    until(() => fs.readFileSync(late.out, 'utf8').includes('ready'));
+    fs.writeFileSync(goFile, '');
+    until(() => fs.readFileSync(late.out, 'utf8').includes(NL + lateMark + '0' + NL) && CHILDREN_MOD.pidGone(late.child.pid, 0));
+    const lateAnswer = awaitDetached(late);
+    if (lateAnswer.status !== 0) why.push('сбор позже предела: ' + JSON.stringify({ status: lateAnswer.status, signal: lateAnswer.signal, error: lateAnswer.error && lateAnswer.error.code }) + ' - ответивший ребёнок снят по пределу');
+    // ребёнок без ответа, собранный позже предела: снят тут же (ETIMEDOUT), stderr - в ответе и тексте отказа
+    until(() => fs.readFileSync(mute.err, 'utf8').includes('stuck'));
+    mute.startedAt -= BATCH_MUTE_MS;
+    const muteFrom = performance.now();
+    const stuck = awaitDetached(mute);
+    const muteMs = Math.round(performance.now() - muteFrom);
+    const stuckText = CHILDREN_MOD.childFailure(stuck);
+    if (!stuck.error || stuck.error.code !== 'ETIMEDOUT' || stuck.stderr !== 'stuck' || stuckText !== 'ETIMEDOUT: stuck') why.push('зависший ребёнок в фоне: stderr ' + JSON.stringify(stuck.stderr) + ', отказ ' + JSON.stringify(stuckText) + ', ожидалось «stuck», «ETIMEDOUT: stuck»');
+    if (muteMs >= BATCH_MUTE_MS) why.push('ребёнок без ответа, собранный позже предела: снят через ' + muteMs + ' мс - получил новый предел от начала ожидания');
+    // пакет standards (standardsAnswers, standardsVerdict): тело, снятое по пределу до счётчика правок, - его
+    // вердикт называет предел, сверка каталога состояния этого подкорня не идёт (и .qa-state не читается);
+    // подкорень, где все тела дошли до ответа, сверяется по-прежнему
+    const cut = { code: null, signal: 'SIGKILL', hung: true, out: '', err: 'partial' };
+    const fine = { code: 2, signal: null, hung: false, out: '', err: '[S01] x' };
+    const edits = (state) => {
+      if (state === 'state-0') throw new Error('ENOENT: .qa-state подкорня со снятым телом читать не нужно');
+      return 0;
+    };
+    try {
+      const flat = standardsAnswers([{ state: 'state-0', jobs: [0, 1] }], [cut, fine], edits);
+      const verdict = standardsVerdict({ id: 'S01', ids: ['S01'], refused: ['a'], allowed: ['b'] }, flat);
+      const wantVerdict = 'S01 на запрещённом: standards.js снят по пределу ' + STANDARDS_CAP_MS / 1000 + ' с - partial';
+      if (verdict !== wantVerdict) why.push('тело standards, снятое по пределу: ' + JSON.stringify(verdict) + ', ожидалось ' + JSON.stringify(wantVerdict));
+      const allowedCut = standardsVerdict({ id: 'S01', ids: ['S01'], refused: [], allowed: ['b'] }, [Object.assign({}, cut, { hung: false })]);
+      const wantAllowed = 'S01 на разрешённом: standards.js снят сигналом SIGKILL - partial';
+      if (allowedCut !== wantAllowed) why.push('разрешённое тело standards, снятое сигналом: ' + JSON.stringify(allowedCut) + ', ожидалось ' + JSON.stringify(wantAllowed));
+    } catch (e) {
+      why.push('тело standards, снятое по пределу: сбор пакета бросил вместо вердикта тела - ' + ((e && e.message) || String(e)));
+    }
+    const mismatch = refusalVerdict(() => standardsAnswers([{ state: 'state-1', jobs: [0] }], [fine], edits), 'пакет standards: в каталоге состояния подкорня 0 правок 0, тел подкорня 1 - каталог состояния не свой у тел, идущих разом');
+    if (mismatch !== true) why.push('сверка каталога состояния подкорня, где все тела дошли до ответа: ' + mismatch);
+    // один предикат «тело не дошло до ответа» (standardsCut): каждый его класс сверка подкорня пропускает, а
+    // вердикт тела называет на обеих сторонах
+    const unfinished = [cut, Object.assign({}, cut, { hung: false }), { code: 1, signal: null, hung: false, out: '', err: 'crash' }, { code: 0, signal: null, hung: false, out: '', err: HOOK_ERROR + ' crash' }];
+    unfinished.forEach((r, k) => {
+      let checked = 'нет';
+      try {
+        standardsAnswers([{ state: 'state-0', jobs: [0] }], [r], edits);
+      } catch (e) {
+        checked = (e && e.message) || String(e);
+      }
+      const onRefused = standardsVerdict({ id: 'S01', ids: ['S01'], refused: ['a'], allowed: [] }, [r]);
+      const onAllowed = standardsVerdict({ id: 'S01', ids: ['S01'], refused: [], allowed: ['b'] }, [r]);
+      if (checked !== 'нет' || !String(onRefused).startsWith('S01 на запрещённом: standards.js ') || !String(onAllowed).startsWith('S01 на разрешённом: standards.js ')) {
+        why.push('тело, не дошедшее до ответа, класс ' + k + ': сверка подкорня - ' + checked + ', вердикты ' + JSON.stringify([onRefused, onAllowed]));
+      }
+    });
+    return why.length ? why.join('; ') : true;
+  } finally {
+    try {
+      for (const h of detached) if (LIVE_CHILDREN.has(h.child)) killAndWait(h);
+    } finally {
+      for (const pid of holders) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch (_) {
+          // внук уже вышел
+        }
+      }
+      fs.rmSync(box, { recursive: true, force: true });
+    }
+  }
+});
 check('standards: замечание на any и console в новом файле, тишина на чистом', () => {
   const gone = missingDirs(['packages/core/src']);
   if (gone) return gone;
@@ -1378,7 +1819,7 @@ check('standards: замечание на any и console в новом файл�
 /**
  * @sf/runtime (E0-12B, ADR-0012) - код процессов api и worker: console и process.env в его src
  * ловятся так же, как в apps; тесты пакета не ловятся (L-008: отказ и пропуск на боевом пути).
- * Крах standards.js - красный на обеих сторонах, как в standardsCases: код вне 0/2 или HOOK_ERROR
+ * Крах standards.js - красный на обеих сторонах, как в laterStandardsCases: код вне 0/2 или HOOK_ERROR
  * (крах внутри L.guard - код 0, и только строка HOOK_ERROR отличает его от пропуска). Вердикт по
  * ответам хука src и test - runtimeStandardsVerdict; его ветки краха сверяют кейсы на подменённых
  * ответах (TECH_DEBT 19.10.2026 E0-12D круг 6, проба standards runtime): строка называет крах, а
@@ -1427,6 +1868,8 @@ function lineFile(line) {
  * [id], как его печатает standards.js (render); отказ - код 2 и хотя бы один [id], пропуск - ни
  * одного (модуль роута целиком, E0-12P), одна петля на оба случая. Пустой список id - красная
  * проба: предикату, которому не с чем сверять, прошло бы любое тело.
+ * laterStandardsCases отдаёт не вердикт, а функцию сбора (тела идут пакетом в фоне) - её зовёт
+ * standardsLater в точке сбора; имя с later - так вызов в обычной check (функция - ok с пустой note) виден.
  */
 const ANY_RULE = { label: 'любое правило', ids: standardsIds };
 /** id правил standards обоих файлов правил, как они записаны; файл, что не разобрался, - пуст. */
@@ -1435,27 +1878,91 @@ function standardsIds() {
     .map((rule) => rule && rule.id)
     .filter((id) => typeof id === 'string' && id !== '');
 }
-function standardsCases(rule, rel, refused, allowed) {
-  const id = typeof rule === 'string' ? rule : rule.label;
-  const ids = typeof rule === 'string' ? [rule] : rule.ids();
-  if (!ids.length) return id + ': ни одного id правила standards в rules.common.json и rules.sf.json - сверять не с чем';
-  const named = (err) => ids.some((one) => err.includes('[' + one + ']'));
-  return withScratchTree((tree) => {
-    for (const body of refused) {
-      tree.write(rel, body);
-      const r = tree.standards(rel);
-      if (r.err.includes(HOOK_ERROR)) return id + ' на запрещённом: standards.js упал внутри guard - ' + r.err.slice(0, 160);
-      if (r.code !== 2 || !named(r.err)) return 'не пойман ' + id + ': ' + JSON.stringify(body.slice(0, 120)) + ' - код ' + r.code + ' ' + r.err.slice(0, 160);
+function laterStandardsCases(rule, rel, refused, allowed) {
+  const all = laterStandardsCasesAll([[rule, rel, refused, allowed]]);
+  return () => all()[0];
+}
+/**
+ * Несколько вызовов laterStandardsCases (E0-12AC): list - [[rule, rel, refused, allowed], …]. Ответ - функция
+ * сбора: вердикты в том же порядке. Каждое тело - свой процесс standards.js в своём подкорне
+ * (startStandardsBatch); тела всех строк standards - один пакет в фоне (решение техлида по ОВ2): список
+ * встаёт в очередь при объявлении строки, пакет стартует startStandardsLater() после последней такой
+ * строки, сбор - в точке сбора отложенных строк (standardsLater -> checkLater). Вердикт сверяет ответы в
+ * прежнем порядке (первый провал отказа, затем пропуска) - текст красной строки тот же, что у
+ * последовательного прогона тел. Отказ подготовки, старта или ребёнок без итога - исключение одним текстом
+ * в каждой строке-потребителе (запоминается, как у проб запуска gates.js).
+ */
+const STANDARDS_LISTS = [];
+const STANDARDS_LATER = lazyStart(() => startStandardsVerdicts(STANDARDS_LISTS));
+function laterStandardsCasesAll(list) {
+  if (STANDARDS_LATER.started()) throw new Error('пакет standards уже запущен - строку с пробой standards объяви до startStandardsLater()');
+  const at = STANDARDS_LISTS.length;
+  STANDARDS_LISTS.push(list);
+  return () => STANDARDS_LATER.collect()[at];
+}
+function startStandardsLater() {
+  STANDARDS_LATER.start();
+}
+/** Старт пакета по спискам lists (у каждого - вердикты в порядке его элементов); ответ - функция сбора. */
+function startStandardsVerdicts(lists) {
+  const verdicts = lists.map((list) => new Array(list.length));
+  const groups = [];
+  const owners = [];
+  lists.forEach((list, n) => list.forEach(([rule, rel, refused, allowed], k) => {
+    const id = typeof rule === 'string' ? rule : rule.label;
+    const ids = typeof rule === 'string' ? [rule] : rule.ids();
+    if (!ids.length) {
+      verdicts[n][k] = id + ': ни одного id правила standards в rules.common.json и rules.sf.json - сверять не с чем';
+      return;
     }
-    for (const body of allowed) {
-      tree.write(rel, body);
-      const r = tree.standards(rel);
-      if (r.code !== 0 && r.code !== 2) return id + ' на разрешённом: standards.js упал, код ' + r.code + ' ' + r.err.slice(0, 160);
-      if (r.err.includes(HOOK_ERROR)) return id + ' на разрешённом: standards.js упал внутри guard - ' + r.err.slice(0, 160);
-      if (named(r.err)) return id + ' на разрешённом: ' + JSON.stringify(body.slice(0, 120)) + ' - ' + r.err.slice(0, 160);
-    }
-    return { note: refused.length + ' отказ, ' + allowed.length + ' пропуск' };
+    groups.push({ rel, bodies: refused.concat(allowed) });
+    owners.push({ n, k, id, ids, refused, allowed });
+  }));
+  const collect = groups.length ? startStandardsBatch(groups) : () => [];
+  return () => {
+    const answers = collect();
+    owners.forEach((o, g) => {
+      verdicts[o.n][o.k] = standardsVerdict(o, answers[g]);
+    });
+    return verdicts;
+  };
+}
+/**
+ * Строка пробы standards в фоне: make() зовётся при объявлении строки (там, где стояла бы check) и отдаёт
+ * итог сразу (нет каталога пробы) или функцию сбора (laterStandardsCases, laterStandardsCasesAll); строка -
+ * checkLater, сбор - в точке сбора отложенных строк. Исключение make() встаёт в строку тем же текстом.
+ */
+function standardsLater(name, make) {
+  // make() - сейчас (lazyStart.start: итог или исключение запоминаются, не бросая), итог - при сборе
+  const later = lazyStart(() => {
+    const value = make();
+    return typeof value === 'function' ? value : () => value;
   });
+  later.start();
+  checkLater(name, later.collect);
+}
+/**
+ * Вердикт laterStandardsCases по ответам runs хука на тела refused, затем allowed (в их порядке). Тело, не
+ * дошедшее до ответа (standardsCut: снято пакетом по пределу или сигналом, код вне 0/2, крах внутри
+ * guard), названо этим, а не «не пойман … код null».
+ */
+function standardsVerdict({ id, ids, refused, allowed }, runs) {
+  const named = (err) => ids.some((one) => err.includes('[' + one + ']'));
+  for (let i = 0; i < refused.length; i++) {
+    const body = refused[i];
+    const r = runs[i];
+    const cut = standardsCut(r);
+    if (cut) return id + ' на запрещённом: standards.js ' + cut;
+    if (r.code !== 2 || !named(r.err)) return 'не пойман ' + id + ': ' + JSON.stringify(body.slice(0, 120)) + ' - код ' + r.code + ' ' + r.err.slice(0, 160);
+  }
+  for (let i = 0; i < allowed.length; i++) {
+    const body = allowed[i];
+    const r = runs[refused.length + i];
+    const cut = standardsCut(r);
+    if (cut) return id + ' на разрешённом: standards.js ' + cut;
+    if (named(r.err)) return id + ' на разрешённом: ' + JSON.stringify(body.slice(0, 120)) + ' - ' + r.err.slice(0, 160);
+  }
+  return { note: refused.length + ' отказ, ' + allowed.length + ' пропуск' };
 }
 
 /**
@@ -1470,7 +1977,7 @@ function standardsCases(rule, rel, refused, allowed) {
  * провал, и откат одной ветки ALLOWED краснеет на своём кейсе. Файлы - любой исходник дерева,
  * не только apps/packages/scripts. Вызов собран из частей: этот файл сканирует сам гейт.
  */
-check('standards: S04 - вызов search пойман и со словом never, и с меткой после кода; пропуск - только строчный комментарий // с меткой', () => {
+standardsLater('standards: S04 - вызов search пойман и со словом never, и с меткой после кода; пропуск - только строчный комментарий // с меткой', () => {
   const gone = missingDirs(['packages/integrations/youtube/src']);
   if (gone) return gone;
   const call = ['youtube', 'search', 'list'].join('.');
@@ -1512,13 +2019,20 @@ check('standards: S04 - вызов search пойман и со словом neve
     'export const y = 1; // ' + mark,
     'await playlistItems.list({});',
   ].map(lineFile).concat([crlf('// never ' + call + ' - ' + mark)]);
-  const own = standardsCases('S04', 'packages/integrations/youtube/src/zz_selftest_s04.ts', refused, allowed);
-  if (own !== true && typeof own !== 'object') return own;
-  for (const rel of ['tools/zz_selftest_s04.mjs', 'test/zz_selftest_s04.test.ts', '.claude/hooks/zz_selftest_s04.js', 'zz_selftest_s04.config.cts']) {
-    const other = standardsCases('S04', rel, [lineFile('await ' + call + '({});')], [lineFile('// never ' + call + ' - ' + mark)]);
-    if (other !== true && typeof other !== 'object') return rel + ': ' + other;
-  }
-  return own;
+  // своя и четыре пути - один пакет (laterStandardsCasesAll), вердикты - в прежнем порядке
+  const rels = ['tools/zz_selftest_s04.mjs', 'test/zz_selftest_s04.test.ts', '.claude/hooks/zz_selftest_s04.js', 'zz_selftest_s04.config.cts'];
+  const all = laterStandardsCasesAll([['S04', 'packages/integrations/youtube/src/zz_selftest_s04.ts', refused, allowed]].concat(
+    rels.map((rel) => ['S04', rel, [lineFile('await ' + call + '({});')], [lineFile('// never ' + call + ' - ' + mark)]]),
+  ));
+  return () => {
+    const [own, ...others] = all();
+    if (own !== true && typeof own !== 'object') return own;
+    for (let i = 0; i < rels.length; i++) {
+      const other = others[i];
+      if (other !== true && typeof other !== 'object') return rels[i] + ': ' + other;
+    }
+    return own;
+  };
 });
 
 /**
@@ -1604,10 +2118,10 @@ check('lib.js: isGone и isNotFile отвечают как одноимённы�
   return { note: codes.map((code, i) => code + '=' + original[i]).join(', ') };
 });
 
-check('standards: серверные пакеты в apps/web/src (корень, подпуть, побочный импорт) пойманы S11, вход web - нет', () => {
+standardsLater('standards: серверные пакеты в apps/web/src (корень, подпуть, побочный импорт) пойманы S11, вход web - нет', () => {
   const gone = missingDirs(['apps/web/src/lib']);
   if (gone) return gone;
-  return standardsCases('S11', 'apps/web/src/lib/zz_selftest_s11.ts', [
+  return laterStandardsCases('S11', 'apps/web/src/lib/zz_selftest_s11.ts', [
     'import { withDeadline } from "@sf/runtime";',
     "import { createProbeRedis } from '@sf/runtime/redis';",
     'import { createDb } from "@sf/db";',
@@ -1661,12 +2175,12 @@ function routeFormTexts() {
  * defineRoute и ...errorResponses() не отказываются ни одним правилом standards - ложный отказ
  * снятого S13 не возвращается; то же для ложных отказов снятого S17 (В1 E0-12P): this в строковом
  * литерале; `deps.config.server` правила standards не отказывают, его отказывает разбор по AST
- * (apps/api/test/route-modules.test.ts), не S17. Отказ - любой [id] правила standards в замечаниях (standardsCases с
+ * (apps/api/test/route-modules.test.ts), не S17. Отказ - любой [id] правила standards в замечаниях (laterStandardsCases с
  * ANY_RULE); крах - красный. Сторона отказа в том же пути показывает, что предикат совпадает и на
  * S-, и на W-правиле: тело без ...errorResponses() (S14) и тело с @ts-ignore (W03 общего файла -
  * действует здесь через склейку standards в lib.rulesFor, проба склейки ниже).
  */
-check('standards: модуль роута с repo.get(, map.delete(, searchParams.get(, this в строке и defineRoute не отказывается ни одним правилом; S14 и W03 в том же пути - отказ', () => {
+standardsLater('standards: модуль роута с repo.get(, map.delete(, searchParams.get(, this в строке и defineRoute не отказывается ни одним правилом; S14 и W03 в том же пути - отказ', () => {
   const gone = missingDirs(ROUTE_FORMS);
   if (gone) return gone;
   const bodies = routeFormTexts().concat([
@@ -1679,7 +2193,7 @@ check('standards: модуль роута с repo.get(, map.delete(, searchParam
       'const url = deps.config.server;',
     ])),
   ]);
-  return standardsCases(ANY_RULE, 'apps/api/src/routes/zz_selftest/index.ts', [
+  return laterStandardsCases(ANY_RULE, 'apps/api/src/routes/zz_selftest/index.ts', [
     routeFile(['const responses = { [OK_STATUS]: X };', ROUTE_DEFINITION[1]]),
     routeFile(ROUTE_DEFINITION.concat(['// @ts-ignore', 'const n: number = id;'])),
   ], bodies);
@@ -1734,10 +2248,10 @@ const W_CASES = [
   },
 ];
 for (const w of W_CASES) {
-  check('standards: ' + w.id + ' общего файла правил - отказ на ' + w.rel + ' (по id правила), та же форма без ослабления - пропуск', () => {
+  standardsLater('standards: ' + w.id + ' общего файла правил - отказ на ' + w.rel + ' (по id правила), та же форма без ослабления - пропуск', () => {
     const gone = missingDirs([w.rel.slice(0, w.rel.lastIndexOf('/'))]);
     if (gone) return gone;
-    return standardsCases(w.id, w.rel, w.refused, w.allowed);
+    return laterStandardsCases(w.id, w.rel, w.refused, w.allowed);
   });
 }
 /**
@@ -1754,11 +2268,11 @@ check('lib.mergeStandards: общее правило без id пережива�
   if (seen !== want) return 'склейка ' + seen + ', ждали ' + want;
   return { note: 'правила без id в обоих списках сохранены' };
 });
-check('standards: S14 ловит defineRoute без ...errorResponses() в коде файла, боевые роуты - нет', () => {
+standardsLater('standards: S14 ловит defineRoute без ...errorResponses() в коде файла, боевые роуты - нет', () => {
   const gone = missingDirs(ROUTE_FORMS);
   if (gone) return gone;
   const route = ROUTE_DEFINITION[1];
-  return standardsCases('S14', 'apps/api/src/routes/zz_selftest/index.ts', [
+  return laterStandardsCases('S14', 'apps/api/src/routes/zz_selftest/index.ts', [
     routeFile(['const responses = { [OK_STATUS]: X };', route]),
     routeFile(['const failures = errorResponses();', 'const responses = { ...failures, [OK_STATUS]: X };', route]),
     routeFile(['// const responses = { ...errorResponses(), [OK_STATUS]: X };', 'const responses = { [OK_STATUS]: X };', route]),
@@ -1782,10 +2296,10 @@ check('standards: S14 ловит defineRoute без ...errorResponses() в ко�
  * vi.mock, require.resolve, from на другой строке и манифесты проверяет
  * test/dependency-direction.test.ts.
  */
-check('standards: S15 ловит @sf/* кроме @sf/core в packages/contracts, @sf/core и самоимпорт - нет', () => {
+standardsLater('standards: S15 ловит @sf/* кроме @sf/core в packages/contracts, @sf/core и самоимпорт - нет', () => {
   const gone = missingDirs(['packages/contracts/src']);
   if (gone) return gone;
-  return standardsCases('S15', 'packages/contracts/src/zz_selftest_s15.ts', [
+  return laterStandardsCases('S15', 'packages/contracts/src/zz_selftest_s15.ts', [
     'import { env } from "@sf/config";',
     'import type { Env } from "@sf/config/server";',
     'export * from "@sf/db";',
@@ -1813,10 +2327,10 @@ check('standards: S15 ловит @sf/* кроме @sf/core в packages/contracts
     '// import { env } from "@sf/config";',
   ].map(lineFile));
 });
-check('standards: S16 ловит @sf/* кроме @sf/contracts в packages/api-client, @sf/contracts и самоимпорт - нет', () => {
+standardsLater('standards: S16 ловит @sf/* кроме @sf/contracts в packages/api-client, @sf/contracts и самоимпорт - нет', () => {
   const gone = missingDirs(['packages/api-client/src']);
   if (gone) return gone;
-  return standardsCases('S16', 'packages/api-client/src/zz_selftest_s16.ts', [
+  return laterStandardsCases('S16', 'packages/api-client/src/zz_selftest_s16.ts', [
     'import { QUEUE_NAMES } from "@sf/core";',
     'import { env } from "@sf/config";',
     'import "@sf/config/server";',
@@ -1841,6 +2355,8 @@ check('standards: S16 ловит @sf/* кроме @sf/contracts в packages/api-
     ' * import { QUEUE_NAMES } from "@sf/core";',
   ].map(lineFile));
 });
+// тела всех строк standards выше - один пакет в фоне с этой точки; вердикты - в точке сбора (settleLater)
+startStandardsLater();
 /**
  * Пробы Stop- и UserPromptSubmit-хуков. Состояние - L.statePath(), то есть временная папка
  * прогона (SF_HOOK_STATE_DIR); помощник кладёт туда стартовое состояние пробы, а транскрипт -
@@ -2459,6 +2975,11 @@ const CHILD_PROCESS_DIRECT = [
     why: 'программа пробы runGate с поддельным процессом (E0-12AB): spawn и spawnSync подменены, ничего не запускается',
   },
   {
+    file: 'harness-selftest.js',
+    line: 'const BATCH_HOLDER = "const c = ' + REQ + "'" + CP + "').spawn(process.execPath, ['-e', 'const t = setInterval(() => { try { process.kill(Number(process.argv[1]), 0); } catch (e) { clearInterval(t); } }, 200)', process.argv[1]], { stdio: 'inherit', detached: true }); process.stdout.write(String(c.pid)); c.unref();\";",
+    why: 'текст задания пробы пакета: внук держит пайпы задания, его запускает задание, а не самопроверка; внука снимает проба',
+  },
+  {
     file: 'selftest-gates-run.js',
     line: 'const spawnGc = (opts) => "const c = ' + REQ + "'" + CP + '\').spawn(process.execPath, process.argv.slice(2), { stdio: \'inherit\'" + opts + \' });\';',
     why: 'текст стаба команды гейта (tree.js, orphan.js): внук-пульс без хуков в дереве gates.js, не запуск из самопроверки',
@@ -2752,6 +3273,37 @@ check('tempDir: releaseTemp - сбой снятия (EBUSY) не исключе�
     releaseTemp(box);
   }
 });
+// Каталоги прошлых прогонов (решение техлида Р3 E0-12AC): на подменённой fs - старый с префиксом снят,
+// свежий, ровно суточный (граница - «старше», не «не младше») и старый с чужим префиксом целы, EACCES на
+// одном назван (сразу, без повторов rmSync), следующий за ним снят; живой вызов в
+// начале прогона - сбой снятия в note строки, строка не красная (прогон не падает из-за чужого каталога)
+check('tempDir: sweepStale - каталог sf-selftest-* старше суток снят, свежий и с чужим префиксом целы, сбой снятия одного назван, остальные сняты (подменённая fs); каталоги прошлых прогонов в %TEMP% сняты при старте', () => {
+  const day = STALE_TEMP_MS;
+  const now = 10 * day;
+  const parent = path.join('x', 'tmp');
+  const ages = { 'sf-selftest-old-a': 2 * day, 'sf-selftest-new-b': day / 2, 'other-old-c': 2 * day, 'sf-selftest-busy-d': 2 * day, 'sf-selftest-old-e': day + 1, 'sf-selftest-edge-f': day };
+  const removedAt = [];
+  const retries = [];
+  const dirent = (name) => ({ name, isDirectory: () => true, isSymbolicLink: () => false });
+  const fakeFs = {
+    readdirSync: (p) => (p === parent ? Object.keys(ages).map(dirent) : []),
+    lstatSync: (p) => ({ mtimeMs: now - ages[path.basename(p)] }),
+    rmSync: (p, o) => {
+      retries.push(o.maxRetries);
+      if (path.basename(p) === 'sf-selftest-busy-d') throw Object.assign(new Error('EACCES: permission denied, rmdir ' + p), { code: 'EACCES' });
+      removedAt.push(path.basename(p));
+    },
+  };
+  const reg = makeTempRegistry({ fs: fakeFs, os, path, isNotFile: L.isNotFile });
+  const got = reg.sweepStale(day, { parent, now });
+  const seen = JSON.stringify({ removed: got.removed.map((p) => path.basename(p)), failed: got.failed, rm: removedAt });
+  const busy = path.join(parent, 'sf-selftest-busy-d');
+  const want = JSON.stringify({ removed: ['sf-selftest-old-a', 'sf-selftest-old-e'], failed: [busy + ': EACCES: permission denied, rmdir ' + busy], rm: ['sf-selftest-old-a', 'sf-selftest-old-e'] });
+  if (seen !== want) return 'на подменённой fs ' + seen + ', ожидалось ' + want;
+  // без повторов rmSync: занятый старый каталог - сбой сразу, а не полсекунды ожидания в начале каждого прогона
+  if (retries.some((n) => n !== 0)) return 'повторы rmSync при снятии старых каталогов: ' + JSON.stringify(retries) + ', ожидалось 0 у каждого';
+  return STALE_SWEEP.failed.length ? { note: 'не сняты на старте: ' + STALE_SWEEP.failed.join('; ') } : true;
+});
 // Отсутствие пути - lstat с кодом, а не existsSync (замечание ревью R1 E0-12T): недоступный путь
 // (EACCES) - исключение, а не «нет».
 check('absent: ENOENT и ENOTDIR - нет, EACCES - исключение, путь на месте - есть', () => {
@@ -2918,6 +3470,76 @@ check('набор детей: kill - сбой снятия (EPERM) назван 
   if (reg.live.size) return 'набор не очищен: ' + reg.live.size;
   return JSON.stringify(failed) === JSON.stringify(['2: EPERM: kill']) || 'сбои ' + JSON.stringify(failed) + ', ожидалось ["2: EPERM: kill"]';
 });
+// Отложенные строки (E0-12AC): место строки - место объявления, а не порядок сбора; null снимает место;
+// report() до сбора печатает незаполненное место красным, а не ok и не пропуском. Свой приёмник строк.
+// Там же - контракт lazyStart (E0-12AC): start не бросает, started, память ошибки старта и сбора
+check('checkLater: отложенная строка встаёт на место объявления при сборе в обратном порядке, итог null снимает место, report() до сбора - FAIL «проба не дождалась ребёнка в фоне»', () => {
+  const rows = [];
+  const calls = [];
+  const own = makeLater(rows, (slots) => slots.slice().reverse());
+  own.checkLater('a', () => { calls.push('a'); return { note: 'A' }; });
+  rows.push({ ok: true, name: 'x', note: '' });
+  own.checkLater('b', () => { calls.push('b'); return SKIPPED; });
+  own.checkLater('c', () => { calls.push('c'); return 'C'; });
+  if (calls.length) return 'fn отложенной строки позвана до сбора: ' + calls.join();
+  const early = reportLines(rows).lines;
+  const wantEarly = ['  FAIL a  - ' + LATER_PENDING, '  ok   x', '  FAIL b  - ' + LATER_PENDING, '  FAIL c  - ' + LATER_PENDING, 'Самопроверка обвязки: КРАСНАЯ, 3 из 4'];
+  if (JSON.stringify(early) !== JSON.stringify(wantEarly)) return 'report() до сбора: ' + JSON.stringify(early) + ', ожидалось ' + JSON.stringify(wantEarly);
+  own.settleLater();
+  if (calls.join() !== 'c,b,a') return 'сбор не в обратном порядке - кейс не проверяет место: ' + calls.join();
+  const got = JSON.stringify(rows);
+  const want = JSON.stringify([{ ok: true, name: 'a', note: 'A' }, { ok: true, name: 'x', note: '' }, { ok: false, name: 'c', note: 'C' }]);
+  if (got !== want) return 'после сбора ' + got + ', ожидалось ' + want;
+  // контракт lazyStart: start не бросает, started, память ошибки старта и сбора, память ответа
+  const answers = (fns) => fns.map((f) => {
+    try {
+      f();
+      return 'ответ';
+    } catch (e) {
+      return e.message;
+    }
+  });
+  let builds = 0;
+  const bad = lazyStart(() => { builds++; throw new Error('старт: сбой'); });
+  if (bad.started()) return 'lazyStart: started() до start() - true';
+  try {
+    bad.start();
+  } catch (e) {
+    return 'lazyStart: start() бросил ошибку build: ' + e.message;
+  }
+  if (!bad.started()) return 'lazyStart: started() после start() - false';
+  const seen = answers([bad.collect, bad.collect]);
+  if (builds !== 1 || seen.join() !== 'старт: сбой,старт: сбой') return 'lazyStart: ошибка старта - build звался ' + builds + ' раз, ответы ' + JSON.stringify(seen);
+  // build бросает undefined - тоже сбой старта: каждому сбору то же исключение, а не TypeError сбора
+  let undefBuilds = 0;
+  const undef = lazyStart(() => {
+    undefBuilds++;
+    throw undefined;
+  });
+  undef.start();
+  const seenUndef = [undef.collect, undef.collect].map((f) => {
+    try {
+      f();
+      return 'ответ';
+    } catch (e) {
+      return e === undefined ? 'undefined' : 'исключение ' + ((e && e.message) || String(e));
+    }
+  });
+  if (undefBuilds !== 1 || seenUndef.join() !== 'undefined,undefined') return 'lazyStart: build бросил undefined - build ' + undefBuilds + ' раз, ответы ' + JSON.stringify(seenUndef);
+  let collects = 0;
+  const lz = lazyStart(() => () => { collects++; throw new Error('сбор: сбой'); });
+  const before = lz.started();
+  const seenCollect = answers([lz.collect, lz.collect]);
+  if (before || !lz.started() || collects !== 1 || seenCollect.join() !== 'сбор: сбой,сбор: сбой') {
+    return 'lazyStart: collect() без start() - стартов ' + (before ? 'до collect' : lz.started() ? 'после' : 'нет') + ', сборов ' + collects + ', ответы ' + JSON.stringify(seenCollect);
+  }
+  let made = 0;
+  const ok = lazyStart(() => { made++; return () => ({ v: made }); });
+  ok.start();
+  ok.start();
+  if (made !== 1 || ok.collect() !== ok.collect()) return 'lazyStart: ответ не запомнен - build ' + made + ' раз, объекты разные';
+  return true;
+});
 // Мемо прогона (rootPkg, gateProbe) сверяют кейсы на подменённых источниках в selftest-gates.js
 // (TECH_DEBT 23.10.2026 E0-12T C23: счётчики из рабочего кода сняты).
 // Без модулей проб гейтов строка ниже не гонялась: её называет строка «пробы гейтов: модули
@@ -3017,6 +3639,9 @@ check('боевой .qa-state: git с окружением без SF_HOOK_STATE_
   }
   return seen.join() === 'turbo' || 'turbo через turboEnv не запущен: ' + JSON.stringify(seen);
 });
+// Сбор отложенных строк (checkLater): дети в фоне отработали параллельно пробам выше; их каталоги
+// снимаются здесь - до сверки дерева и пробы «временные каталоги прогона сняты»
+settleLater();
 check('пробы не оставили файлов в репозитории: записи git status с содержимым и игнорируемые файлы (кроме node_modules) до и после прогона те же', () => {
   if (!LIVE_TREE) return 'снимок дерева до проб не снят: ' + LIVE_TREE_ERROR;
   const now = repoSnapshot();
@@ -3053,11 +3678,18 @@ report();
 
 /** Строки results и счёт; код выхода 1, если красна хоть одна. */
 function report() {
-  let red = 0;
-  for (const r of results) {
-    if (!r.ok) red++;
-    console.log((r.ok ? '  ok   ' : '  FAIL ') + r.name + (r.note ? '  - ' + r.note : ''));
-  }
-  console.log(red ? 'Самопроверка обвязки: КРАСНАЯ, ' + red + ' из ' + results.length : 'Самопроверка обвязки: зелёная, ' + results.length + ' проверок');
+  const { lines, red } = reportLines(results);
+  for (const line of lines) console.log(line);
   process.exit(red ? 1 : 0);
+}
+/** Текст отчёта по строкам rows: строка на каждую и счёт последней; red - число красных. */
+function reportLines(rows) {
+  let red = 0;
+  const lines = [];
+  for (const r of rows) {
+    if (!r.ok) red++;
+    lines.push((r.ok ? '  ok   ' : '  FAIL ') + r.name + (r.note ? '  - ' + r.note : ''));
+  }
+  lines.push(red ? 'Самопроверка обвязки: КРАСНАЯ, ' + red + ' из ' + rows.length : 'Самопроверка обвязки: зелёная, ' + rows.length + ' проверок');
+  return { lines, red };
 }

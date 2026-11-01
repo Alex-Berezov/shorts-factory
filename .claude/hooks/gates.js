@@ -382,7 +382,9 @@ function outputBuffer() {
   const head = [];
   let headBytes = 0;
   const tail = [];
-  // байт хвоста без срезанного начала первого куска (skip)
+  // первый живой кусок хвоста (first) и байт хвоста без срезанного начала этого куска (skip): снятый
+  // кусок - сдвиг индекса, а не tail.shift (сдвиг массива на каждом мелком куске квадратичен, E0-12AC)
+  let first = 0;
   let tailBytes = 0;
   let skip = 0;
   let cut = 0;
@@ -407,9 +409,10 @@ function outputBuffer() {
     tailBytes += b.length;
     while (tailBytes > OUTPUT_TAIL_BYTES) {
       const over = tailBytes - OUTPUT_TAIL_BYTES;
-      const live = tail[0].length - skip;
+      const live = tail[first].length - skip;
       if (live <= over) {
-        tail.shift();
+        tail[first] = null;
+        first++;
         skip = 0;
         tailBytes -= live;
         cut += live;
@@ -419,9 +422,17 @@ function outputBuffer() {
         cut += over;
       }
     }
+    // снятые куски уходят из массива разом, когда их больше половины: сдвиг - амортизированно O(1) на кусок
+    if (first > 0 && first * 2 >= tail.length) {
+      tail.splice(0, first);
+      first = 0;
+    }
   };
-  // хвост без срезанного начала первого куска
-  const tailLive = () => (skip ? [tail[0].subarray(skip)].concat(tail.slice(1)) : tail);
+  // хвост без снятых кусков и срезанного начала первого живого
+  const tailLive = () => {
+    const live = first ? tail.slice(first) : tail;
+    return skip ? [live[0].subarray(skip)].concat(live.slice(1)) : live;
+  };
   const streams = [];
   return {
     /**
@@ -449,7 +460,7 @@ function outputBuffer() {
     get heldBytes() {
       const seen = new Set();
       let n = 0;
-      for (const b of head.concat(tail, streams.map((s) => s.carry))) {
+      for (const b of head.concat(tail.slice(first), streams.map((s) => s.carry))) {
         if (seen.has(b.buffer)) continue;
         seen.add(b.buffer);
         n += b.buffer.byteLength;
@@ -458,9 +469,9 @@ function outputBuffer() {
     },
     text() {
       if (!cut) return Buffer.concat(head.concat(tail)).toString('utf8');
-      const first = Buffer.concat(head);
+      const headBuf = Buffer.concat(head);
       const last = Buffer.concat(tailLive());
-      const headText = first.subarray(0, utf8HeadEnd(first)).toString('utf8');
+      const headText = headBuf.subarray(0, utf8HeadEnd(headBuf)).toString('utf8');
       const tailText = last.subarray(utf8TailStart(last)).toString('utf8');
       return (
         headText + '\n... срезано ' + cut + ' байт вывода: gates.js держит первые ' + OUTPUT_HEAD_BYTES +
