@@ -2155,7 +2155,8 @@
       "E0-12AB"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-28"
+    "status": "blocked",
+    "added_at": "2026-10-28",
+    "blocked_reason": "стоп 3: после двух /fix и захода по Р-8 точечное /qa нашло новые блокеры (fail-open маркера поломки против HEAD, __proto__ в brokenHooks, ложные тексты про edits); пакет А на ветке wip/E0-12AE, задачи E0-12AF/AG/AH там же"
   }
 ]
