@@ -1,5 +1,6 @@
 import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 import {
+  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -18,16 +19,9 @@ import {
   it,
 } from "vitest";
 import { repoRoot } from "../scripts/lib/paths.mjs";
-import {
-  DEFAULT_DOC,
-  badDocs,
-  badSections,
-  docProblem,
-  sectionHeading,
-  sectionProblem,
-  slug,
-} from "../scripts/lib/tracker-doc.mjs";
-import { readRepoFile } from "./repo-files.js";
+import { DEFAULT_DOC } from "../scripts/lib/tracker-doc.mjs";
+import { writeTrackerTree } from "../scripts/lib/tracker-fixture.mjs";
+import { readRepoFile, repoFilesUnder } from "./repo-files.js";
 import { type Task, TrackerSchema, readTracker, taskEntry } from "./tracker.js";
 
 /**
@@ -131,17 +125,9 @@ const WORKLOG = "docs/90_WORKLOG.md";
  */
 function scratchTracker(tasks: Task[], docs: string[]) {
   const root = mkdtempSync(join(tmpdir(), "sf-tracker-"));
-  mkdirSync(join(root, "docs", "tasks"), { recursive: true });
-  writeFileSync(join(root, TRACKER), `${JSON.stringify(tasks, null, 2)}\n`);
-  writeFileSync(join(root, WORKLOG), "# Журнал работ\n\n");
+  writeTrackerTree(root, tasks, { docs });
   const write = (doc: string, text: string): void =>
     writeFileSync(join(root, "docs", doc), text);
-  for (const doc of docs) {
-    const sections = tasks
-      .filter((entry) => entry.doc === doc)
-      .map((entry) => `${sectionHeading(entry.id, entry.title)}\n`);
-    write(doc, `# doc\n\n${sections.join("\n")}`);
-  }
   const run = (args: string[]): SpawnSyncReturns<string> =>
     spawnSync(process.execPath, [SCRIPT, `--root=${root}`, ...args], {
       encoding: "utf8",
@@ -172,315 +158,208 @@ function scratchTracker(tasks: Task[], docs: string[]) {
 
 type Scratch = ReturnType<typeof scratchTracker>;
 
-describe("the doc of a task", () => {
-  // Made when the cases run, not when they are collected: a run filtered
-  // with -t leaves no directory behind.
-  let docs: string;
+/**
+ * The commands of `ON_NODE_ALONE` in scripts/tasks.mjs, read from the source:
+ * the one list of the commands that run without the packages of the root, so
+ * the cases below hold every other command of the switch to the refusal.
+ */
+function onNodeAlone(): string[] {
+  const list = /^const ON_NODE_ALONE = \[([^\]]*)\];/m.exec(
+    readRepoFile("scripts/tasks.mjs"),
+  )?.[1];
+  if (list === undefined) {
+    throw new Error("scripts/tasks.mjs: no const ON_NODE_ALONE = [...];");
+  }
+  return [...list.matchAll(/"([a-z-]+)"/g)]
+    .map((match) => match[1])
+    .filter((name): name is string => name !== undefined);
+}
+
+/** The packages scripts/ imports by a bare specifier (`from "gemoji"`). */
+function barePackagesOfScripts(): string[] {
+  const names = new Set<string>();
+  for (const file of repoFilesUnder("scripts")) {
+    if (!file.endsWith(".mjs")) continue;
+    const source = readRepoFile(file);
+    for (const match of source.matchAll(
+      /^import [^;]*? from "([^".][^"]*)";/gm,
+    )) {
+      const name = match[1];
+      if (name !== undefined && !name.startsWith("node:")) names.add(name);
+    }
+  }
+  return [...names].sort();
+}
+
+/** The arguments each command that needs the packages of the root runs with. */
+const NEEDS_PACKAGES: Record<string, string[]> = {
+  start: ["start", "E0-01"],
+  done: ["done", "E0-01"],
+  block: ["block", "E0-01", "a reason"],
+  unblock: ["unblock", "E0-01"],
+  todo: ["todo", "E0-01"],
+  render: ["render"],
+  add: ["add", "E0-02", "Task E0-02", "--doc", "30_E0_TASKS.md"],
+  set: ["set", "E0-01", "--title", "Other"],
+};
+const ALONE_ARGS: Record<string, string[]> = {
+  next: ["next"],
+  list: ["list"],
+  show: ["show", "E0-01"],
+};
+
+/**
+ * A fresh clone or worktree before `pnpm install`: the script and its
+ * modules copied where no node_modules is found above them - checked, not
+ * assumed: Node looks for a package in every directory up to the root of the
+ * disk, and a `node_modules` above the temporary directory would let the
+ * cases pass on the packages of another tree. The commands of `ON_NODE_ALONE`
+ * run; every other one says which package is not installed, with no path of
+ * the checkout, and writes nothing. A module of the tracker that is not
+ * there is another refusal: `pnpm install` would not bring it back.
+ */
+describe("tasks.mjs without the packages of the root", () => {
+  let scratch: Scratch;
+  let code: string;
   beforeAll(() => {
-    docs = mkdtempSync(join(tmpdir(), "sf-tracker-doc-"));
-    writeFileSync(join(docs, "TECH_DEBT.md"), "# debt\n");
-    mkdirSync(join(docs, "adr"));
-    writeFileSync(join(docs, "adr", "README.md"), "# adr\n");
+    scratch = scratchTracker(
+      [task("E0-01", "30_E0_TASKS.md")],
+      ["30_E0_TASKS.md"],
+    );
+    code = mkdtempSync(join(tmpdir(), "sf-tracker-code-"));
+    cpSync(join(repoRoot, "scripts"), join(code, "scripts"), {
+      recursive: true,
+    });
   });
   afterAll(() => {
-    rmSync(docs, { recursive: true, force: true });
+    scratch.cleanup();
+    rmSync(code, { recursive: true, force: true });
+  });
+  // NODE_PATH is read by require, not by import; it is cleared all the same.
+  const { NODE_PATH: _, ...env } = process.env;
+  const runIn = (dir: string, args: string[]) =>
+    spawnSync(
+      process.execPath,
+      [join(dir, "scripts", "tasks.mjs"), `--root=${scratch.root}`, ...args],
+      { encoding: "utf8", env, timeout: RUN_TIMEOUT_MS },
+    );
+  const run = (args: string[]) => runIn(code, args);
+  /** Runs `args` and holds the tracker, the status and the journal to what they were. */
+  const refused = (dir: string, args: string[]) => {
+    const before = [TRACKER, STATUS, WORKLOG].map(scratch.read);
+    const result = runIn(dir, args);
+    expect([TRACKER, STATUS, WORKLOG].map(scratch.read)).toEqual(before);
+    return result;
+  };
+
+  it("runs where no package of scripts/ is found", () => {
+    const packages = barePackagesOfScripts();
+    expect(packages).toEqual(
+      expect.arrayContaining(["gemoji", "github-slugger", "markdown-it"]),
+    );
+    const probe = join(code, "scripts", "lib", "found-packages.mjs");
+    writeFileSync(
+      probe,
+      `for (const name of ${JSON.stringify(packages)}) {\n  try { await import(name); console.log(name); } catch {}\n}\n`,
+    );
+    const found = spawnSync(process.execPath, [probe], {
+      encoding: "utf8",
+      env,
+      timeout: RUN_TIMEOUT_MS,
+    });
+    rmSync(probe);
+    expect(found.status, found.stderr).toBe(0);
+    expect(
+      found.stdout,
+      `packages found from ${code}: a node_modules above it, and the cases below would not run without them`,
+    ).toBe("");
   });
 
-  it.each(["TECH_DEBT.md", "adr/README.md"])(
-    "takes %s, a file of docs/",
-    (doc) => {
-      expect(docProblem(doc, docs)).toBeUndefined();
+  it("holds every command of the script to one of the two lists", () => {
+    const alone = onNodeAlone();
+    expect([...alone].sort()).toEqual(Object.keys(ALONE_ARGS).sort());
+    expect(
+      caseLabels()
+        .filter((label) => !alone.includes(label))
+        .sort(),
+    ).toEqual(Object.keys(NEEDS_PACKAGES).sort());
+  });
+
+  it.each(Object.values(ALONE_ARGS))("runs %s", (...args) => {
+    const result = run(args);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("E0-01");
+  });
+
+  it.each([...Object.values(NEEDS_PACKAGES), ["render", "--check"]])(
+    "refuses %s, naming the package to install, nothing written",
+    (...args) => {
+      const result = refused(code, args);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(
+        new RegExp(
+          `^error: ${args[0]} needs the package (gemoji|github-slugger|markdown-it) of the root, which is not installed: run pnpm install; next, list, show run without them\\n$`,
+        ),
+      );
+      expect(result.stderr).not.toContain(code);
     },
   );
 
-  it.each([
-    ["docs/TECH_DEBT.md", "starts with docs/"],
-    ["./docs/TECH_DEBT.md", "starts with docs/"],
-    ["docs\\TECH_DEBT.md", "starts with docs/"],
-    ["NOPE.md", "names no file"],
-    ["adr", "names no file"],
-    ["", "doc is empty"],
-    ["../sf-tracker-doc-outside.md", "has a . or .. segment"],
-    ["adr/../TECH_DEBT.md", "has a . or .. segment"],
-    ["./TECH_DEBT.md", "has a . or .. segment"],
-    ["/TECH_DEBT.md", "is an absolute path"],
-    ["C:/TECH_DEBT.md", "is an absolute path"],
-    ["adr\\README.md", "has a backslash"],
-    ["tech_debt.md", '"tech_debt.md" is "TECH_DEBT.md" on disk'],
-    ["ADR/README.md", '"ADR" is "adr" on disk'],
-    ["adr/readme.md", '"readme.md" is "README.md" on disk'],
-  ])("refuses %j", (doc, why) => {
-    expect(docProblem(doc, docs)).toContain(why);
-  });
-
-  it("refuses the absolute path of a file of docs/", () => {
-    expect(docProblem(join(docs, "TECH_DEBT.md"), docs)).toContain(
-      "is an absolute path",
-    );
-  });
-
-  it("names every task whose doc is not a file of docs/, a task without one too", () => {
-    expect(
-      badDocs(
+  /**
+   * A copy of scripts/ with stand-ins of the packages of the root beside it,
+   * `spoil` run on it before `start`: what is refused is what `spoil` took
+   * away, not a package that is missing.
+   */
+  const startWithout = (spoil: (dir: string) => void) => {
+    const partial = mkdtempSync(join(tmpdir(), "sf-tracker-code-"));
+    try {
+      cpSync(join(repoRoot, "scripts"), join(partial, "scripts"), {
+        recursive: true,
+      });
+      for (const [name, source] of [
+        ["gemoji", "export const gemoji = [];\n"],
         [
-          { id: "A-1", doc: "TECH_DEBT.md" },
-          { id: "A-2", doc: "docs/TECH_DEBT.md" },
-          { id: "A-3", doc: "GONE.md" },
-          { id: "A-4" },
-          { id: "A-5", doc: 7 },
+          "github-slugger",
+          "export default class {\n  slug(text) {\n    return text;\n  }\n}\n",
         ],
-        docs,
-      ),
-    ).toEqual([
-      expect.stringMatching(/^A-2: /),
-      expect.stringMatching(/^A-3: /),
-      "A-4: doc is missing",
-      "A-5: doc is missing",
-    ]);
-  });
+        ["markdown-it", "export default class {}\n"],
+      ] as const) {
+        const dir = join(partial, "node_modules", name);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, "package.json"),
+          JSON.stringify({ name, type: "module", main: "index.js" }),
+        );
+        writeFileSync(join(dir, "index.js"), source);
+      }
+      spoil(partial);
+      const result = refused(partial, ["start", "E0-01"]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).not.toContain(partial);
+      return result.stderr;
+    } finally {
+      rmSync(partial, { recursive: true, force: true });
+    }
+  };
 
-  it("is a file of docs/ for every task of the tracker", () => {
-    const tasks = readTracker();
-    // Nothing parsed would pass on nothing.
-    expect(tasks).not.toHaveLength(0);
-    expect(badDocs(tasks, join(repoRoot, "docs"))).toEqual([]);
-  });
-
-  it("holds the section of every task of the tracker where docs/00_STATUS.md links", () => {
-    const tasks = readTracker();
-    expect(tasks).not.toHaveLength(0);
-    expect(badSections(tasks, join(repoRoot, "docs"))).toEqual([]);
-  });
-});
-
-describe("the section of a task", () => {
-  let docs: string;
-  beforeAll(() => {
-    docs = mkdtempSync(join(tmpdir(), "sf-tracker-section-"));
-    writeFileSync(
-      join(docs, "A.md"),
-      "# a\n\n### E0-02. Second task\n\n### E0-0222. Other\n\n### E0-03. Third task\n\n### E0-03. Third task\n",
-    );
-    writeFileSync(
-      join(docs, "CRLF.md"),
-      "# a\r\n\r\n### E0-02. Second task\r\n\r\n### E0-03. Third task\r\n",
-    );
-    writeFileSync(join(docs, "OTHER.md"), "### E0-0222. Second task\n");
-    writeFileSync(
-      join(docs, "FENCED.md"),
-      [
-        "# a",
-        "",
-        "```md",
-        "### E0-02. Second task",
-        "```",
-        "",
-        "### E0-03. Third task",
-        "",
-        "~~~~",
-        "```",
-        "### E0-03. Third task",
-        "~~~~",
-        "",
-      ].join("\n"),
-    );
-  });
-  afterAll(() => {
-    rmSync(docs, { recursive: true, force: true });
-  });
-
-  const second = (doc: string) => ({ id: "E0-02", title: "Second task", doc });
-  const third = (doc: string) => ({ id: "E0-03", title: "Third task", doc });
-
-  it("is found by id, title and anchor", () => {
-    expect(sectionProblem(second("A.md"), docs, "check")).toBeUndefined();
-  });
-
-  it("is found in a CRLF document, and the title it gives ends where the line does", () => {
-    expect(sectionProblem(second("CRLF.md"), docs, "check")).toBeUndefined();
+  it("refuses a command when a module of the tracker is not there, without pnpm install", () => {
     expect(
-      sectionProblem({ ...third("CRLF.md"), title: "Other" }, docs, "check"),
-    ).toContain('give set E0-03 --title "Third task", or retitle');
-  });
-
-  it("is not needed by a task of docs/00_STATUS.md, which is not read", () => {
-    expect(
-      sectionProblem(second(DEFAULT_DOC), join(docs, "gone"), "check"),
-    ).toBeUndefined();
-  });
-
-  it("is missing when only a longer id has one", () => {
-    expect(sectionProblem(second("OTHER.md"), docs, "check")).toContain(
-      'no section "### E0-02. ..." in docs/OTHER.md',
-    );
-  });
-
-  it("is not a line of a fenced block of code", () => {
-    expect(sectionProblem(second("FENCED.md"), docs, "check")).toContain(
-      'no section "### E0-02. ..." in docs/FENCED.md',
-    );
-    // A fence of the other kind, or a shorter one, does not close the block.
-    expect(sectionProblem(third("FENCED.md"), docs, "check")).toBeUndefined();
-  });
-
-  it.each([
-    ["emphasis of *", "Fix *the* gate", "emphasis (*)"],
-    ["emphasis of _", "Fix _the_ gate", "emphasis (_ at the edge of a word)"],
-    ["inline HTML", "Fix <b>the</b> gate", "inline HTML (<)"],
-    ["a link", "Fix [the gate](x.md)", "a link ([)"],
-    ["a closing sequence of #", "Fix the gate ###", "a closing sequence of #"],
-    ["a named HTML entity", "Fix &amp; gate", "an HTML entity (&...;)"],
-    [
-      "a numeric HTML entity",
-      "Fix &#x27;the&#39; gate",
-      "an HTML entity (&...;)",
-    ],
-  ])("is refused with %s in its heading", (_, title, markup) => {
-    writeFileSync(join(docs, "MARKUP.md"), `### E0-05. ${title}\n`);
-    expect(
-      sectionProblem({ id: "E0-05", title, doc: "MARKUP.md" }, docs, "check"),
-    ).toBe(
-      `the section "### E0-05. ${title}" of docs/MARKUP.md has ${markup}, and the anchor of the link of docs/00_STATUS.md is not worked out for markup: write the heading as plain text, then give the tracker its title`,
-    );
-  });
-
-  it.each([
-    ["one run of *", "Tests of scripts/** and the rest"],
-    ["_ inside a word", "COMPOSE_FILE and profiles"],
-    ["a lone & and a colon", "Postgres & Redis: one gate"],
-  ])("takes %s in its heading, which is no markup", (_, title) => {
-    writeFileSync(join(docs, "PLAIN.md"), `### E0-05. ${title}\n`);
-    expect(
-      sectionProblem({ id: "E0-05", title, doc: "PLAIN.md" }, docs, "check"),
-    ).toBeUndefined();
-  });
-
-  it.each([
-    ["a heading of another level", "## E0-05. Fifth task"],
-    ["a heading that differs only in its signs", "#### E0-05: Fifth task!"],
-    ["a heading with a closing sequence", "# E0-05. Fifth task #"],
-  ])("is refused when %s has its anchor too", (_, other) => {
-    writeFileSync(
-      join(docs, "TWICE.md"),
-      `### E0-05. Fifth task\n\n${other}\n`,
-    );
-    expect(
-      sectionProblem(
-        { id: "E0-05", title: "Fifth task", doc: "TWICE.md" },
-        docs,
-        "check",
+      startWithout((dir) =>
+        rmSync(join(dir, "scripts", "lib", "markdown.mjs")),
       ),
     ).toBe(
-      'the anchor "#e0-05-fifth-task" of the section "### E0-05. Fifth task" is that of 2 headings of docs/TWICE.md: the link of docs/00_STATUS.md lands on the first of them; give each of them a text of its own',
+      "error: start cannot load scripts/lib/tracker-doc.mjs: scripts/lib/markdown.mjs is not there, and the scripts of the tracker need it - restore it from git\n",
     );
   });
 
-  it("is refused when there are two", () => {
-    expect(sectionProblem(third("A.md"), docs, "check")).toBe(
-      '2 sections "### E0-03. ..." in docs/A.md: keep one of them',
-    );
-  });
-
-  it("is refused when the title is not that of the heading, with the title to give", () => {
-    const problem = sectionProblem(
-      { id: "E0-02", title: "Other title", doc: "A.md" },
-      docs,
-      "check",
-    );
-    expect(problem).toContain('title "Other title" does not match the section');
-    expect(problem).toContain('give set E0-02 --title "Second task"');
-  });
-
-  it.each([
-    [
-      "add",
-      "no section",
-      second("OTHER.md"),
-      'write the section "### E0-02. Second task" in docs/OTHER.md first, then add the task',
-    ],
-    [
-      "set",
-      "no section",
-      second("OTHER.md"),
-      'write the section "### E0-02. Second task" in docs/OTHER.md first, or give --doc the document that has it',
-    ],
-    [
-      "check",
-      "no section",
-      second("OTHER.md"),
-      'write the section "### E0-02. Second task" in docs/OTHER.md, or give set E0-02 --doc the document that has it',
-    ],
-    [
-      "add",
-      "another title",
-      { ...second("A.md"), title: "Other" },
-      'give add the title of the section, "Second task", or retitle the section',
-    ],
-    [
-      "set",
-      "another title",
-      { ...second("A.md"), title: "Other" },
-      'give set E0-02 --title "Second task", or retitle the section',
-    ],
-  ] as const)("tells %s what to do about %s", (command, _, task, fix) => {
-    const problem = sectionProblem(task, docs, command);
-    expect(problem?.endsWith(fix), problem).toBe(true);
-    if (command === "add") expect(problem).not.toContain("set E0-02");
-  });
-
-  it("names every task whose section is wrong, one line each", () => {
+  it("refuses a command when a file of a package installed in part is not there, with pnpm install", () => {
     expect(
-      badSections(
-        [
-          second("A.md"),
-          third("A.md"),
-          { id: "E0-02", title: "Changed", doc: "A.md" },
-        ],
-        docs,
+      startWithout((dir) =>
+        rmSync(join(dir, "node_modules", "gemoji", "index.js")),
       ),
-    ).toEqual([
-      expect.stringMatching(/^E0-03: 2 sections/),
-      expect.stringMatching(/^E0-02: title "Changed" does not match/),
-    ]);
-  });
-});
-
-/**
- * The link of docs/00_STATUS.md lands on the section only with the anchor
- * GitHub gives the heading: every character but letters, digits, `-`, `_`
- * and the blank cut out, each blank a `-` of its own. The titles are those of
- * the headings of the documents, where a rule of our own missed.
- */
-describe("the anchor of a section", () => {
-  it.each([
-    [
-      "E0-12H",
-      "Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout })",
-      "e0-12h-postgres-классы-sqlstate-срокотмена-запроса-пробы-closedb-timeout-",
-    ],
-    [
-      "E13-02",
-      "Очереди, планировщики, DLQ — просмотр и управление",
-      "e13-02-очереди-планировщики-dlq--просмотр-и-управление",
-    ],
-    [
-      "E4-05",
-      "Job `research.run`: оркестрация plan → verify → brief",
-      "e4-05-job-researchrun-оркестрация-plan--verify--brief",
-    ],
-    [
-      "E9-09",
-      "Пилот: 2 языка × 2 видео, ADR",
-      "e9-09-пилот-2-языка--2-видео-adr",
-    ],
-    [
-      "E0-12K",
-      "Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки",
-      "e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция--профили-compose_file-симлинки",
-    ],
-    ["E0-12A", "Fix `x`, (y): z [a] ~b^ … ≤", "e0-12a-fix-x-y-z-a-b--"],
-  ])("of %s is the one GitHub gives", (id, title, anchor) => {
-    expect(slug(id, title)).toBe(anchor);
+    ).toBe(
+      "error: start needs the packages of the root, and node_modules/gemoji/index.js of one is not there: run pnpm install; next, list, show run without them\n",
+    );
   });
 });
 
@@ -787,7 +666,7 @@ describe("tasks.mjs on a copy of the tracker", () => {
     ]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      'give add the title of the section, "Third of all", or retitle the section',
+      "give add the title of the section, 'Third of all', or retitle the section",
     );
     expect(result.stderr).not.toContain("give set");
   });
@@ -801,7 +680,9 @@ describe("tasks.mjs on a copy of the tracker", () => {
     ]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("does not match the section");
-    expect(result.stderr).toContain('give set E0-02 --title "Task E0-02"');
+    expect(result.stderr).toContain(
+      "give the same set --title 'Task E0-02' too, or retitle the section",
+    );
   });
 
   it("set --doc refuses a document with no section of the task, nothing written", () => {
@@ -827,28 +708,34 @@ describe("tasks.mjs on a copy of the tracker", () => {
   it("render --check refuses a section whose heading has markup", () => {
     scratch.write(
       "30_E0_TASKS.md",
-      "### E0-01. Task E0-01\n\n### E0-02. Task E0-02 ###\n",
+      "### E0-01. Task E0-01\n\n### E0-02. Task E0-02 _x_\n",
     );
     const result = scratch.run(["render", "--check"]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      'E0-02: the section "### E0-02. Task E0-02 ###" of docs/30_E0_TASKS.md has a closing sequence of #',
+      'E0-02: the section "### E0-02. Task E0-02 _x_" of docs/30_E0_TASKS.md has emphasis (_)',
     );
   });
 
-  it("render --check refuses a section whose anchor another heading has", () => {
+  it("render --check refuses a section whose anchor an earlier heading has, and takes one after it", () => {
+    scratch.write(
+      "30_E0_TASKS.md",
+      "### E0-01. Task E0-01\n\n## E0-02 Task E0-02\n\n### E0-02. Task E0-02\n",
+    );
+    const result = scratch.run(["render", "--check"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      'E0-02: GitHub gives the section "### E0-02. Task E0-02" of docs/30_E0_TASKS.md the anchor "#e0-02-task-e0-02-1"',
+    );
     scratch.write(
       "30_E0_TASKS.md",
       "### E0-01. Task E0-01\n\n### E0-02. Task E0-02\n\n## E0-02 Task E0-02\n",
     );
-    const result = scratch.run(["render", "--check"]);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      'E0-02: the anchor "#e0-02-task-e0-02" of the section "### E0-02. Task E0-02" is that of 2 headings',
-    );
+    const after = scratch.run(["render", "--check"]);
+    expect(after.status, after.stderr).toBe(0);
   });
 
-  it("add refuses a heading with markup and set one whose anchor another heading has, nothing written", () => {
+  it("add refuses a heading with markup and set one whose anchor an earlier heading has, nothing written", () => {
     scratch.write("TECH_DEBT.md", "### E0-03. Third <b>x</b>\n");
     const add = scratch.refused([
       "add",
@@ -861,11 +748,13 @@ describe("tasks.mjs on a copy of the tracker", () => {
     expect(add.stderr).toContain("has inline HTML (<)");
     scratch.write(
       "TECH_DEBT.md",
-      "### E0-02. Task E0-02\n\n# E0-02. Task E0-02\n",
+      "# E0-02. Task E0-02\n\n### E0-02. Task E0-02\n",
     );
     const set = scratch.refused(["set", "E0-02", "--doc", "TECH_DEBT.md"]);
     expect(set.status).toBe(1);
-    expect(set.stderr).toContain("is that of 2 headings of docs/TECH_DEBT.md");
+    expect(set.stderr).toContain(
+      'GitHub gives the section "### E0-02. Task E0-02" of docs/TECH_DEBT.md the anchor "#e0-02-task-e0-02-1"',
+    );
   });
 
   it("render --check refuses two sections of one task", () => {
@@ -902,7 +791,7 @@ describe("tasks.mjs on a copy of the tracker", () => {
       'E0-02: title "Task E0-02" does not match the section "### E0-02. Something else" of docs/30_E0_TASKS.md',
     );
     expect(result.stderr).toContain(
-      'give set E0-02 --title "Something else", or retitle the section',
+      "give set E0-02 --title 'Something else', or retitle the section",
     );
   });
 
@@ -988,11 +877,279 @@ describe("tasks.mjs on a copy of the tracker", () => {
       "both it has",
       ["set", "E0-02", "--title", "Task E0-02", "--doc", "30_E0_TASKS.md"],
     ],
+    ["the deps it has", ["set", "E0-02", "--deps", ""]],
+    ["the estimate it has", ["set", "E0-02", "--est", "1 д"]],
   ])("set refuses %s, nothing written", (_, args) => {
     const result = scratch.refused(args);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      "nothing to change: E0-02 already has that title and doc",
+      "nothing to change: E0-02 already has the values given",
+    );
+  });
+
+  it("set writes the deps and the estimate, renders the status and journals both", () => {
+    const result = scratch.run([
+      "set",
+      "E0-02",
+      "--deps",
+      "e0-01",
+      "--est",
+      "0.5-2 д",
+    ]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(scratch.tasks().find((entry) => entry.id === "E0-02")).toMatchObject(
+      { deps: ["E0-01"], estimate: "0.5-2 д", estimate_days: 2 },
+    );
+    // The deps cell of the row of E0-02, not any mention of E0-01.
+    const row = scratch
+      .read(STATUS)
+      .split("\n")
+      .find((line) => line.startsWith("| ⬜ | [E0-02]("));
+    expect(row?.split(" | ")[4]).toBe("⬜E0-01");
+    expect(scratch.read(WORKLOG).trimEnd().split("\n").at(-1)).toMatch(
+      /^- \d{4}-\d{2}-\d{2} ✎ \*\*E0-02\*\* Task E0-02 \(изменена в трекере: зависимости «—» → «E0-01», оценка «1 д» → «0\.5-2 д»\)$/,
+    );
+    expect(scratch.run(["render", "--check"]).status).toBe(0);
+    // "" clears them.
+    const cleared = scratch.run(["set", "E0-02", "--deps", ""]);
+    expect(cleared.status, cleared.stderr).toBe(0);
+    expect(scratch.tasks().find((entry) => entry.id === "E0-02")?.deps).toEqual(
+      [],
+    );
+  });
+
+  it.each([
+    [
+      "deps not in the tracker",
+      ["set", "NO-SUCH-TASK", "--deps", "E0-01,E9-99"],
+      "--deps names tasks that are not in the tracker: E9-99",
+    ],
+    [
+      "the task itself in its deps",
+      ["set", "E0-02", "--deps", "E0-01,e0-02"],
+      "--deps makes a cycle of dependencies, E0-02 → E0-02: no task of it can start",
+    ],
+    ["--est last", ["set", "E0-02", "--est"], "--est needs a value"],
+  ])("set refuses %s, nothing written", (_, args, why) => {
+    const result = scratch.refused(args);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(why);
+  });
+
+  it("set refuses deps that make a cycle of two, nothing written", () => {
+    expect(scratch.run(["set", "E0-01", "--deps", "E0-02"]).status).toBe(0);
+    const result = scratch.refused(["set", "E0-02", "--deps", "E0-01"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe(
+      "error: --deps makes a cycle of dependencies, E0-02 → E0-01 → E0-02: no task of it can start\n",
+    );
+  });
+
+  it("set refuses deps that make a cycle of three, and takes a chain", () => {
+    const three = scratchTracker(
+      [
+        task("E0-01", "30_E0_TASKS.md"),
+        task("E0-02", "30_E0_TASKS.md"),
+        task("E0-03", "30_E0_TASKS.md"),
+      ],
+      ["30_E0_TASKS.md"],
+    );
+    try {
+      expect(three.run(["set", "E0-02", "--deps", "E0-01"]).status).toBe(0);
+      expect(three.run(["set", "E0-03", "--deps", "E0-02"]).status).toBe(0);
+      const result = three.refused(["set", "E0-01", "--deps", "E0-03"]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "--deps makes a cycle of dependencies, E0-01 → E0-03 → E0-02 → E0-01",
+      );
+    } finally {
+      three.cleanup();
+    }
+  });
+
+  it("add refuses deps that make a cycle with a task that names it, nothing written", () => {
+    // A tracker where E0-01 already waits for E0-03, a task not there yet.
+    writeFileSync(
+      join(scratch.root, TRACKER),
+      `${JSON.stringify(
+        [
+          { ...task("E0-01", "30_E0_TASKS.md"), deps: ["E0-03"] },
+          task("E0-02", "30_E0_TASKS.md"),
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    const result = scratch.refused([
+      "add",
+      "E0-03",
+      "Task E0-03",
+      "--doc",
+      "30_E0_TASKS.md",
+      "--deps",
+      "E0-01",
+    ]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "--deps makes a cycle of dependencies, E0-03 → E0-01 → E0-03",
+    );
+  });
+
+  it("add takes a task without deps where the tracker has a cycle of others", () => {
+    // A tracker a merge left with E0-01 and E0-02 waiting for each other.
+    writeFileSync(
+      join(scratch.root, TRACKER),
+      `${JSON.stringify(
+        [
+          { ...task("E0-01", "30_E0_TASKS.md"), deps: ["E0-02"] },
+          { ...task("E0-02", "30_E0_TASKS.md"), deps: ["E0-01"] },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    const add = scratch.run(["add", "E0-99", "x"]);
+    expect(add.status, add.stderr).toBe(0);
+    expect(scratch.tasks().map((entry) => entry.id)).toContain("E0-99");
+  });
+
+  it("set refuses a cycle that closes through the task", () => {
+    const four = scratchTracker(
+      [
+        { ...task("E0-01", "30_E0_TASKS.md"), deps: ["E0-02"] },
+        { ...task("E0-02", "30_E0_TASKS.md"), deps: ["E0-01"] },
+        task("E0-03", "30_E0_TASKS.md"),
+        { ...task("E0-04", "30_E0_TASKS.md"), deps: ["E0-03"] },
+      ],
+      ["30_E0_TASKS.md"],
+    );
+    try {
+      const result = four.refused(["set", "E0-03", "--deps", "E0-04"]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "--deps makes a cycle of dependencies, E0-03 → E0-04 → E0-03",
+      );
+    } finally {
+      four.cleanup();
+    }
+  });
+
+  it("set takes deps that reach a cycle of others", () => {
+    // E0-01 and E0-02 wait for each other; the cycle is not through E0-03.
+    const four = scratchTracker(
+      [
+        { ...task("E0-01", "30_E0_TASKS.md"), deps: ["E0-02"] },
+        { ...task("E0-02", "30_E0_TASKS.md"), deps: ["E0-01"] },
+        task("E0-03", "30_E0_TASKS.md"),
+      ],
+      ["30_E0_TASKS.md"],
+    );
+    try {
+      const taken = four.run(["set", "E0-03", "--deps", "E0-01"]);
+      expect(taken.status, taken.stderr).toBe(0);
+      expect(four.tasks().find((entry) => entry.id === "E0-03")?.deps).toEqual([
+        "E0-01",
+      ]);
+    } finally {
+      four.cleanup();
+    }
+  });
+
+  it("set writes a dependency given twice once", () => {
+    const result = scratch.run(["set", "E0-02", "--deps", "E0-01,e0-01"]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(scratch.tasks().find((entry) => entry.id === "E0-02")?.deps).toEqual(
+      ["E0-01"],
+    );
+    expect(scratch.read(WORKLOG).trimEnd().split("\n").at(-1)).toContain(
+      "зависимости «—» → «E0-01»",
+    );
+  });
+
+  it("set takes the deps it has in another order for no change", () => {
+    const three = scratchTracker(
+      [
+        task("E0-01", "30_E0_TASKS.md"),
+        task("E0-02", "30_E0_TASKS.md"),
+        task("E0-03", "30_E0_TASKS.md"),
+      ],
+      ["30_E0_TASKS.md"],
+    );
+    try {
+      expect(three.run(["set", "E0-03", "--deps", "E0-01,E0-02"]).status).toBe(
+        0,
+      );
+      const result = three.refused(["set", "E0-03", "--deps", "E0-02,E0-01"]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "nothing to change: E0-03 already has the values given",
+      );
+    } finally {
+      three.cleanup();
+    }
+  });
+
+  it.each([
+    ["an empty estimate", "", "--est is empty"],
+    ["an estimate of blanks", " ", "--est is empty"],
+    ["a line feed", "1\nд", "--est has a line break"],
+    ["a carriage return", "1\rд", "--est has a line break"],
+  ])("set and add refuse %s, nothing written", (_, est, why) => {
+    const set = scratch.refused(["set", "E0-02", "--est", est]);
+    expect(set.status).toBe(1);
+    expect(set.stderr).toContain(why);
+    const add = scratch.refused([
+      "add",
+      "E0-03",
+      "Task E0-03",
+      "--doc",
+      "30_E0_TASKS.md",
+      "--est",
+      est,
+    ]);
+    expect(add.status).toBe(1);
+    expect(add.stderr).toContain(why);
+  });
+
+  it("set and add take an estimate with a |, which the cell of the status escapes", () => {
+    const result = scratch.run(["set", "E0-02", "--est", "1 | 2 д"]);
+    expect(result.status, result.stderr).toBe(0);
+    const row = scratch
+      .read(STATUS)
+      .split("\n")
+      .find((line) => line.startsWith("| ⬜ | [E0-02]("));
+    expect(row).toContain("1 \\| 2 д");
+    const add = scratch.run(["add", "E0-03", "Task E0-03", "--est", "1 | 2 д"]);
+    expect(add.status, add.stderr).toBe(0);
+  });
+
+  it("set --doc to a document whose section has another title tells to give the same set with --title", () => {
+    scratch.write("TECH_DEBT.md", "### E0-02. Second, as written\n");
+    const given = [
+      "set",
+      "E0-02",
+      "--doc",
+      "TECH_DEBT.md",
+      "--deps",
+      "E0-01",
+      "--est",
+      "2 д",
+    ];
+    const result = scratch.refused(given);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "give the same set --title 'Second, as written' too, or retitle the section",
+    );
+    // By the fix, the same command with the title writes every value given.
+    const fixed = scratch.run([...given, "--title", "Second, as written"]);
+    expect(fixed.status, fixed.stderr).toBe(0);
+    expect(scratch.tasks().find((entry) => entry.id === "E0-02")).toMatchObject(
+      {
+        title: "Second, as written",
+        doc: "TECH_DEBT.md",
+        deps: ["E0-01"],
+        estimate: "2 д",
+      },
     );
   });
 

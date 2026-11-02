@@ -52,7 +52,7 @@ Experiment Engine -> Localization/TTS -> Publishing). Один репозито�
 Ручной режим: `/task` (план) -> `/go` (реализация) -> `/qa` -> `/fix` -> `/done`.
 Вопрос PM/техлиду руками: `/ask`. Где мы: `/status`. Проверки: `/gates`.
 
-Трекер задач - `docs/tasks/tasks.json` через `node scripts/tasks.mjs next|start|done|block|add|set` (`set <id> --title/--doc` - правка полей; `doc` - путь от `docs/`, `render --check` гейта `tracker` его сверяет с диском и требует в нём раздел `### <id>. <title>`, кроме `00_STATUS.md`);
+Трекер задач - `docs/tasks/tasks.json` через `node scripts/tasks.mjs next|start|done|block|add|set` (`set <id> --title/--doc/--deps a,b/--est "1 д"` - правка полей; `doc` - путь от `docs/`, `render --check` гейта `tracker` его сверяет с диском и требует в нём раздел `### <id>. <title>`, кроме `00_STATUS.md`);
 руками файл и `docs/00_STATUS.md` не правятся.
 
 ## Что остаётся за владельцем
@@ -107,6 +107,8 @@ Experiment Engine -> Localization/TTS -> Publishing). Один репозито�
 чат с владельцем - русский. В текстах, уходящих наружу (коммиты), только короткий дефис.
 Исключение: комментарии и строки вывода в `.claude/**` (хуки, правила, агенты, команды) - русский; `scripts/`,
 `packages/`, `apps/`, `test/` - английский (решение техлида 23.10.2026, E0-12U, `docs/DECISIONS.md`).
+Строки, которые `scripts/tasks.mjs` пишет в русские документы (`00_STATUS.md`, `90_WORKLOG.md`), - русские
+(решение техлида 02.11.2026, E0-12AM).
 
 ## Файл дела и формат ответа
 

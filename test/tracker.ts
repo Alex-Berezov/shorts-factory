@@ -8,11 +8,12 @@ import { readRepoJson } from "./repo-files.js";
 
 /**
  * The shape of docs/tasks/tasks.json for the tests of the root project, one
- * schema for every reader: `scripts/tasks.mjs` writes the file without one (it
- * has no dependencies), and a hand edit or a merge can still leave a misspelt
- * field, a status the CLI does not know, a duplicate id or a dependency on a
- * task that is not there - each of them passes the CLI and breaks a reader
- * later. The id, the epic and the dependencies are held to the rule `add`
+ * schema for every reader: `scripts/tasks.mjs` writes the file without one
+ * (`tasks.mjs` loads the packages of the root for the commands that need
+ * them, and zod is none of those), and a hand edit or a merge can still
+ * leave a misspelt field, a status the CLI does not know, a duplicate id or
+ * a dependency on a task that is not there - each of them passes the CLI and
+ * breaks a reader later. The id, the epic and the dependencies are held to the rule `add`
  * holds them to (`scripts/lib/tracker-task.mjs`), so the CLI writes nothing
  * the schema refuses.
  */

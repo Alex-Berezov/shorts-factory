@@ -2221,6 +2221,20 @@
       "E0-12X"
     ],
     "doc": "TECH_DEBT.md",
+    "status": "in_progress",
+    "added_at": "2026-11-02",
+    "started_at": "2026-11-02"
+  },
+  {
+    "id": "E0-12AN",
+    "epic": "E0",
+    "title": "tasks.mjs: один разбор аргументов CLI, эпик из перечня, документ по умолчанию, ссылка ADHOC",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-12AM"
+    ],
+    "doc": "TECH_DEBT.md",
     "status": "todo",
     "added_at": "2026-11-02"
   }

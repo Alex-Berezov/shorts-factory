@@ -84,6 +84,7 @@ import {
 } from "./compose-rules.mjs";
 import { isGone, messageOf, readIfFile } from "./lib/files.mjs";
 import { canonical, isEntry, nameOn, repoRoot } from "./lib/paths.mjs";
+import { shellArg } from "./lib/shell.mjs";
 
 /**
  * An environment of a process, by name.
@@ -232,21 +233,6 @@ function endingOf(error) {
     return { text: `was ended by ${String(signal)}`, gateLimit: false };
   }
   return undefined;
-}
-
-/**
- * One argument as a shell takes it back: as it is when it holds only letters,
- * digits, `_`, `.`, `/`, `:` and `-`, otherwise in single quotes, inside
- * which neither a POSIX shell nor PowerShell expands `$`, a backquote or a
- * backslash - so a Windows path, with its backslashes, is always quoted. A
- * single quote inside is written the POSIX way (`'\''`), which PowerShell
- * does not take: `commandOf` says so on a line of its own.
- *
- * @param {string} arg
- * @returns {string}
- */
-function shellArg(arg) {
-  return /^[\w./:-]+$/.test(arg) ? arg : `'${arg.replaceAll("'", "'\\''")}'`;
 }
 
 /**

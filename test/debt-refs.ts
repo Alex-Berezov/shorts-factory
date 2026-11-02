@@ -53,9 +53,13 @@ const OUTCOME_TASK = new RegExp(
 /** What a row was before its outcome changed: not its task now. */
 const FORMER = /было:/i;
 
-/** `text` on one line: a line break with the comment marker after it is one blank. */
+/**
+ * `text` on one line: a line break with the comment marker after it is one
+ * blank. The marker of SQL is `--` before a blank: `---` or `--flag` at the
+ * start of a line keeps its dashes.
+ */
 function folded(text: string): string {
-  return text.replace(/\s*\r?\n\s*(?:\*|\/\/|#)?\s*/g, " ");
+  return text.replace(/\s*\r?\n\s*(?:\*|\/\/|#|--(?!\S))?\s*/g, " ");
 }
 
 /** The cells of a row of a markdown table, split at the pipes that are not escaped. */
@@ -154,12 +158,39 @@ export function debtRefProblems(
   return problems;
 }
 
+/** `bytes` with each pair of bytes swapped: UTF-16BE read as UTF-16LE. */
+function swapped(bytes: Uint8Array): Uint8Array {
+  const out = new Uint8Array(bytes.length - (bytes.length % 2));
+  for (let at = 0; at < out.length; at += 2) {
+    out[at] = bytes[at + 1] ?? 0;
+    out[at + 1] = bytes[at] ?? 0;
+  }
+  return out;
+}
+
 /**
- * The text of a file of the scope of the lock, undefined for a binary one (a
- * NUL byte in it, as in an image or an archive). Every other file is read,
+ * The text of a file of the scope of the lock, undefined for a binary one:
+ * UTF-16 for a file with the byte order mark of UTF-16LE or UTF-16BE (FF FE,
+ * FE FF); UTF-8 for a file with no NUL byte; any other file with a NUL byte -
+ * an image, an archive, a font, UTF-16 without a mark - is binary and is not
+ * read: the bytes alone do not tell such UTF-16 from the rest, and that is a
+ * limit, not a guess (docs/TECH_DEBT.md § E0-12AM). Every file is read,
  * whatever its name: a migration, a shell script or a Dockerfile can hold a
  * reference as well as a module.
  */
 export function textOf(bytes: Uint8Array): string | undefined {
-  return bytes.includes(0) ? undefined : new TextDecoder().decode(bytes);
+  const [first, second] = bytes;
+  const order =
+    first === 0xff && second === 0xfe
+      ? "le"
+      : first === 0xfe && second === 0xff
+        ? "be"
+        : bytes.includes(0)
+          ? undefined
+          : "utf-8";
+  if (order === undefined) return undefined;
+  if (order === "utf-8") return new TextDecoder().decode(bytes);
+  return new TextDecoder("utf-16le").decode(
+    order === "le" ? bytes : swapped(bytes),
+  );
 }

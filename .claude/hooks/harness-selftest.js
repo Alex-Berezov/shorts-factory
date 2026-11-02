@@ -550,6 +550,7 @@ const REQUIRE_NOT_EDGE = [
   { file: 'selftest-int-cases.js', re: /^name\);\\n/, why: 'текст стаба int-пробы: нестроковый спецификатор (DYNAMIC_SPECIFIER)' },
   { file: 'selftest-gates.js', re: /^path\.join\(ROOT, 'scripts', 'lib', 'manifest\.mjs'\)\)/, why: 'scripts/lib/manifest.mjs проекта (близнец workspaceGlobs), не каталог хуков' },
   { file: 'selftest-gates.js', re: /^path\.join\(ROOT, 'scripts', 'lib', 'tracker-doc\.mjs'\)\)/, why: 'scripts/lib/tracker-doc.mjs проекта (строка раздела и документ по умолчанию пробы гейта tracker), не каталог хуков' },
+  { file: 'selftest-gates.js', re: /^path\.join\(ROOT, 'scripts', 'lib', 'tracker-fixture\.mjs'\)\)/, why: 'scripts/lib/tracker-fixture.mjs проекта (дерево копии трекера пробы гейта tracker), не каталог хуков' },
   { file: 'selftest-gates.js', re: /^esm\)/, why: 'текст комментария и имени строки: require для ESM (require-esm) - механизм Node, а не вызов' },
   { file: 'selftest-gates-run.js', re: /^' \+ JSON\.stringify\(file\) \+ '\)/, why: 'gates.js пробы require в дочернем node - хук HOOK_FILES' },
   { file: 'selftest-gate-runner.js', re: /^cfg\.gatesFile\)/, why: 'gates.js в дочернем node проб запуска - хук HOOK_FILES' },

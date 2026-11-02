@@ -4,26 +4,28 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-11-02. **Не �
 
 ## Сводка
 
-- **Прогресс:** `████████░░░░░░░░░░░░░░░░░░░░░░` 44/162 задач, 43.1 / 176.1 оценочных дней.
+- **Прогресс:** `████████░░░░░░░░░░░░░░░░░░░░░░` 44/163 задач, 43.1 / 177.1 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** ничего — возьмите задачу из «Следующие»
+- **В работе:** [E0-12AM](TECH_DEBT.md#e0-12am-tracker-doc-заголовок-раздела-по-commonmark---одно-правило-поиска-и-повторов) tracker-doc: заголовок раздела по CommonMark - одно правило поиска и повторов
 - **Заблокировано:** [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-не-дольше-45-с) (стоп 3 (сессия 2): после Б1 текстом по ОВ7 круг /qa нашёл 5 блокеров, внесённых Fix 3/сессией 2 (H7 запись итога без красной посадки, finally Б8, неверный инвариант Б1 о vitest, сигнал null в vitestAnswer, pid-заглушка died/twice); по решению техлида дифф на ветке wip/E0-12AC (33ebd46), main чистый; вопрос техлиду следующей сессии); [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-harness-selftestjs-вне-weakeningexempt) (общие файлы .claude/hooks, ждёт коммита E0-12AC (ветка wip/E0-12AC)); [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) (стоп 3: после двух /fix и захода по Р-8 точечное /qa нашло новые блокеры (fail-open маркера поломки против HEAD, __proto__ в brokenHooks, ложные тексты про edits); пакет А на ветке wip/E0-12AE, задачи E0-12AF/AG/AH там же); [E0-12AK](TECH_DEBT.md#e0-12ak-test-support-db-и-git-хвосты-e0-12qe0-12t) (stop 3: after two /fix and techlead Р-3 (Fix 3) a blocker introduced by Fix 3 remains - shared calleeName ElementAccess branch weakens root-reads pathCallName; diff on wip/E0-12AK); [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s14-формы-s15s16-сверка-носителей-замок-zod) (стоп 3: после двух /fix и третьего захода по решению техлида круг 4 нашёл 4 блокера, внесённых правками (skipIf ложный отказ на */ //, верхнеуровневый require import-forms в selftest, охват files S15/S16 против S07/S11, сверка берёт первое правило с id); дифф на ветке wip/E0-12V (2df446a), гейты на ветке зелёные; вопрос техлиду следующей сессии - узкий заход или разрез задачи)
 
 ## Сейчас в работе
 
-_Нет задач в работе._
+| Задача | Название | Оценка | Начата |
+|---|---|---|---|
+| [E0-12AM](TECH_DEBT.md#e0-12am-tracker-doc-заголовок-раздела-по-commonmark---одно-правило-поиска-и-повторов) | tracker-doc: заголовок раздела по CommonMark - одно правило поиска и повторов | ? | 2026-11-02 |
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
 | Задача | Название | Оценка | Эпик |
 |---|---|---|---|
-| [E0-12AM](TECH_DEBT.md#e0-12am-tracker-doc-заголовок-раздела-по-commonmark---одно-правило-поиска-и-повторов) | tracker-doc: заголовок раздела по CommonMark - одно правило поиска и повторов | ? | E0 |
 | [E0-12Y](TECH_DEBT.md#e0-12y-appsapi-sfconfig-разрез-request-log-маршруты-отказов-в-одном-месте-requestid-сокетного-отказа-clientwentaway-под-замком-auth-без-броска-на-порядок-регистрации-loadenv-без-копии-processenv) | apps/api, @sf/config: разрез request-log, маршруты отказов в одном месте, requestId сокетного отказа, clientWentAway под замком, auth без броска на порядок регистрации, loadEnv без копии process.env | 1 д | E0 |
 | [E0-12Z](TECH_DEBT.md#e0-12z-sfcore-worker-healthcheck-api-test-support-один-ответ-на-неверные-часы-причина-healthcheck-по-классу-без-текста-клиента-waitforline-по-событию-и-responsetime-докблоки-queue-stats-и-порядок-стадий) | @sf/core, worker healthcheck, api, test-support: один ответ на неверные часы, причина healthcheck по классу без текста клиента, waitForLine по событию и responseTime, докблоки queue-stats и порядок стадий | 0.5 д | E0 |
 | [E12-01](42_E12_TASKS.md#e12-01-sfcore-схема-журнала-и-csv-парсер) | `@sf/core`: схема журнала и CSV-парсер | 0.5 д | E12 |
 | [E1-01](31_E1_TASKS.md#e1-01-sfyoutube-клиент-data-api-для-публичных-чтений) | `@sf/youtube`: клиент Data API для публичных чтений | 1.5 д | E1 |
+| [E2-01](32_E2_TASKS.md#e2-01-спайк-gemini-video-understanding-по-youtube-url) | Спайк: Gemini video understanding по YouTube URL | 1.5 д | E2 |
 
-Взять в работу: `node scripts/tasks.mjs start E0-12AM`
+Взять в работу: `node scripts/tasks.mjs start E0-12Y`
 
 ## Заблокировано
 
@@ -39,7 +41,7 @@ _Нет задач в работе._
 
 | | Эпик | Задачи | Дни (сделано / всего) | Документ |
 |---|---|---|---|---|
-| 🔄 | **E0** Каркас проекта и инфраструктура | `██████████░░` 44/53 | 43.1 / 49.6 | [30_E0_TASKS.md](30_E0_TASKS.md) |
+| 🔄 | **E0** Каркас проекта и инфраструктура | `██████████░░` 44/54 | 43.1 / 50.6 | [30_E0_TASKS.md](30_E0_TASKS.md) |
 | ⬜ | **E12** Импорт ручной фазы (Phase 0) | `░░░░░░░░░░░░` 0/5 | 0 / 4 | [42_E12_TASKS.md](42_E12_TASKS.md) |
 | ⬜ | **E1** Source Radar | `░░░░░░░░░░░░` 0/12 | 0 / 15.5 | [31_E1_TASKS.md](31_E1_TASKS.md) |
 | ⬜ | **E2** Video Intelligence / Content DNA | `░░░░░░░░░░░░` 0/10 | 0 / 11 | [32_E2_TASKS.md](32_E2_TASKS.md) |
@@ -88,7 +90,8 @@ _Нет задач в работе._
 | ⬜ | [E0-12AJ](TECH_DEBT.md#e0-12aj-один-разборщик-импортов-sfruntimetest-supportimports-корень-реэкспортом-selftest-на-нём) | Один разборщик импортов: @sf/runtime/test-support/imports, корень реэкспортом, selftest на нём | 0.5 д | ✅E0-12W ⛔E0-12V ⛔E0-12AC |  |  |
 | ⛔ | [E0-12AK](TECH_DEBT.md#e0-12ak-test-support-db-и-git-хвосты-e0-12qe0-12t) | test-support db и git: хвосты E0-12Q/E0-12T | 0.5 д | ✅E0-12W |  |  |
 | ✅ | [E0-12AL](TECH_DEBT.md#e0-12al-compose-контракт-в-тестах-worker-healthcheck-по-composeyaml) | Compose-контракт в тестах worker: healthcheck по compose.yaml | 0.25 д | ✅E0-12W | 2026-11-02 | 2026-11-02 |
-| ⬜ | [E0-12AM](TECH_DEBT.md#e0-12am-tracker-doc-заголовок-раздела-по-commonmark---одно-правило-поиска-и-повторов) | tracker-doc: заголовок раздела по CommonMark - одно правило поиска и повторов | ? | ✅E0-12X |  |  |
+| 🔄 | [E0-12AM](TECH_DEBT.md#e0-12am-tracker-doc-заголовок-раздела-по-commonmark---одно-правило-поиска-и-повторов) | tracker-doc: заголовок раздела по CommonMark - одно правило поиска и повторов | ? | ✅E0-12X | 2026-11-02 |  |
+| ⬜ | [E0-12AN](TECH_DEBT.md#e0-12an-tasksmjs-один-разбор-аргументов-cli-эпик-из-перечня-документ-по-умолчанию-ссылка-adhoc) | tasks.mjs: один разбор аргументов CLI, эпик из перечня, документ по умолчанию, ссылка ADHOC | 1 д | 🔄E0-12AM |  |  |
 | ✅ | [E0-12B](TECH_DEBT.md#e0-12b-общий-пакет-инфраструктуры-apiworker-logger-redact-redis-shutdown-фабрика-queue-примитив-дедлайна-чистка-публичных-экспортов) | Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-18 |
 | ✅ | [E0-12C](TECH_DEBT.md#e0-12c-гейт-compose-и-cli-migrate-таблица-правил-обязательные-postgresredis-юнит-check-compose-шаги-и-классы-ошибок-migrate-единый-appdockerfile-exec-форма-cmd) | Гейт compose и CLI migrate: таблица правил, обязательные postgres/redis, юнит check-compose, шаги и классы ошибок migrate, единый app.Dockerfile, exec-форма CMD | 1 д | ✅E0-13 ✅E0-12A | 2026-10-18 | 2026-10-18 |
 | ✅ | [E0-12D](TECH_DEBT.md#e0-12d-обвязка-harness-selftest-без-vm-u3-экспорт-selectgates-замки-на-форму-роутов-и-направление-зависимостей-contractsapi-client) | Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client | 0.5 д | ✅E0-13 | 2026-10-19 | 2026-10-19 |

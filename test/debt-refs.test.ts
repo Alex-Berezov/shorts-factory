@@ -31,6 +31,7 @@ const BARE_MENTIONS = [
   "scripts/tasks.mjs",
   "scripts/lib/tracker-doc.mjs",
   "test/tasks-cli.test.ts",
+  "test/tracker-doc.test.ts",
 ];
 
 const TABLE = [
@@ -68,7 +69,7 @@ const context = (bareAllowed: boolean): DebtRefContext => ({
   bareAllowed,
 });
 
-/** What is wrong with the references of the file `path` holding `bytes`; nothing for a binary one. */
+/** What is wrong with the references of the file `path` holding `bytes`. */
 function fileProblems(
   path: string,
   bytes: Uint8Array,
@@ -212,6 +213,10 @@ describe("a reference to the debt table", () => {
       "a reference wrapped in a comment",
       "(docs/TECH_DEBT.md\n   * § E0-08, п.5)",
     ],
+    [
+      "a reference wrapped in an SQL comment",
+      "-- (docs/TECH_DEBT.md\n-- § E0-08, п.5)",
+    ],
     ["the task that found an open row", "docs/TECH_DEBT.md § E0-12J"],
     ["a section of the document", "docs/TECH_DEBT.md § E0-12X."],
     ["the column by its name", "docs/TECH_DEBT.md § E0-11"],
@@ -261,25 +266,114 @@ describe("a reference to the debt table", () => {
     ).toEqual([expect.stringContaining(`${path}: names the debt table`)]);
   });
 
-  it("leaves out a binary file, one with a NUL byte", () => {
-    const png = Uint8Array.from([
-      0x89,
-      0x50,
-      0x4e,
-      0x47,
-      0,
-      ...new TextEncoder().encode("TECH_DEBT:1"),
-    ]);
-    expect(fileProblems("apps/web/public/x.png", png, context(false))).toEqual(
-      [],
-    );
+  /** The bytes of `text` in UTF-8, and then those of `rest`. */
+  const bytesOf = (text: string, ...rest: number[]): Uint8Array =>
+    Uint8Array.from([...new TextEncoder().encode(text), ...rest]);
+
+  /** `text` in UTF-16, little or big endian, with the byte order mark or without. */
+  const utf16 = (text: string, big: boolean, mark: boolean): Uint8Array => {
+    const bytes: number[] = mark ? (big ? [0xfe, 0xff] : [0xff, 0xfe]) : [];
+    for (const unit of text) {
+      const code = unit.charCodeAt(0);
+      bytes.push(
+        ...(big ? [code >> 8, code & 0xff] : [code & 0xff, code >> 8]),
+      );
+    }
+    return Uint8Array.from(bytes);
+  };
+
+  it.each([
+    [
+      "a PNG",
+      Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0, ...bytesOf("TECH_DEBT:1")]),
+    ],
+    [
+      "WebAssembly",
+      Uint8Array.from([
+        0,
+        0x61,
+        0x73,
+        0x6d,
+        1,
+        0,
+        0,
+        0,
+        ...bytesOf("TECH_DEBT:12"),
+      ]),
+    ],
+    ["UTF-8 with a NUL byte", bytesOf("# TECH_DEBT:1", 0, 0x0a)],
+    ["one NUL byte", Uint8Array.from([0])],
+    ["UTF-16LE without a mark", utf16("# TECH_DEBT:1\n", false, false)],
+    ["UTF-16BE without a mark", utf16("# TECH_DEBT:1\n", true, false)],
+  ])("skips %s, a NUL byte and no mark of UTF-16, as binary", (_, bytes) => {
+    expect(textOf(bytes)).toBeUndefined();
+    expect(
+      fileProblems("apps/web/public/x.bin", bytes, context(false)),
+    ).toEqual([]);
   });
+
+  it.each([
+    ["an empty file", new Uint8Array(0), ""],
+    ["one byte", bytesOf("A"), "A"],
+  ])("reads %s as text", (_, bytes, text) => {
+    expect(textOf(bytes)).toBe(text);
+  });
+
+  it.each([
+    ["three dashes", "TECH_DEBT\n---", "TECH_DEBT ---"],
+    ["a flag", "TECH_DEBT\n--flag", "TECH_DEBT --flag"],
+  ])("keeps %s at the start of a line, no comment marker", (_, text, kept) => {
+    expect(debtRefProblems(text, context(false))).toEqual([
+      expect.stringContaining(kept),
+    ]);
+  });
+
+  it.each([
+    ["UTF-16LE", false],
+    ["UTF-16BE", true],
+  ] as const)("reads a file in %s with a mark", (_, big) => {
+    expect(
+      fileProblems(
+        "scripts/x.ps1",
+        utf16("# TECH_DEBT:1\n", big, true),
+        context(false),
+      ),
+    ).toEqual([expect.stringContaining("scripts/x.ps1: names the debt table")]);
+  });
+
+  it.each([
+    ["UTF-16LE", false],
+    ["UTF-16BE", true],
+  ] as const)(
+    "reads a file in %s with a mark, mostly not ASCII, by the mark",
+    (_, big) => {
+      const text = "# Задача на будущее, долг: TECH_DEBT:1 - ещё не решено\n";
+      expect(textOf(utf16(text, big, true))).toBe(text);
+    },
+  );
 
   it("holds the code of the repository to the one form", () => {
     const files = SCOPE.flatMap((dir) => repoFilesUnder(dir)).filter(
       (path) => !SELF.has(path),
     );
-    expect(files.length).toBeGreaterThan(100);
+    // The scope is tied to the tree, not to a count: every directory of it
+    // gave files, and files known to be there are among them.
+    for (const dir of SCOPE) {
+      expect(
+        files.some((path) => path.startsWith(`${dir}/`)),
+        dir,
+      ).toBe(true);
+    }
+    for (const path of [
+      "scripts/tasks.mjs",
+      "test/tasks-cli.test.ts",
+      "test/tracker-doc.test.ts",
+      ".github/workflows/ci.yml",
+      "apps/api/package.json",
+      "packages/core/package.json",
+    ]) {
+      expect(files, path).toContain(path);
+    }
     const ids: DebtRefContext = {
       taskIds: new Set(readTracker().map((task) => task.id)),
       addresses: debtAddresses(readRepoFile("docs/TECH_DEBT.md")),
