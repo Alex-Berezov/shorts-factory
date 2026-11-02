@@ -2202,8 +2202,10 @@
       "E0-12W"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-11-02",
-    "started_at": "2026-11-02"
+    "started_at": "2026-11-02",
+    "done_at": "2026-11-02",
+    "note": "int-тест healthcheck воркера берёт команду из Compose через fail-closed читатель; yaml в devDependencies worker; Compose во входах теста; DoD уточнён по решению техлида"
   }
 ]
