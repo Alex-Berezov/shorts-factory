@@ -8,7 +8,7 @@ import { SCHEDULES } from "../src/schedules.js";
  * `@sf/core`, which `@sf/db` also seeds into `app_setting.queues.enabled`.
  * The canary used to compare the length of that list with a number the entry
  * point printed, which a name swapped for another passes unnoticed
- * (docs/TECH_DEBT.md, 06.09.2026) - so it compares composition instead.
+ * (docs/TECH_DEBT.md § E0-08) - so it compares composition instead.
  */
 describe("worker processor registry", () => {
   it("registers every processor under a name of the shared registry", () => {

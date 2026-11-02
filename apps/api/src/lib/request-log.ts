@@ -103,7 +103,7 @@ function dataProperty(value: unknown): PropertyDescriptor {
  * message of a 5xx - but not `AppError.details` as it was handed over: the
  * field is filled by whoever throws, and `catch (e) { throw new
  * ValidationError(msg, e) }` around an http client puts a request url with an
- * api key into it (docs/TECH_DEBT.md, 07.09.2026). `redact` covers header
+ * api key into it (docs/TECH_DEBT.md § E0-06). `redact` covers header
  * paths only, so the substitution happens here: what a caller may see may also
  * be written down, the rest becomes a marker, so a reader of the line knows
  * the field was there. The `code` is bounded the same way the message of a
@@ -299,7 +299,7 @@ const PREMATURE_CLOSE = "ERR_STREAM_PREMATURE_CLOSE";
  * down: a socket the server destroys itself - `requestTimeout`,
  * `connectionTimeout`, `forceCloseConnections` - reads as the client leaving,
  * and no public property tells the two apart. None of those options is set
- * by the api today (TECH_DEBT, E0-12Y).
+ * by the api today (docs/TECH_DEBT.md § E0-12Y).
  */
 function clientWentAway(error: Error, request: FastifyRequest): boolean {
   return errorCode(error) === PREMATURE_CLOSE && request.raw.socket.destroyed;

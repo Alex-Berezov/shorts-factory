@@ -167,7 +167,7 @@ function typeOnly(node: ts.ImportDeclaration | ts.ExportDeclaration): boolean {
  * package may not import (ADR-0011); it differs in two places: it keeps only
  * what loads at runtime (type-only imports and `typeof import("…")` are
  * dropped, not reported), and a call it cannot read throws instead of coming
- * back as `<dynamic>`. One walk for both is owed (docs/TECH_DEBT.md, E0-12AJ).
+ * back as `<dynamic>`. One walk for both is owed (docs/TECH_DEBT.md § E0-12AJ).
  */
 function valueImports(source: string, fileName = "module.ts"): string[] {
   const tree = ts.createSourceFile(

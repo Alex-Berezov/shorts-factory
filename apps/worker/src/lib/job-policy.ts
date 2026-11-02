@@ -61,7 +61,7 @@ export function createJobQueueFactory(
  * so with a `Worker` per queue the process can hold that many jobs times the
  * number of queues. For the fan-out queues below every one of those slots is a
  * paid external call, and a batch of them leaves before a daily cap has a
- * chance to notice (docs/TECH_DEBT.md, 06.09.2026). The cap is a resource
+ * chance to notice (docs/TECH_DEBT.md § E0-08). The cap is a resource
  * guard, not a budget one: the budget guard of E0-09 is what refuses to spend.
  */
 const PAID_FANOUT_CAP = 2;

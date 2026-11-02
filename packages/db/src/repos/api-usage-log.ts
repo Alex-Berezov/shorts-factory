@@ -148,7 +148,7 @@ function periodWindow(
   // and freezes at the moment a transaction started, so a guard called inside
   // `db.transaction` would end its window before every row committed since -
   // an under-reported spend at exactly the place that decides whether to spend
-  // more (docs/TECH_DEBT.md, 06.09.2026). It advances on every statement, so
+  // more (docs/TECH_DEBT.md § E0-09). It advances on every statement, so
   // that property holds for this query too.
   //
   // And not `clock_timestamp()`, which has the same property: that one is

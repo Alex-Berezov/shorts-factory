@@ -9,8 +9,8 @@ import { obliterateQueues, openTestRedis } from "./helpers.int.js";
  * are BullMQ's (`Job.addJob -> validateOptions`) and they are not written
  * down anywhere we control. This file puts the ids we build in front of the
  * real thing, so that a new builder with a colon in it - or an id that reads
- * as a number - fails here and not in the runtime (docs/TECH_DEBT.md,
- * 07.09.2026).
+ * as a number - fails here and not in the runtime (docs/TECH_DEBT.md
+ * § E0-08).
  */
 const QUEUES = ["system.smoke"] as const;
 

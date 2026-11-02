@@ -91,7 +91,7 @@ export type BudgetPeriod = (typeof BUDGET_PERIODS)[number];
  * are not one per provider: the monthly TTS budget is a single cap over four
  * vendors, so a guard that summed one of them would compare a quarter of the
  * spend against the whole cap and never fire. Keeping the three fields
- * together is also what stops the mistake `TECH_DEBT:114` names - units and
+ * together is also what stops the mistake docs/TECH_DEBT.md § E0-09 names - units and
  * dollars reaching `budgetState` as two anonymous numbers from different
  * places: inside a scope both sides of the comparison come from the same one.
  *

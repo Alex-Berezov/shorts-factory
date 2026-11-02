@@ -237,6 +237,11 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
   пакета (`repoRoot`, путь вверх от файла) - синтаксическим деревом `test/root-reads.ts`
   (`rootReads`; его берут правила входов turbo в `test/turbo-inputs.test.ts`), импорты -
   `test/imports.ts`.
+- Ссылка на строку долга в коде - одна форма: `docs/TECH_DEBT.md § <id задачи-адресата>` (уточнение после
+  запятой свободно: `п.5`). Адресат - задача из колонки «Исход» строки, у строки «открыто» без задачи - id
+  из «Откуда»; номер строки таблицы, дата и название колонки адресом не служат. Замок -
+  `test/debt-refs.test.ts` (охват: `apps/`, `packages/`, `scripts/`, `test/`, `.github/`): иное упоминание таблицы -
+  отказ, кроме закрытого списка файлов, где `TECH_DEBT.md` - документ задачи (CLI трекера и его тесты).
 - Типы `scripts/*.mjs` - JSDoc под `checkJs` корневого `tsconfig.json` (`pnpm typecheck:repo`),
   без `.d.mts`; скрипты остаются запускаемыми чистым `node`.
 - Входы turbo: корневой `test.inputs` - только `$TURBO_DEFAULT$` и `vitest.preset.ts`; пакет,
@@ -266,7 +271,8 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
     `scripts/lib/json.mjs`
     (Docker Compose 5.x, `infra/README.md`); новый Compose-файл стека - в `include`, `COMPOSE_SOURCES` и `when` сразу;
     tracker - `docs/tasks/tasks.json`, `docs/00_STATUS.md`, `docs/*_TASKS.md`, `docs/TECH_DEBT.md`,
-    `scripts/tasks.mjs`, `scripts/lib/paths.mjs`, `scripts/lib/tracker-doc.mjs`, `scripts/lib/files.mjs`; harness-selftest - `.claude/**`,
+    `scripts/tasks.mjs`, `scripts/lib/paths.mjs`, `scripts/lib/tracker-doc.mjs`, `scripts/lib/tracker-task.mjs`,
+    `scripts/lib/markdown.mjs`, `scripts/lib/files.mjs`; harness-selftest - `.claude/**`,
     файлы, названные в `note` гейтов compose и tracker, но не выбирающие сам этот гейт (его
     `when`/`cmd`; сегодня - `test/compose-rules.test.ts`, `test/container.test.ts`), и файлы проекта, которые читают пробы
     гейтов build и test:int (манифесты, конфиги сборки и int-тестов, `.env.test`; точный glob -

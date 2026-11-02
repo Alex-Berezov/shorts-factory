@@ -14,7 +14,7 @@ import ts from "typescript";
  * `importSpecifiers` is the third copy of the walk of `importSpecifiers` of
  * the root `test/imports.ts`, which a package may not import (ADR-0011), and
  * reads fewer forms than it does; one walk for the root and the apps is owed
- * (docs/TECH_DEBT.md, E0-12W).
+ * (docs/TECH_DEBT.md § E0-12W).
  */
 
 /** What stands for a specifier that is not a string literal. */

@@ -639,6 +639,47 @@ function registerGateProbes(ctx, deps) {
     ],
   });
 
+  // текст как литерал регулярного выражения: id и doc задачи из tasks.json
+  const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Строка раздела задачи и документ по умолчанию - из самого scripts/lib/tracker-doc.mjs
+  // (sectionHeading, DEFAULT_DOC), а не копии литералов: смена формы раздела в модуле не оставляет
+  // пробу сверять прежнюю (E0-12X, круг ревью 2).
+  const trackerDoc = () => require(path.join(ROOT, 'scripts', 'lib', 'tracker-doc.mjs'));
+  // Копия трекера во временной папке: tasks.json как есть, документ каждой задачи несёт раздел
+  // «### <id>. <title>» каждой своей задачи (render --check сверяет и его, E0-12X), статус
+  // отрисован, render --check на полной копии зелёный - это проба пропуска. fn получает копию
+  // и возвращает строку отказа или { note }; папка снимается в любом исходе.
+  function withTrackerCopy(fn) {
+    const tmp = tempDir('tracker');
+    try {
+      const { sectionHeading, DEFAULT_DOC } = trackerDoc();
+      const tasks = readJson(path.join(ROOT, 'docs', 'tasks', 'tasks.json'));
+      fs.mkdirSync(path.join(tmp, 'docs', 'tasks'), { recursive: true });
+      fs.copyFileSync(path.join(ROOT, 'docs', 'tasks', 'tasks.json'), path.join(tmp, 'docs', 'tasks', 'tasks.json'));
+      // doc из tasks.json не должен уводить запись и удаление за tmp (`..`, абсолютный путь)
+      const outside = (d) => {
+        if (typeof d !== 'string' || !d) return true;
+        const rel = path.relative(path.join(tmp, 'docs'), path.resolve(tmp, 'docs', ...d.split('/')));
+        return rel.startsWith('..') || path.isAbsolute(rel);
+      };
+      const bad = tasks.map((t) => t.doc).find(outside);
+      if (bad !== undefined || tasks.some((t) => outside(t.doc))) return 'doc вне tmp: ' + JSON.stringify(bad);
+      const section = (t) => sectionHeading(t.id, t.title) + '\n';
+      for (const d of new Set(tasks.map((t) => t.doc))) {
+        put(tmp, 'docs/' + d, tasks.filter((t) => t.doc === d).map(section).join('\n'));
+      }
+      const cli = (...args) => run(process.execPath, [path.join(ROOT, 'scripts', 'tasks.mjs'), '--root=' + tmp].concat(args), { cwd: ROOT });
+      const said = (r) => 'код ' + r.status + ' ' + String(r.stderr || r.stdout || (r.error && r.error.message)).trim().slice(0, 160);
+      const render = cli('render');
+      if (render.status !== 0) return 'render на копии трекера: ' + said(render);
+      const green = cli('render', '--check');
+      if (green.status !== 0) return 'render --check на полной копии не зелёный: ' + said(green);
+      return fn({ tmp, tasks, cli, said, section, sectionHeading, DEFAULT_DOC });
+    } finally {
+      releaseTemp(tmp);
+    }
+  }
+
   // Скрипт трекера берёт корень из scripts/lib/paths.mjs: правка любого из них
   // может сломать render --check так же, как правка tasks.json (E0-12F). when - ровно то,
   // что render --check читает (E0-12M, B11): tasks.json, 00_STATUS.md, doc каждой
@@ -656,6 +697,8 @@ function registerGateProbes(ctx, deps) {
       'scripts/tasks.mjs',
       'scripts/lib/paths.mjs',
       'scripts/lib/tracker-doc.mjs',
+      'scripts/lib/tracker-task.mjs',
+      'scripts/lib/markdown.mjs',
       'scripts/lib/files.mjs',
     ],
     mustSkip: [
@@ -696,40 +739,55 @@ function registerGateProbes(ctx, deps) {
       // удалённым документом задачи гейт красный и называет его, на полной копии - зелёный.
       {
         name: 'render --check краснеет на удалённом документе задачи и зелёный на полной копии',
-        fn: () => {
-          const tmp = tempDir('tracker');
-          try {
-            const tasks = readJson(path.join(ROOT, 'docs', 'tasks', 'tasks.json'));
-            fs.mkdirSync(path.join(tmp, 'docs', 'tasks'), { recursive: true });
-            fs.copyFileSync(path.join(ROOT, 'docs', 'tasks', 'tasks.json'), path.join(tmp, 'docs', 'tasks', 'tasks.json'));
-            // doc из tasks.json не должен уводить запись и удаление за tmp (`..`, абсолютный путь)
-            const outside = (d) => {
-              if (typeof d !== 'string' || !d) return true;
-              const rel = path.relative(path.join(tmp, 'docs'), path.resolve(tmp, 'docs', ...d.split('/')));
-              return rel.startsWith('..') || path.isAbsolute(rel);
-            };
-            const bad = tasks.map((t) => t.doc).find(outside);
-            if (bad !== undefined || tasks.some((t) => outside(t.doc))) return 'doc вне tmp: ' + JSON.stringify(bad);
-            for (const d of new Set(tasks.map((t) => t.doc))) put(tmp, 'docs/' + d, '');
-            const cli = (...args) => run(process.execPath, [path.join(ROOT, 'scripts', 'tasks.mjs'), '--root=' + tmp].concat(args), { cwd: ROOT });
-            const said = (r) => 'код ' + r.status + ' ' + String(r.stderr || r.stdout || (r.error && r.error.message)).trim().slice(0, 160);
-            const render = cli('render');
-            if (render.status !== 0) return 'render на копии трекера: ' + said(render);
-            const green = cli('render', '--check');
-            if (green.status !== 0) return 'render --check на полной копии не зелёный: ' + said(green);
+        fn: () =>
+          withTrackerCopy((copy) => {
             // документ - doc задачи из самого tasks.json, а не имя из головы: смена doc не роняет пробу
             // по чужой причине; текст отказа - docProblem из scripts/lib/tracker-doc.mjs
-            const doc = tasks[0] && tasks[0].doc;
+            const doc = copy.tasks[0] && copy.tasks[0].doc;
             if (typeof doc !== 'string' || !doc) return 'у первой задачи tasks.json нет doc - удалять нечего';
-            fs.rmSync(path.join(tmp, 'docs', ...doc.split('/')));
-            const red = cli('render', '--check');
-            const gone = new RegExp('docs/' + doc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' is not on disk');
-            if (red.status === 0 || !gone.test(String(red.stderr))) return 'render --check без docs/' + doc + ': ' + said(red);
+            fs.rmSync(path.join(copy.tmp, 'docs', ...doc.split('/')));
+            const red = copy.cli('render', '--check');
+            const gone = new RegExp('docs/' + escapeRe(doc) + ' is not on disk');
+            if (red.status === 0 || !gone.test(String(red.stderr))) return 'render --check без docs/' + doc + ': ' + copy.said(red);
             return { note: 'красный: docs/' + doc };
-          } finally {
-            releaseTemp(tmp);
-          }
-        },
+          }),
+      },
+      // note гейта обещает сверку раздела «### <id>. <title>» (E0-12X): на копии, где заголовок
+      // раздела переписан, где раздела нет и где разделов два, гейт красный и называет задачу;
+      // пропуск - зелёный render --check на полной копии в withTrackerCopy. Задача - первая с doc не
+      // по умолчанию из самого tasks.json, текст отказа - sectionProblem из scripts/lib/tracker-doc.mjs.
+      {
+        name: 'render --check краснеет на разделе задачи, который не совпал, на документе без раздела и на двух разделах',
+        fn: () =>
+          withTrackerCopy((copy) => {
+            const task = copy.tasks.find((t) => typeof t.doc === 'string' && t.doc !== copy.DEFAULT_DOC);
+            if (!task) return 'в tasks.json нет задачи с doc не по умолчанию - сверять нечего';
+            const others = copy.tasks.filter((t) => t.doc === task.doc && t !== task);
+            const write = (own) => put(copy.tmp, 'docs/' + task.doc, others.map(copy.section).concat(own).join('\n'));
+            const reasons = [];
+            write([copy.sectionHeading(task.id, task.title + ' (переписан)') + '\n']);
+            const retitled = copy.cli('render', '--check');
+            const notMatched = new RegExp(escapeRe(task.id) + ': title .* does not match the section');
+            if (retitled.status === 0 || !notMatched.test(String(retitled.stderr))) {
+              return 'render --check на переписанном заголовке ' + task.id + ': ' + copy.said(retitled);
+            }
+            reasons.push('заголовок ' + task.id);
+            write([]);
+            const missing = copy.cli('render', '--check');
+            const noSection = new RegExp(escapeRe(task.id) + ': no section');
+            if (missing.status === 0 || !noSection.test(String(missing.stderr))) {
+              return 'render --check без раздела ' + task.id + ': ' + copy.said(missing);
+            }
+            reasons.push('нет раздела ' + task.id);
+            write([copy.section(task), copy.section(task)]);
+            const twice = copy.cli('render', '--check');
+            const twoSections = new RegExp(escapeRe(task.id) + ': 2 sections');
+            if (twice.status === 0 || !twoSections.test(String(twice.stderr))) {
+              return 'render --check на двух разделах ' + task.id + ': ' + copy.said(twice);
+            }
+            reasons.push('два раздела ' + task.id);
+            return { note: 'красный: ' + reasons.join(', ') + ' (docs/' + task.doc + ')' };
+          }),
       },
     ],
   });

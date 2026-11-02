@@ -22,7 +22,8 @@ describe("PROVIDERS", () => {
   });
 
   it("rejects a hyphenated spelling of a real provider", () => {
-    // The exact typo of the TECH_DEBT entry: `sumUnitsToday(db, "youtube-data")`
+    // The exact typo of docs/TECH_DEBT.md § E0-05:
+    // `sumUnitsToday(db, "youtube-data")`
     // used to compile and report 0 of 10 000 units spent.
     expect(ProviderSchema.safeParse("youtube-data").success).toBe(false);
     expect(ProviderSchema.safeParse("youtube_data").success).toBe(true);

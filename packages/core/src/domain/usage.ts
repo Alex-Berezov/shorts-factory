@@ -9,7 +9,7 @@ import { ProviderSchema } from "./provider.js";
  * `exactOptionalPropertyTypes` every optional field here is `T | undefined`
  * while `$inferInsert` asks for `T | null`. The mapper (five fields, plus the
  * decision on how many cents a rounding to five decimals may drop) belongs to
- * E0-09 - see `docs/TECH_DEBT.md`.
+ * E0-09 - see `docs/TECH_DEBT.md § E0-09`.
  *
  * Which measure a call has to report follows from what its provider spends,
  * because that is what the caps are counted in:

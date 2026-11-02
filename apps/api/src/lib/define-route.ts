@@ -152,7 +152,7 @@ const REFUSED_OPTIONS = {
  * does not compile and is thrown on. `reply.header`, `reply.removeHeader`,
  * `reply.type` and `reply.serializer` in the handler and in the hooks a
  * route may have (`onRequest`, `preValidation`, `preHandler`, `onError`)
- * are open - review holds them (docs/TECH_DEBT.md, open -> E0-12V).
+ * are open - review holds them (docs/TECH_DEBT.md § E0-12V).
  */
 const REPLY_HEADERS = {
   "cache-control": ["no-store"],

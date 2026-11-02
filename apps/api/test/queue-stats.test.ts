@@ -290,7 +290,7 @@ describe("createQueueStats", () => {
   /**
    * A command refused after the `Queue` got ready is not a broken `Queue`:
    * rebuilt on every poll during an outage, it would be 29 new objects and
-   * their listeners per request (docs/TECH_DEBT.md, E0-09).
+   * their listeners per request (docs/TECH_DEBT.md § E0-09).
    */
   it("keeps a queue whose read was refused after it got ready", async () => {
     const stats = createQueueStats({ connection, log });

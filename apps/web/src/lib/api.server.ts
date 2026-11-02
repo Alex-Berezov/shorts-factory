@@ -20,7 +20,7 @@ import type { SystemStatusResponse } from "@sf/contracts";
  * `next build` loads the modules of every page while collecting page data,
  * and a config parsed at that moment fails the build wherever there is no
  * `.env` - in CI, in the image build. A page that calls this at request time
- * reads the config at request time (docs/TECH_DEBT.md, `turbo.json` row).
+ * reads the config at request time (docs/TECH_DEBT.md § E0-10).
  */
 async function getApiClient(): Promise<ApiClient> {
   const { env } = await import("@sf/config/server");

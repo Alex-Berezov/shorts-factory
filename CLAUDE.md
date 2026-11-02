@@ -52,7 +52,7 @@ Experiment Engine -> Localization/TTS -> Publishing). Один репозито�
 Ручной режим: `/task` (план) -> `/go` (реализация) -> `/qa` -> `/fix` -> `/done`.
 Вопрос PM/техлиду руками: `/ask`. Где мы: `/status`. Проверки: `/gates`.
 
-Трекер задач - `docs/tasks/tasks.json` через `node scripts/tasks.mjs next|start|done|block|add|set` (`set <id> --title/--doc` - правка полей; `doc` - путь от `docs/`, `render --check` гейта `tracker` его сверяет с диском);
+Трекер задач - `docs/tasks/tasks.json` через `node scripts/tasks.mjs next|start|done|block|add|set` (`set <id> --title/--doc` - правка полей; `doc` - путь от `docs/`, `render --check` гейта `tracker` его сверяет с диском и требует в нём раздел `### <id>. <title>`, кроме `00_STATUS.md`);
 руками файл и `docs/00_STATUS.md` не правятся.
 
 ## Что остаётся за владельцем

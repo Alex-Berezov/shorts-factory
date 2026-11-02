@@ -71,7 +71,7 @@ export async function seedAppSettings(db: Db): Promise<void> {
  * exactly `QUEUE_NAMES`.
  *
  * Only this row. `radar.weights` grows the same way, but its known set is the
- * shape of `TrendWeights`, which is E1-05's to define (docs/TECH_DEBT.md).
+ * shape of `TrendWeights`, which is E1-05's to define (docs/TECH_DEBT.md § E1-05).
  *
  * One statement, and it touches nothing when there is nothing to drop: the
  * `EXISTS` keeps `updated_at` - "when the operator last changed this" - from

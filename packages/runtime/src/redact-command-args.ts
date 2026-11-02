@@ -75,7 +75,8 @@ const INSTANCE_KEYS = ["args", "command"] as const;
  * on an error class of a library - are read, by name, and nothing else of it.
  * A command under any other field of such an instance is written by pino as
  * it is; that is the price of not walking every socket and every buffer a
- * line carries (docs/TECH_DEBT.md, 22.10.2026).
+ * line carries (docs/TECH_DEBT.md § E0-12R, the row on `keysOf`, still
+ * open: no task yet).
  */
 function keysOf(value: object): readonly string[] {
   if (isWalked(value)) {

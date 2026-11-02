@@ -149,7 +149,7 @@ jobs:
       # of its own; mode=max keeps the intermediate stages too. Only `base`
       # and `fetch` (the lockfile alone) are hit across commits that keep the
       # lockfile: the install stages follow `COPY . .`, so a change of any
-      # source rebuilds them (docs/TECH_DEBT.md). A cache that cannot be
+      # source rebuilds them (docs/TECH_DEBT.md § E0-12J). A cache that cannot be
       # written leaves the build green (ignore-error=true): the cache only
       # saves time.
       - name: Build image

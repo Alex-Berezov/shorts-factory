@@ -58,7 +58,7 @@ export function parseBasicPassword(header: string | null): string | null {
  * A copy of `secretsMatch` in `apps/api/src/plugins/auth.ts`: both sides are
  * hashed first, because `timingSafeEqual` throws on buffers of different size
  * and would leak the password length through that throw. One shared module
- * for both services is E13-07 (docs/TECH_DEBT.md, `AUTH_USERNAME` row).
+ * for both services is E13-07 (docs/TECH_DEBT.md § E13-07).
  */
 export function passwordMatches(candidate: string, expected: string): boolean {
   const digest = (value: string): Buffer =>

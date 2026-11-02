@@ -53,7 +53,7 @@ export function toDetailItems(issues: unknown): ErrorDetailItem[] | undefined {
  * `details` is typed `unknown` and is filled by whoever throws, so
  * `catch (e) { throw new ValidationError(msg, e) }` around an HTTP client puts
  * a provider error - request url with the api key in it, request headers -
- * into the field (docs/TECH_DEBT.md, 07.09.2026). Serializing the field as it
+ * into the field (docs/TECH_DEBT.md § E0-06). Serializing the field as it
  * is would publish that; instead each error class states what of it is
  * describable to a caller. The rest is not written down either - the log line
  * keeps a marker in place of the field (`loggableError` in

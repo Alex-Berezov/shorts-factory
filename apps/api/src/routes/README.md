@@ -81,7 +81,7 @@ Three rules the registry cannot state on its own:
   That holds for the option alone: `reply.header`, `reply.removeHeader`,
   `reply.type` and `reply.serializer` in the handler and in the hooks a
   route may have (`onRequest`, `preValidation`, `preHandler`, `onError`)
-  stay open - review holds them (docs/TECH_DEBT.md, open -> E0-12V).
+  stay open - review holds them (docs/TECH_DEBT.md § E0-12V).
   The options the error envelope rests on (`errorHandler`,
   `serializerCompiler`, `validatorCompiler`, `schemaErrorFormatter`,
   `attachValidation`) belong to the app, and the hooks that get the body and
@@ -102,8 +102,8 @@ Three rules the registry cannot state on its own:
   `Reflect.get(request, "server")`). A key computed at run time
   (`request[key]`, `Object.values(request)`, `Object.entries(request)`,
   `for ... in`) is beyond that reading, and nothing holds
-  `request.server.close()` or `.inject()` from a handler (docs/TECH_DEBT.md,
-  open -> E0-12V).
+  `request.server.close()` or `.inject()` from a handler (docs/TECH_DEBT.md
+  § E0-12V).
   What this does not cover: bodies sent with `reply.status(...).send(...)`
   under another status, which only the serializer checks.
 

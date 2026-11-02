@@ -55,7 +55,7 @@ const lockQueries = (key: number) => ({
 
 /**
  * The barrier of an integration run against a second one on the same test
- * database (docs/TECH_DEBT.md, E0-12O): every run resets the database or
+ * database (docs/TECH_DEBT.md § E0-12O): every run resets the database or
  * works on what `@sf/db` migrated, so two at once break each other. Both
  * entry checks of `./entry-check/` take it first, before any other read, and
  * hold it until the teardown of their `globalSetup`; the files of the run

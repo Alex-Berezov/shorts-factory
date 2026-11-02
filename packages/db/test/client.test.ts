@@ -34,7 +34,7 @@ describe("createDb", () => {
   it("bounds how long a connection attempt may take", () => {
     // Without it the wait is whatever the operating system decides - minutes
     // on a host that drops packets - and a migration or a worker job has no
-    // deadline of its own to fall back on (docs/TECH_DEBT.md, 08.09.2026).
+    // deadline of its own to fall back on (docs/TECH_DEBT.md § E0-08).
     expect(createDb(URL).$client.options.connect_timeout).toBe(10);
   });
 

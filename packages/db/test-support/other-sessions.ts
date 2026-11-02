@@ -87,7 +87,7 @@ const STATEMENT_TIMEOUT_STATE = "57014";
  * database: every run resets it (`DROP SCHEMA ... CASCADE` in
  * `resetTestDatabase`) or works on what `@sf/db` migrated, so two runs at once
  * break each other - the flaky red of `test:int` next to a gate run in the
- * background (docs/TECH_DEBT.md, E0-12O). The run itself is kept apart by
+ * background (docs/TECH_DEBT.md § E0-12O). The run itself is kept apart by
  * the run lock (`./run-lock.ts`), taken first; this check is the second line
  * behind it - a client that takes no lock: an open `psql` or IDE, a worker a
  * failed run left behind. Both entry checks of `./entry-check/` call it right

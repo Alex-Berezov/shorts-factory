@@ -64,8 +64,8 @@
  *    project's `.env` at /repo/.env (`rootEnvFilePath` of
  *    packages/config/src/paths.ts in every image), read-only, with
  *    `create_host_path: false` - on a Linux engine a missing `.env` stops the
- *    stack and creates nothing (not verified on Linux yet, docs/TECH_DEBT.md,
- *    E1-12). Docker Desktop (Windows) does not pass the option on: it creates
+ *    stack and creates nothing (not verified on Linux yet, docs/TECH_DEBT.md
+ *    § E1-12). Docker Desktop (Windows) does not pass the option on: it creates
  *    an empty `.env` directory and `migrate` exits with EISDIR
  *    (infra/README.md). The rule reads the option from what
  *    `docker compose config` prints, and not every Compose prints it:

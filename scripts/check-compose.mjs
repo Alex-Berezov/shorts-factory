@@ -34,7 +34,7 @@
  * tasks/2026-10-20-E0-12K.md). The values are never printed, only the names.
  * A `COMPOSE_*` written in the root `.env` changes the stack of `docker
  * compose up` as well, and the gate, which does not read `.env`, does not
- * see it (docs/TECH_DEBT.md, E1-12).
+ * see it (docs/TECH_DEBT.md § E1-12).
  *
  * Besides the configuration it reads the `.dockerignore` of every build
  * context and looks for a `<Dockerfile>.dockerignore` next to each Dockerfile

@@ -19,6 +19,12 @@
  *
  * `--doc` is a path from docs/ (`TECH_DEBT.md`, not `docs/TECH_DEBT.md`) and
  * must name a file there; `render --check` holds every task to the same.
+ * A `--doc` other than 00_STATUS.md also needs the section `### <id>. <title>`
+ * in it, whose anchor is the link of docs/00_STATUS.md. `add` takes an id
+ * `E<n>-<n>[A-Z...]` or `ADHOC-<yyyymmdd>-<n>`, the epic that goes with it
+ * (`--epic` in any case, and only the one the id gives) and `--deps` of the
+ * tracker only (scripts/lib/tracker-task.mjs); `set` refuses values the task
+ * already has, and `--doc 00_STATUS.md` for a task that is not of the owner.
  *
  *   node scripts/tasks.mjs --root=<dir> <command> ...
  *                                              the same on the tracker, docs/ and journal
@@ -32,7 +38,21 @@ import {
 } from "node:fs";
 import { resolve } from "node:path";
 import { repoRoot } from "./lib/paths.mjs";
-import { badDocs, docProblem } from "./lib/tracker-doc.mjs";
+import {
+  DEFAULT_DOC,
+  badDocs,
+  badSections,
+  docProblem,
+  sectionProblem,
+  slug,
+} from "./lib/tracker-doc.mjs";
+import {
+  ADHOC,
+  epicOf,
+  epicProblem,
+  idProblem,
+  missingDeps,
+} from "./lib/tracker-task.mjs";
 
 /**
  * `--root=<dir>` as the first argument: the tree whose `docs/` the CLI reads
@@ -79,6 +99,7 @@ const EPIC_ORDER = [
   "E10",
   "E11",
   "E13",
+  ADHOC,
 ];
 /** @type {Record<string, string>} */
 const EPIC_NAMES = {
@@ -96,6 +117,7 @@ const EPIC_NAMES = {
   E11: "Publishing Layer",
   E12: "Импорт ручной фазы (Phase 0)",
   E13: "Dashboard shell и /system",
+  [ADHOC]: "Задачи владельца",
 };
 /**
  * @typedef {"todo" | "in_progress" | "blocked" | "done"} Status
@@ -174,13 +196,6 @@ const pendingDeps = (tasks, t) =>
   t.deps.filter((d) => tasks.find((x) => x.id === d)?.status !== "done");
 
 // ---------- markdown helpers ----------
-/** @type {(id: string, title: string) => string} */
-const slug = (id, title) =>
-  `${id}-${title}`
-    .toLowerCase()
-    .replace(/[`*_(),.:;/\\«»"'“”’!?+=<>|@#$%&]/g, "")
-    .trim()
-    .replace(/\s+/g, "-");
 /** @type {(t: Task) => string} */
 const link = (t) => `[${t.id}](${t.doc}#${slug(t.id, t.title)})`;
 /** @type {(done: number, total: number, width?: number) => string} */
@@ -356,6 +371,17 @@ function render(tasks, opts = {}) {
       );
       process.exit(1);
     }
+    const misplaced = badSections(tasks, DOCS_DIR);
+    if (misplaced.length) {
+      console.error(
+        [
+          "docs/tasks/tasks.json names tasks whose section is not where docs/00_STATUS.md links:",
+          ...misplaced.map((line) => `  ${line}`),
+          "each line ends with the fix: the title of the section to give, or the section to write",
+        ].join("\n"),
+      );
+      process.exit(1);
+    }
     if (strip(cur) !== strip(out)) {
       console.error(
         "docs/00_STATUS.md is stale: run `node scripts/tasks.mjs render`",
@@ -382,10 +408,42 @@ function worklog(line) {
 // ---------- commands ----------
 const [cmd = "next", ...args] = argv;
 const tasks = load();
+/**
+ * A word shaped as a flag (`--doc`, `--epc`): a value or an argument that is
+ * one is a flag given where a value was due. A value that only starts with
+ * `--` (`--- draft`) is not one.
+ * @type {(value: string) => boolean}
+ */
+const isFlag = (value) => /^--[a-z][a-z-]*$/.test(value);
 /** @type {(name: string) => string | undefined} */
 const opt = (name) => {
   const i = args.indexOf(name);
-  return i !== -1 ? args[i + 1] : undefined;
+  if (i === -1) return undefined;
+  const value = args[i + 1];
+  if (value === undefined || isFlag(value)) {
+    die(`${name} needs a value`);
+  }
+  return value;
+};
+/**
+ * A positional argument is not a flag: `add E0-1 --epic E0` would take
+ * `--epic` for the title.
+ * @type {(value: string | undefined, what: string) => string}
+ */
+const positional = (value, what) => {
+  if (value === undefined) return die(`${what} required`);
+  if (isFlag(value)) die(`${what} required, got the flag ${value}`);
+  return value;
+};
+/**
+ * The section `### <id>. <title>` the doc of a task must hold: the check of
+ * `render --check`, made before anything is written; the reason names the
+ * fix `command` can make.
+ * @type {(task: Task, command: "add" | "set") => void}
+ */
+const checkSection = (task, command) => {
+  const problem = sectionProblem(task, DOCS_DIR, command);
+  if (problem !== undefined) die(problem);
 };
 /** @type {(doc: string) => void} */
 const checkDoc = (doc) => {
@@ -468,7 +526,12 @@ switch (cmd) {
     t.blocked_reason = undefined;
     save(tasks);
     render(tasks);
-    console.log(`🔄 ${t.id} started — spec: docs/${t.doc} (### ${t.id})`);
+    // A task of the default document has no section: its title is the spec.
+    console.log(
+      t.doc === DEFAULT_DOC
+        ? `🔄 ${t.id} started — spec: the title, no section of its own`
+        : `🔄 ${t.id} started — spec: docs/${t.doc} (### ${t.id})`,
+    );
     break;
   }
 
@@ -505,20 +568,21 @@ switch (cmd) {
 
   case "add": {
     // add <id> "<title>" [--epic E?] [--est "1 д"] [--deps E0-01,E0-02] [--doc file.md]
-    const id = (args[0] ?? die("task id required")).toUpperCase();
-    const title = args[1] ?? die("title required");
+    const id = positional(args[0], "task id").toUpperCase();
+    const title = positional(args[1], "title");
     checkTitle(title);
-    const doc = opt("--doc") ?? "00_STATUS.md";
+    const doc = opt("--doc") ?? DEFAULT_DOC;
     // Before anything else: a doc the readers cannot open is refused even
     // for a task that turns out to exist.
     checkDoc(doc);
     if (tasks.some((t) => t.id === id)) die(`${id} already exists`);
-    const epic = opt("--epic") ?? id.match(/^E\d+/)?.[0] ?? "ADHOC";
+    const epic = opt("--epic")?.toUpperCase() ?? epicOf(id);
     const estimate = opt("--est") ?? "?";
     const nums = [...estimate.matchAll(/\d+(?:\.\d+)?/g)].map((m) =>
       Number(m[0]),
     );
-    tasks.push({
+    /** @type {Task} */
+    const added = {
       id,
       epic,
       title,
@@ -531,7 +595,21 @@ switch (cmd) {
       doc,
       status: "todo",
       added_at: today(),
-    });
+    };
+    // What the schema of the tests refuses is refused here, by the same
+    // rule, before it is written.
+    const idWrong = idProblem(id) ?? epicProblem(id, epic);
+    if (idWrong !== undefined) die(idWrong);
+    const missing = missingDeps(added.deps, new Set(tasks.map((t) => t.id)));
+    if (missing.length) {
+      die(
+        `--deps names tasks that are not in the tracker: ${missing.join(", ")}`,
+      );
+    }
+    // The section is written before the task: the tracker never names one
+    // that is not there.
+    checkSection(added, "add");
+    tasks.push(added);
     save(tasks);
     worklog(`- ${today()} ➕ **${id}** ${title} (добавлена в трекер)`);
     render(tasks);
@@ -549,16 +627,35 @@ switch (cmd) {
     // The values first, the task second: a bad value is refused whatever
     // the id.
     if (doc !== undefined) checkDoc(doc);
-    const t = find(tasks, args[0] ?? die("task id required"));
+    const t = find(tasks, positional(args[0], "task id"));
+    // The default document holds no section: a task of an epic sent there
+    // would only drop the check of its section.
+    if (doc === DEFAULT_DOC && epicOf(t.id) !== ADHOC) {
+      die(
+        `--doc ${DEFAULT_DOC} is for a task of the owner (ADHOC-<yyyymmdd>-<n>) only: ${t.id} keeps a document with its section`,
+      );
+    }
+    // A value the task already has is no change: the journal records only
+    // what the tracker no longer holds.
+    const newTitle = title !== t.title ? title : undefined;
+    const newDoc = doc !== t.doc ? doc : undefined;
+    if (newTitle === undefined && newDoc === undefined) {
+      die(`nothing to change: ${t.id} already has that title and doc`);
+    }
+    // The task as it would be: refused here, nothing is written. A doc it
+    // keeps is held to a file first - one gone from disk is named, not thrown.
+    const candidate = { ...t, title: title ?? t.title, doc: doc ?? t.doc };
+    if (doc === undefined) checkDoc(t.doc);
+    checkSection(candidate, "set");
     /** @type {string[]} */
     const changed = [];
-    if (title !== undefined) {
-      t.title = title;
-      changed.push("заголовок");
+    if (newTitle !== undefined) {
+      changed.push(`заголовок «${t.title}» → «${newTitle}»`);
+      t.title = newTitle;
     }
-    if (doc !== undefined) {
-      t.doc = doc;
-      changed.push(`doc → docs/${doc}`);
+    if (newDoc !== undefined) {
+      changed.push(`doc docs/${t.doc} → docs/${newDoc}`);
+      t.doc = newDoc;
     }
     save(tasks);
     worklog(

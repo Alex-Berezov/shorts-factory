@@ -100,7 +100,7 @@ export function registerFailingRoutes(app: AppInstance): void {
   });
 
   app.get("/test/leaky", failing(), async () => {
-    // Exactly the shape docs/TECH_DEBT.md warns about: an upstream error
+    // Exactly the shape docs/TECH_DEBT.md § E0-06 warns about: an upstream error
     // object handed to `details` as it is.
     throw new ValidationError("upstream rejected the request", {
       config: { url: LEAKED_URL },

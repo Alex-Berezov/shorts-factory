@@ -1612,7 +1612,7 @@
   {
     "id": "E1-12",
     "epic": "E1",
-    "title": "Деплой на VPS: Compose на сервере, секреты вне репозитория, TLS к базе, db-guard",
+    "title": "Деплой на VPS",
     "estimate": "1 д",
     "estimate_days": 1,
     "deps": [
@@ -1945,7 +1945,7 @@
   {
     "id": "E0-12R",
     "epic": "E0",
-    "title": "@sf/runtime, worker: вердикт и закрытие фабрики Queue, redact глубже уровня, smoke CLI и Ctrl+C через остановку пакета",
+    "title": "@sf/runtime и worker: вердикт init() один на Queue, пишущая Queue с отказом init(), предел close() фабрики, redact глубже уровня, остановка smoke CLI, Ctrl+C после провала старта",
     "estimate": "1 д",
     "estimate_days": 1,
     "deps": [
@@ -2055,8 +2055,9 @@
       "E0-12F"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-21"
+    "status": "in_progress",
+    "added_at": "2026-10-21",
+    "started_at": "2026-11-02"
   },
   {
     "id": "E0-12Y",
@@ -2090,7 +2091,7 @@
   {
     "id": "E0-12AA",
     "epic": "E0",
-    "title": "harness-selftest: пробы и кейсы группы B (W01/W02/W08 на запись, граф импортов tracker/compose, протокол ребёнка vitest в одном модуле, мемо через opts, один помощник «файл есть», pidGone после SIGKILL, кейс TDZ)",
+    "title": "harness-selftest: пробы и кейсы группы B после разреза E0-12U",
     "estimate": "1.5 д",
     "estimate_days": 1.5,
     "deps": [
@@ -2106,7 +2107,7 @@
   {
     "id": "E0-12AB",
     "epic": "E0",
-    "title": "gates.js: хвосты E0-12M (lastGates по диффу до очереди, матрица вердиктов в одном месте, дубли предиката, мёртвые ветки, --only на чистом дереве, страж exited, проба фона)",
+    "title": "gates.js: хвосты E0-12M - отметка по диффу до очереди, вердикты в одном месте, мёртвые ветки",
     "estimate": "1 д",
     "estimate_days": 1,
     "deps": [
@@ -2123,7 +2124,7 @@
   {
     "id": "E0-12AC",
     "epic": "E0",
-    "title": "harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке)",
+    "title": "harness-selftest: время прогона не дольше 45 с",
     "estimate": "1 д",
     "estimate_days": 1,
     "deps": [
@@ -2138,7 +2139,7 @@
   {
     "id": "E0-12AD",
     "epic": "E0",
-    "title": "harness-selftest: статические пробы по AST общим модулем, harness-selftest.js вне weakeningExempt, смысл weakeningExemptNote",
+    "title": "harness-selftest: статические пробы по AST, harness-selftest.js вне weakeningExempt",
     "estimate": "1 д",
     "estimate_days": 1,
     "deps": [
@@ -2207,5 +2208,18 @@
     "started_at": "2026-11-02",
     "done_at": "2026-11-02",
     "note": "int-тест healthcheck воркера берёт команду из Compose через fail-closed читатель; yaml в devDependencies worker; Compose во входах теста; DoD уточнён по решению техлида"
+  },
+  {
+    "id": "E0-12AM",
+    "epic": "E0",
+    "title": "tracker-doc: заголовок раздела по CommonMark - одно правило поиска и повторов",
+    "estimate": "?",
+    "estimate_days": null,
+    "deps": [
+      "E0-12X"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-11-02"
   }
 ]

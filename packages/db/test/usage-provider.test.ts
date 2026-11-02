@@ -3,8 +3,9 @@ import { describe, expectTypeOf, it } from "vitest";
 import type { apiUsageLogRepo } from "../src/repos/api-usage-log.js";
 
 /**
- * The seal of the narrowing that closed the TECH_DEBT entry of 06.09.2026: the
- * column is free `text`, so nothing at runtime tells `"youtube-data"` from
+ * The seal of the narrowing that closed a row of the debt table
+ * (docs/TECH_DEBT.md § E0-05): the column is free `text`, so nothing at
+ * runtime tells `"youtube-data"` from
  * `"youtube_data"` - the aggregate simply answers 0 and the budget guard of
  * E0-09 lets the call through. Only the compiler can refuse the typo, and only
  * while every entry point of the repository asks for a `Provider`.

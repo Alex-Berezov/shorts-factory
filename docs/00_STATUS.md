@@ -4,33 +4,35 @@ _Сгенерировано `node scripts/tasks.mjs render` 2026-11-02. **Не �
 
 ## Сводка
 
-- **Прогресс:** `████████░░░░░░░░░░░░░░░░░░░░░░` 43/161 задач, 42.1 / 176.1 оценочных дней.
+- **Прогресс:** `████████░░░░░░░░░░░░░░░░░░░░░░` 43/162 задач, 42.1 / 176.1 оценочных дней.
 - **Текущий эпик:** E0 — Каркас проекта и инфраструктура
-- **В работе:** ничего — возьмите задачу из «Следующие»
-- **Заблокировано:** [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) (стоп 3 (сессия 2): после Б1 текстом по ОВ7 круг /qa нашёл 5 блокеров, внесённых Fix 3/сессией 2 (H7 запись итога без красной посадки, finally Б8, неверный инвариант Б1 о vitest, сигнал null в vitestAnswer, pid-заглушка died/twice); по решению техлида дифф на ветке wip/E0-12AC (33ebd46), main чистый; вопрос техлиду следующей сессии); [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-общим-модулем-harness-selftestjs-вне-weakeningexempt-смысл-weakeningexemptnote) (общие файлы .claude/hooks, ждёт коммита E0-12AC (ветка wip/E0-12AC)); [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) (стоп 3: после двух /fix и захода по Р-8 точечное /qa нашло новые блокеры (fail-open маркера поломки против HEAD, __proto__ в brokenHooks, ложные тексты про edits); пакет А на ветке wip/E0-12AE, задачи E0-12AF/AG/AH там же); [E0-12AK](TECH_DEBT.md#e0-12ak-test-support-db-и-git-хвосты-e0-12qe0-12t) (stop 3: after two /fix and techlead Р-3 (Fix 3) a blocker introduced by Fix 3 remains - shared calleeName ElementAccess branch weakens root-reads pathCallName; diff on wip/E0-12AK); [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s14-формы-s15s16-сверка-носителей-замок-zod) (стоп 3: после двух /fix и третьего захода по решению техлида круг 4 нашёл 4 блокера, внесённых правками (skipIf ложный отказ на */ //, верхнеуровневый require import-forms в selftest, охват files S15/S16 против S07/S11, сверка берёт первое правило с id); дифф на ветке wip/E0-12V (2df446a), гейты на ветке зелёные; вопрос техлиду следующей сессии - узкий заход или разрез задачи)
+- **В работе:** [E0-12X](TECH_DEBT.md#e0-12x-трекер-и-ссылки-на-долг-optset-якорь-render---check-zod-tasksjson-filelinerefs-форма-ссылок-на-tech_debt) Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT
+- **Заблокировано:** [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-не-дольше-45-с) (стоп 3 (сессия 2): после Б1 текстом по ОВ7 круг /qa нашёл 5 блокеров, внесённых Fix 3/сессией 2 (H7 запись итога без красной посадки, finally Б8, неверный инвариант Б1 о vitest, сигнал null в vitestAnswer, pid-заглушка died/twice); по решению техлида дифф на ветке wip/E0-12AC (33ebd46), main чистый; вопрос техлиду следующей сессии); [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-harness-selftestjs-вне-weakeningexempt) (общие файлы .claude/hooks, ждёт коммита E0-12AC (ветка wip/E0-12AC)); [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) (стоп 3: после двух /fix и захода по Р-8 точечное /qa нашло новые блокеры (fail-open маркера поломки против HEAD, __proto__ в brokenHooks, ложные тексты про edits); пакет А на ветке wip/E0-12AE, задачи E0-12AF/AG/AH там же); [E0-12AK](TECH_DEBT.md#e0-12ak-test-support-db-и-git-хвосты-e0-12qe0-12t) (stop 3: after two /fix and techlead Р-3 (Fix 3) a blocker introduced by Fix 3 remains - shared calleeName ElementAccess branch weakens root-reads pathCallName; diff on wip/E0-12AK); [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s14-формы-s15s16-сверка-носителей-замок-zod) (стоп 3: после двух /fix и третьего захода по решению техлида круг 4 нашёл 4 блокера, внесённых правками (skipIf ложный отказ на */ //, верхнеуровневый require import-forms в selftest, охват files S15/S16 против S07/S11, сверка берёт первое правило с id); дифф на ветке wip/E0-12V (2df446a), гейты на ветке зелёные; вопрос техлиду следующей сессии - узкий заход или разрез задачи)
 
 ## Сейчас в работе
 
-_Нет задач в работе._
+| Задача | Название | Оценка | Начата |
+|---|---|---|---|
+| [E0-12X](TECH_DEBT.md#e0-12x-трекер-и-ссылки-на-долг-optset-якорь-render---check-zod-tasksjson-filelinerefs-форма-ссылок-на-tech_debt) | Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT | 1 д | 2026-11-02 |
 
 ## Следующие (зависимости выполнены, в порядке приоритета)
 
 | Задача | Название | Оценка | Эпик |
 |---|---|---|---|
-| [E0-12X](TECH_DEBT.md#e0-12x-трекер-и-ссылки-на-долг-optset-якорь-render---check-zod-tasksjson-filelinerefs-форма-ссылок-на-techdebt) | Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT | 1 д | E0 |
 | [E0-12Y](TECH_DEBT.md#e0-12y-appsapi-sfconfig-разрез-request-log-маршруты-отказов-в-одном-месте-requestid-сокетного-отказа-clientwentaway-под-замком-auth-без-броска-на-порядок-регистрации-loadenv-без-копии-processenv) | apps/api, @sf/config: разрез request-log, маршруты отказов в одном месте, requestId сокетного отказа, clientWentAway под замком, auth без броска на порядок регистрации, loadEnv без копии process.env | 1 д | E0 |
 | [E0-12Z](TECH_DEBT.md#e0-12z-sfcore-worker-healthcheck-api-test-support-один-ответ-на-неверные-часы-причина-healthcheck-по-классу-без-текста-клиента-waitforline-по-событию-и-responsetime-докблоки-queue-stats-и-порядок-стадий) | @sf/core, worker healthcheck, api, test-support: один ответ на неверные часы, причина healthcheck по классу без текста клиента, waitForLine по событию и responseTime, докблоки queue-stats и порядок стадий | 0.5 д | E0 |
 | [E12-01](42_E12_TASKS.md#e12-01-sfcore-схема-журнала-и-csv-парсер) | `@sf/core`: схема журнала и CSV-парсер | 0.5 д | E12 |
 | [E1-01](31_E1_TASKS.md#e1-01-sfyoutube-клиент-data-api-для-публичных-чтений) | `@sf/youtube`: клиент Data API для публичных чтений | 1.5 д | E1 |
+| [E2-01](32_E2_TASKS.md#e2-01-спайк-gemini-video-understanding-по-youtube-url) | Спайк: Gemini video understanding по YouTube URL | 1.5 д | E2 |
 
-Взять в работу: `node scripts/tasks.mjs start E0-12X`
+Взять в работу: `node scripts/tasks.mjs start E0-12Y`
 
 ## Заблокировано
 
 | Задача | Название | Причина |
 |---|---|---|
-| [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) | harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке) | стоп 3 (сессия 2): после Б1 текстом по ОВ7 круг /qa нашёл 5 блокеров, внесённых Fix 3/сессией 2 (H7 запись итога без красной посадки, finally Б8, неверный инвариант Б1 о vitest, сигнал null в vitestAnswer, pid-заглушка died/twice); по решению техлида дифф на ветке wip/E0-12AC (33ebd46), main чистый; вопрос техлиду следующей сессии |
-| [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-общим-модулем-harness-selftestjs-вне-weakeningexempt-смысл-weakeningexemptnote) | harness-selftest: статические пробы по AST общим модулем, harness-selftest.js вне weakeningExempt, смысл weakeningExemptNote | общие файлы .claude/hooks, ждёт коммита E0-12AC (ветка wip/E0-12AC) |
+| [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-не-дольше-45-с) | harness-selftest: время прогона не дольше 45 с | стоп 3 (сессия 2): после Б1 текстом по ОВ7 круг /qa нашёл 5 блокеров, внесённых Fix 3/сессией 2 (H7 запись итога без красной посадки, finally Б8, неверный инвариант Б1 о vitest, сигнал null в vitestAnswer, pid-заглушка died/twice); по решению техлида дифф на ветке wip/E0-12AC (33ebd46), main чистый; вопрос техлиду следующей сессии |
+| [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-harness-selftestjs-вне-weakeningexempt) | harness-selftest: статические пробы по AST, harness-selftest.js вне weakeningExempt | общие файлы .claude/hooks, ждёт коммита E0-12AC (ветка wip/E0-12AC) |
 | [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) | gates.js/diff-hash.js: долг ревью E0-12AB (кругов 1-4) | стоп 3: после двух /fix и захода по Р-8 точечное /qa нашло новые блокеры (fail-open маркера поломки против HEAD, __proto__ в brokenHooks, ложные тексты про edits); пакет А на ветке wip/E0-12AE, задачи E0-12AF/AG/AH там же |
 | [E0-12AK](TECH_DEBT.md#e0-12ak-test-support-db-и-git-хвосты-e0-12qe0-12t) | test-support db и git: хвосты E0-12Q/E0-12T | stop 3: after two /fix and techlead Р-3 (Fix 3) a blocker introduced by Fix 3 remains - shared calleeName ElementAccess branch weakens root-reads pathCallName; diff on wip/E0-12AK |
 | [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s14-формы-s15s16-сверка-носителей-замок-zod) | rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S14, формы S15/S16, сверка носителей, замок zod | стоп 3: после двух /fix и третьего захода по решению техлида круг 4 нашёл 4 блокера, внесённых правками (skipIf ложный отказ на */ //, верхнеуровневый require import-forms в selftest, охват files S15/S16 против S07/S11, сверка берёт первое правило с id); дифф на ветке wip/E0-12V (2df446a), гейты на ветке зелёные; вопрос техлиду следующей сессии - узкий заход или разрез задачи |
@@ -39,7 +41,7 @@ _Нет задач в работе._
 
 | | Эпик | Задачи | Дни (сделано / всего) | Документ |
 |---|---|---|---|---|
-| 🔄 | **E0** Каркас проекта и инфраструктура | `██████████░░` 43/52 | 42.1 / 49.6 | [30_E0_TASKS.md](30_E0_TASKS.md) |
+| 🔄 | **E0** Каркас проекта и инфраструктура | `██████████░░` 43/53 | 42.1 / 49.6 | [30_E0_TASKS.md](30_E0_TASKS.md) |
 | ⬜ | **E12** Импорт ручной фазы (Phase 0) | `░░░░░░░░░░░░` 0/5 | 0 / 4 | [42_E12_TASKS.md](42_E12_TASKS.md) |
 | ⬜ | **E1** Source Radar | `░░░░░░░░░░░░` 0/12 | 0 / 15.5 | [31_E1_TASKS.md](31_E1_TASKS.md) |
 | ⬜ | **E2** Video Intelligence / Content DNA | `░░░░░░░░░░░░` 0/10 | 0 / 11 | [32_E2_TASKS.md](32_E2_TASKS.md) |
@@ -62,9 +64,9 @@ _Нет задач в работе._
 
 | | Задача | Название | Оценка | Зависимости | Начата | Готова |
 |---|---|---|---|---|---|---|
-| ✅ | [E0-01](30_E0_TASKS.md#e0-01-установка-тулчейна-и-зелёные-lint-typecheck-на-скелете) | Установка тулчейна и зелёные `lint` + `typecheck` на скелете | 0.5 д | — | 2026-09-06 | 2026-09-06 |
+| ✅ | [E0-01](30_E0_TASKS.md#e0-01-установка-тулчейна-и-зелёные-lint--typecheck-на-скелете) | Установка тулчейна и зелёные `lint` + `typecheck` на скелете | 0.5 д | — | 2026-09-06 | 2026-09-06 |
 | ✅ | [E0-01A](30_E0_TASKS.md#e0-01a-включить-гейт-build-в-rulessfjson) | Включить гейт build в rules.sf.json | 0.1 д | ✅E0-01 | 2026-10-11 | 2026-10-11 |
-| ✅ | [E0-02](30_E0_TASKS.md#e0-02-vitest-конфигурация-envtest-разделение-unit-integration) | Vitest: конфигурация, `.env.test`, разделение unit / integration | 0.5 д | ✅E0-01 | 2026-09-06 | 2026-09-06 |
+| ✅ | [E0-02](30_E0_TASKS.md#e0-02-vitest-конфигурация-envtest-разделение-unit--integration) | Vitest: конфигурация, `.env.test`, разделение unit / integration | 0.5 д | ✅E0-01 | 2026-09-06 | 2026-09-06 |
 | ✅ | [E0-02A](30_E0_TASKS.md#e0-02a-включить-гейты-test-и-testint-в-rulessfjson) | Включить гейты test и test:int в rules.sf.json | 0.1 д | ✅E0-02 | 2026-10-11 | 2026-10-11 |
 | ✅ | [E0-03](30_E0_TASKS.md#e0-03-sfconfig-надёжный-парсинг-env-и-константы-лимитов) | `@sf/config`: надёжный парсинг env и константы лимитов | 0.5 д | ✅E0-02 | 2026-09-06 | 2026-09-06 |
 | ✅ | [E0-04](30_E0_TASKS.md#e0-04-sfdb-фабрика-подключения-ревизия-схемы-миграция-0000-первые-репозитории) | `@sf/db`: фабрика подключения, ревизия схемы, миграция 0000, первые репозитории | 1.5 д | ✅E0-03 | 2026-09-06 | 2026-09-06 |
@@ -80,37 +82,38 @@ _Нет задач в работе._
 | ✅ | [E0-11C](TECH_DEBT.md#e0-11c-workercore-пульс-воркера-строгий-iso-допуск-штамп-прежнего-процесса-healthcheck-функцией-второй-sigint) | worker/core: пульс воркера (строгий ISO, допуск, штамп прежнего процесса), healthcheck функцией, второй SIGINT | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-17 |
 | ✅ | [E0-12](30_E0_TASKS.md#e0-12-ci-сервисы-postgresredis-кэш-интеграционные-тесты-сборка-образов) | CI: сервисы Postgres/Redis, кэш, интеграционные тесты, сборка образов | 0.5 д | ✅E0-11 | 2026-10-10 | 2026-10-10 |
 | ✅ | [E0-12A](TECH_DEBT.md#e0-12a-общий-пресет-vitest-и-test-support-sfdb-фикстура-int-наборов-общий-страж-стека-чистка-тестовых-хелперов-корневой-vitest-проект-scripts) | Общий пресет vitest и test-support @sf/db: фикстура int-наборов, общий страж стека, чистка тестовых хелперов, корневой vitest-проект scripts/** | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-17 |
-| ✅ | [E0-12AA](TECH_DEBT.md#e0-12aa-harness-selftest-пробы-и-кейсы-группы-b-w01w02w08-на-запись-граф-импортов-trackercompose-протокол-ребёнка-vitest-в-одном-модуле-мемо-через-opts-один-помощник-файл-есть-pidgone-после-sigkill-кейс-tdz) | harness-selftest: пробы и кейсы группы B (W01/W02/W08 на запись, граф импортов tracker/compose, протокол ребёнка vitest в одном модуле, мемо через opts, один помощник «файл есть», pidGone после SIGKILL, кейс TDZ) | 1.5 д | ✅E0-12U | 2026-10-28 | 2026-10-28 |
-| ✅ | [E0-12AB](TECH_DEBT.md#e0-12ab-gatesjs-хвосты-e0-12m-lastgates-по-диффу-до-очереди-матрица-вердиктов-в-одном-месте-дубли-предиката-мёртвые-ветки---only-на-чистом-дереве-страж-exited-проба-фона) | gates.js: хвосты E0-12M (lastGates по диффу до очереди, матрица вердиктов в одном месте, дубли предиката, мёртвые ветки, --only на чистом дереве, страж exited, проба фона) | 1 д | ✅E0-12U ✅E0-12M | 2026-10-28 | 2026-11-01 |
-| ⛔ | [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-≤45-с-параллельные-пробы-standards-gatesjs-в-одном-ребёнке) | harness-selftest: время прогона ≤45 с (параллельные пробы standards, gates.js в одном ребёнке) | 1 д | ✅E0-12U ✅E0-12AA |  |  |
-| ⛔ | [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-общим-модулем-harness-selftestjs-вне-weakeningexempt-смысл-weakeningexemptnote) | harness-selftest: статические пробы по AST общим модулем, harness-selftest.js вне weakeningExempt, смысл weakeningExemptNote | 1 д | ✅E0-12AA |  |  |
+| ✅ | [E0-12AA](TECH_DEBT.md#e0-12aa-harness-selftest-пробы-и-кейсы-группы-b-после-разреза-e0-12u) | harness-selftest: пробы и кейсы группы B после разреза E0-12U | 1.5 д | ✅E0-12U | 2026-10-28 | 2026-10-28 |
+| ✅ | [E0-12AB](TECH_DEBT.md#e0-12ab-gatesjs-хвосты-e0-12m---отметка-по-диффу-до-очереди-вердикты-в-одном-месте-мёртвые-ветки) | gates.js: хвосты E0-12M - отметка по диффу до очереди, вердикты в одном месте, мёртвые ветки | 1 д | ✅E0-12U ✅E0-12M | 2026-10-28 | 2026-11-01 |
+| ⛔ | [E0-12AC](TECH_DEBT.md#e0-12ac-harness-selftest-время-прогона-не-дольше-45-с) | harness-selftest: время прогона не дольше 45 с | 1 д | ✅E0-12U ✅E0-12AA |  |  |
+| ⛔ | [E0-12AD](TECH_DEBT.md#e0-12ad-harness-selftest-статические-пробы-по-ast-harness-selftestjs-вне-weakeningexempt) | harness-selftest: статические пробы по AST, harness-selftest.js вне weakeningExempt | 1 д | ✅E0-12AA |  |  |
 | ⛔ | [E0-12AE](TECH_DEBT.md#e0-12ae-gatesjsdiff-hashjs-долг-ревью-e0-12ab-кругов-1-4) | gates.js/diff-hash.js: долг ревью E0-12AB (кругов 1-4) | 1 д | ✅E0-12AB |  |  |
 | ⬜ | [E0-12AJ](TECH_DEBT.md#e0-12aj-один-разборщик-импортов-sfruntimetest-supportimports-корень-реэкспортом-selftest-на-нём) | Один разборщик импортов: @sf/runtime/test-support/imports, корень реэкспортом, selftest на нём | 0.5 д | ✅E0-12W ⛔E0-12V ⛔E0-12AC |  |  |
 | ⛔ | [E0-12AK](TECH_DEBT.md#e0-12ak-test-support-db-и-git-хвосты-e0-12qe0-12t) | test-support db и git: хвосты E0-12Q/E0-12T | 0.5 д | ✅E0-12W |  |  |
 | ✅ | [E0-12AL](TECH_DEBT.md#e0-12al-compose-контракт-в-тестах-worker-healthcheck-по-composeyaml) | Compose-контракт в тестах worker: healthcheck по compose.yaml | 0.25 д | ✅E0-12W | 2026-11-02 | 2026-11-02 |
+| ⬜ | [E0-12AM](TECH_DEBT.md#e0-12am-tracker-doc-заголовок-раздела-по-commonmark---одно-правило-поиска-и-повторов) | tracker-doc: заголовок раздела по CommonMark - одно правило поиска и повторов | ? | 🔄E0-12X |  |  |
 | ✅ | [E0-12B](TECH_DEBT.md#e0-12b-общий-пакет-инфраструктуры-apiworker-logger-redact-redis-shutdown-фабрика-queue-примитив-дедлайна-чистка-публичных-экспортов) | Общий пакет инфраструктуры api/worker: logger (redact), redis, shutdown, фабрика Queue, примитив дедлайна, чистка публичных экспортов | 1 д | ✅E0-13 | 2026-10-17 | 2026-10-18 |
 | ✅ | [E0-12C](TECH_DEBT.md#e0-12c-гейт-compose-и-cli-migrate-таблица-правил-обязательные-postgresredis-юнит-check-compose-шаги-и-классы-ошибок-migrate-единый-appdockerfile-exec-форма-cmd) | Гейт compose и CLI migrate: таблица правил, обязательные postgres/redis, юнит check-compose, шаги и классы ошибок migrate, единый app.Dockerfile, exec-форма CMD | 1 д | ✅E0-13 ✅E0-12A | 2026-10-18 | 2026-10-18 |
 | ✅ | [E0-12D](TECH_DEBT.md#e0-12d-обвязка-harness-selftest-без-vm-u3-экспорт-selectgates-замки-на-форму-роутов-и-направление-зависимостей-contractsapi-client) | Обвязка: harness-selftest без vm (U3, экспорт selectGates), замки на форму роутов и направление зависимостей contracts/api-client | 0.5 д | ✅E0-13 | 2026-10-19 | 2026-10-19 |
-| ✅ | [E0-12E](TECH_DEBT.md#e0-12e-чистка-тестов-по-строкам-дисциплины-configcontractsapi-client-int-наборы-sfdb-appsapi-п3-e0-12a-поздние-строки-чистки) | Чистка тестов по строкам дисциплины: config/contracts/api-client, int-наборы @sf/db, apps/api (п.3 E0-12A + поздние строки чистки) | 1.5 д | ✅E0-13 ✅E0-12A | 2026-10-19 | 2026-10-19 |
+| ✅ | [E0-12E](TECH_DEBT.md#e0-12e-чистка-тестов-по-строкам-дисциплины-configcontractsapi-client-int-наборы-sfdb-appsapi-п3-e0-12a--поздние-строки-чистки) | Чистка тестов по строкам дисциплины: config/contracts/api-client, int-наборы @sf/db, apps/api (п.3 E0-12A + поздние строки чистки) | 1.5 д | ✅E0-13 ✅E0-12A | 2026-10-19 | 2026-10-19 |
 | ✅ | [E0-12F](TECH_DEBT.md#e0-12f-корневой-vitest-проект-scripts-переезд-репо-тестов-из-appsworker-jsdoc-типы-scripts-входы-turbo-с-пробой-cache-miss-кэш-turbo-в-ci) | Корневой vitest-проект scripts/**: переезд репо-тестов из apps/worker, JSDoc-типы scripts, входы turbo с пробой cache miss, кэш .turbo в CI | 1.5 д | ✅E0-13 ✅E0-12A | 2026-10-18 | 2026-10-18 |
 | ✅ | [E0-12G](TECH_DEBT.md#e0-12g-apiworker-журнал-запросов-разбор-ошибок-причины-healthcheck) | api/worker: журнал запросов, разбор ошибок, причины healthcheck | 1.5 д | ✅E0-13 ✅E0-12B | 2026-10-19 | 2026-10-20 |
-| ✅ | [E0-12H](TECH_DEBT.md#e0-12h-postgres-классы-sqlstate-срокотмена-запроса-пробы-closedb{-timeout-}) | Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout }) | 1.5 д | ✅E0-13 ✅E0-12B | 2026-10-20 | 2026-10-20 |
+| ✅ | [E0-12H](TECH_DEBT.md#e0-12h-postgres-классы-sqlstate-срокотмена-запроса-пробы-closedb-timeout-) | Postgres: классы SQLSTATE, срок/отмена запроса пробы, closeDb({ timeout }) | 1.5 д | ✅E0-13 ✅E0-12B | 2026-10-20 | 2026-10-20 |
 | ✅ | [E0-12I](TECH_DEBT.md#e0-12i-cli-migrate-классы-ошибок-именованные-шаги-возврата-migrate-and-seed-drizzle-kit-check-в-ci) | CLI migrate: классы ошибок, именованные шаги возврата, migrate-and-seed, drizzle-kit check в CI | 0.7 д | ✅E0-13 ✅E0-12A ✅E0-12F | 2026-10-20 | 2026-10-20 |
 | ✅ | [E0-12J](TECH_DEBT.md#e0-12j-образы-единый-appdockerfile-с-целями-exec-форма-migrate-проба-одним-run-buildx-кэш-в-ci) | Образы: единый app.Dockerfile с целями, exec-форма migrate, проба одним run, buildx-кэш в CI | 1 д | ✅E0-12C ✅E0-12I | 2026-10-20 | 2026-10-20 |
-| ✅ | [E0-12K](TECH_DEBT.md#e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция-{}-профили-composefile-симлинки) | Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки | 2 д | ✅E0-13 ✅E0-12C | 2026-10-20 | 2026-10-20 |
+| ✅ | [E0-12K](TECH_DEBT.md#e0-12k-гейт-compose-один-граф-у-гейта-и-оператора---запрет-override-includeextends-под-маской-when-интерполяция--профили-compose_file-симлинки) | Гейт compose: один граф у гейта и оператора - запрет override, include/extends под маской when, интерполяция ${}, профили, COMPOSE_FILE, симлинки | 2 д | ✅E0-13 ✅E0-12C | 2026-10-20 | 2026-10-20 |
 | ✅ | [E0-12L](TECH_DEBT.md#e0-12l-harness-selftest-граф-turbopnpm-вместо-ручного-разбора-разрез-раздела-гейтов) | harness-selftest: граф turbo/pnpm вместо ручного разбора, разрез раздела гейтов | 1.5 д | ✅E0-13 ✅E0-12D | 2026-10-21 | 2026-10-21 |
 | ✅ | [E0-12M](TECH_DEBT.md#e0-12m-gatesjs-и-when-гейтов-timeoutsec---only-с-glob-when-testintcomposetracker) | gates.js и when гейтов: timeoutSec, --only с glob, when test:int/compose/tracker | 1 д | ✅E0-13 ✅E0-12D | 2026-10-21 | 2026-10-21 |
 | ✅ | [E0-12N](TECH_DEBT.md#e0-12n-корневые-тесты-и-скрипты-repo-files-turbo-inputs-ci-config-dockerfile-probe-image-no-search-list-общий-test-support-приложений) | Корневые тесты и скрипты: repo-files, turbo-inputs, ci-config, dockerfile, probe-image, no-search-list, общий test-support приложений | 1 д | ✅E0-13 ✅E0-12F | 2026-10-21 | 2026-10-21 |
 | ✅ | [E0-12O](TECH_DEBT.md#e0-12o-ci-и-testint-квота-кэша-actions-inputs-при-cachefalse-флак-testint-note-гейта) | CI и test:int: квота кэша Actions, inputs при cache:false, флак test:int, note гейта | 0.5 д | ✅E0-13 ✅E0-12F | 2026-10-21 | 2026-10-22 |
 | ✅ | [E0-12P](TECH_DEBT.md#e0-12p-appsapi-routeregistrar-вместо-appinstance-в-модулях-роутов-s13-снимается-после) | apps/api: RouteRegistrar вместо AppInstance в модулях роутов, S13 снимается после | 1 д | ✅E0-13 ✅E0-12D | 2026-10-22 | 2026-10-22 |
 | ✅ | [E0-12Q](TECH_DEBT.md#e0-12q-sfruntime-api-worker-форма-модулей-после-e0-12b---стадия-redis-в-redis-stagets-единая-форма-опций-redis-фабрик-стадия-db-воркера-через-stageof-один-источник-состояния-queue-stats-однопроходный-обход-cause) | @sf/runtime, api, worker: форма модулей после E0-12B - стадия Redis в redis-stage.ts, единая форма опций Redis-фабрик, стадия db воркера через stageOf, один источник состояния queue-stats, однопроходный обход cause | 0.5 д | ✅E0-13 ✅E0-12B ✅E0-12E | 2026-10-22 | 2026-10-22 |
-| ✅ | [E0-12R](TECH_DEBT.md#e0-12r-sfruntime-worker-вердикт-и-закрытие-фабрики-queue-redact-глубже-уровня-smoke-cli-и-ctrlc-через-остановку-пакета) | @sf/runtime, worker: вердикт и закрытие фабрики Queue, redact глубже уровня, smoke CLI и Ctrl+C через остановку пакета | 1 д | ✅E0-13 ✅E0-12B ✅E0-12G ✅E0-12Q | 2026-10-22 | 2026-10-22 |
+| ✅ | [E0-12R](TECH_DEBT.md#e0-12r-sfruntime-и-worker-вердикт-init-один-на-queue-пишущая-queue-с-отказом-init-предел-close-фабрики-redact-глубже-уровня-остановка-smoke-cli-ctrlc-после-провала-старта) | @sf/runtime и worker: вердикт init() один на Queue, пишущая Queue с отказом init(), предел close() фабрики, redact глубже уровня, остановка smoke CLI, Ctrl+C после провала старта | 1 д | ✅E0-13 ✅E0-12B ✅E0-12G ✅E0-12Q | 2026-10-22 | 2026-10-22 |
 | ✅ | [E0-12S](TECH_DEBT.md#e0-12s-sfdb-раскол-migratets-на-migration-lockts-проверка-дрейфа-схемы-ci-в-scriptscheck-schema-driftmjs-с-юнитом-и-гейтом) | @sf/db: раскол migrate.ts на migration-lock.ts, проверка дрейфа схемы CI в scripts/check-schema-drift.mjs с юнитом и гейтом | 1 д | ✅E0-12I | 2026-10-22 | 2026-10-22 |
 | ✅ | [E0-12T](TECH_DEBT.md#e0-12t-harness-selftest-int-конфиги-через-vitestnode-и-testimportsts-полнота-дерева-пробы-снимок-игнорируемых-хвосты-р9-e0-12d) | harness-selftest: int-конфиги через vitest/node и test/imports.ts, полнота дерева пробы, снимок игнорируемых, хвосты Р9 E0-12D | 1 д | ✅E0-13 ✅E0-12L | 2026-10-22 | 2026-10-23 |
 | ✅ | [E0-12U](TECH_DEBT.md#e0-12u-harness-selftest-пробы-гейтов-в-selftest-gatesjs-разрез-раздела-гейтов) | harness-selftest: пробы гейтов в selftest-gates.js, разрез раздела гейтов | 0.5 д | ✅E0-13 ✅E0-12T | 2026-10-23 | 2026-10-23 |
 | ⛔ | [E0-12V](TECH_DEBT.md#e0-12v-rulessfjson-standards-и-замки-направления-allowlist-s07s11-s04-test-s14-формы-s15s16-сверка-носителей-замок-zod) | rules.sf.json standards и замки направления: allowlist S07/S11, S04 test/**, S14, формы S15/S16, сверка носителей, замок zod | 1 д | ✅E0-13 ✅E0-12D |  |  |
 | ✅ | [E0-12W](TECH_DEBT.md#e0-12w-общий-test-support-приложений-sfruntimetest-support-dev-command-child-run-imports-int-хелперы-asserthashed-adr-0011) | Общий test-support приложений: @sf/runtime/test-support (dev-command, child-run, imports), int-хелперы, assertHashed, ADR-0011 | 1.5 д | ✅E0-13 ✅E0-12F ✅E0-12N | 2026-11-02 | 2026-11-02 |
-| ⬜ | [E0-12X](TECH_DEBT.md#e0-12x-трекер-и-ссылки-на-долг-optset-якорь-render---check-zod-tasksjson-filelinerefs-форма-ссылок-на-techdebt) | Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT | 1 д | ✅E0-13 ✅E0-12F |  |  |
+| 🔄 | [E0-12X](TECH_DEBT.md#e0-12x-трекер-и-ссылки-на-долг-optset-якорь-render---check-zod-tasksjson-filelinerefs-форма-ссылок-на-tech_debt) | Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT | 1 д | ✅E0-13 ✅E0-12F | 2026-11-02 |  |
 | ⬜ | [E0-12Y](TECH_DEBT.md#e0-12y-appsapi-sfconfig-разрез-request-log-маршруты-отказов-в-одном-месте-requestid-сокетного-отказа-clientwentaway-под-замком-auth-без-броска-на-порядок-регистрации-loadenv-без-копии-processenv) | apps/api, @sf/config: разрез request-log, маршруты отказов в одном месте, requestId сокетного отказа, clientWentAway под замком, auth без броска на порядок регистрации, loadEnv без копии process.env | 1 д | ✅E0-13 ✅E0-12G ✅E0-12P ✅E0-12Q |  |  |
 | ⬜ | [E0-12Z](TECH_DEBT.md#e0-12z-sfcore-worker-healthcheck-api-test-support-один-ответ-на-неверные-часы-причина-healthcheck-по-классу-без-текста-клиента-waitforline-по-событию-и-responsetime-докблоки-queue-stats-и-порядок-стадий) | @sf/core, worker healthcheck, api, test-support: один ответ на неверные часы, причина healthcheck по классу без текста клиента, waitForLine по событию и responseTime, докблоки queue-stats и порядок стадий | 0.5 д | ✅E0-12R |  |  |
 | ✅ | [E0-13](30_E0_TASKS.md#e0-13-документация-разработчика-adr-закрытие-эпика) | Документация разработчика, ADR, закрытие эпика | 0.5 д | ✅E0-12 | 2026-10-10 | 2026-10-10 |
@@ -134,23 +137,23 @@ _Нет задач в работе._
 | ⬜ | [E1-03](31_E1_TASKS.md#e1-03-job-radarsync-channels-новые-видео-фильтр-shorts-backfill) | Job `radar.sync-channels`: новые видео, фильтр Shorts, backfill | 1.5 д | ✅E0-08 ⬜E1-02 |  |  |
 | ⬜ | [E1-04](31_E1_TASKS.md#e1-04-job-radarsnapshot-тик-выбор-due-точек-батч-снапшоты-недоступные-видео) | Job `radar.snapshot`: тик, выбор due-точек, батч-снапшоты, недоступные видео | 1.5 д | ⬜E1-03 |  |  |
 | ⬜ | [E1-05](31_E1_TASKS.md#e1-05-базлайн-канала-расчёт-backfill-ежедневный-пересчёт) | Базлайн канала: расчёт, backfill, ежедневный пересчёт | 1 д | ⬜E1-04 |  |  |
-| ⬜ | [E1-06](31_E1_TASKS.md#e1-06-job-radarscore-и-trendsignal) | Job `radar.score` и `trend_signal` | 1 д | ⬜E1-05 |  |  |
+| ⬜ | [E1-06](31_E1_TASKS.md#e1-06-job-radarscore-и-trend_signal) | Job `radar.score` и `trend_signal` | 1 д | ⬜E1-05 |  |  |
 | ⬜ | [E1-07](31_E1_TASKS.md#e1-07-job-radarcluster-llm-группировка-сюжетов) | Job `radar.cluster`: LLM-группировка сюжетов | 2 д | ✅E0-09 ⬜E1-06 |  |  |
 | ⬜ | [E1-08](31_E1_TASKS.md#e1-08-квота-youtube-автопауза-автовозобновление-алерты) | Квота YouTube: автопауза, автовозобновление, алерты | 1 д | ✅E0-09 ⬜E1-03 |  |  |
-| ⬜ | [E1-09](31_E1_TASKS.md#e1-09-api-сигналов-видео-и-кластеров-контракты-роуты) | API сигналов, видео и кластеров (контракты + роуты) | 1 д | ⬜E1-06 ⬜E1-07 |  |  |
+| ⬜ | [E1-09](31_E1_TASKS.md#e1-09-api-сигналов-видео-и-кластеров-контракты--роуты) | API сигналов, видео и кластеров (контракты + роуты) | 1 д | ⬜E1-06 ⬜E1-07 |  |  |
 | ⬜ | [E1-10](31_E1_TASKS.md#e1-10-ui-radar-каналы-таблица-сигналов-карточка-видео-кластеры) | UI «Radar»: каналы, таблица сигналов, карточка видео, кластеры | 2 д | ✅E0-10 ⬜E1-09 |  |  |
 | ⬜ | [E1-11](31_E1_TASKS.md#e1-11-обкатка-на-реальных-каналах-тюнинг-документация) | Обкатка на реальных каналах, тюнинг, документация | 1 д (размазан по 2–3 календарным дням наблюдения) | ⬜E1-10 |  |  |
-| ⬜ | [E1-12](31_E1_TASKS.md#e1-12-деплой-на-vps-compose-на-сервере-секреты-вне-репозитория-tls-к-базе-db-guard) | Деплой на VPS: Compose на сервере, секреты вне репозитория, TLS к базе, db-guard | 1 д | ⬜E1-11 |  |  |
+| ⬜ | [E1-12](31_E1_TASKS.md#e1-12-деплой-на-vps) | Деплой на VPS | 1 д | ⬜E1-11 |  |  |
 
 ### E2. Video Intelligence / Content DNA
 
 | | Задача | Название | Оценка | Зависимости | Начата | Готова |
 |---|---|---|---|---|---|---|
 | ⬜ | [E2-01](32_E2_TASKS.md#e2-01-спайк-gemini-video-understanding-по-youtube-url) | Спайк: Gemini video understanding по YouTube URL | 1.5 д | ✅E0-03 |  |  |
-| ⬜ | [E2-02](32_E2_TASKS.md#e2-02-реестр-промптов-и-синк-promptversion) | Реестр промптов и синк `prompt_version` | 0.5 д | ✅E0-04 |  |  |
+| ⬜ | [E2-02](32_E2_TASKS.md#e2-02-реестр-промптов-и-синк-prompt_version) | Реестр промптов и синк `prompt_version` | 0.5 д | ✅E0-04 |  |  |
 | ⬜ | [E2-03](32_E2_TASKS.md#e2-03-videoanalysisclient-полный-проход-по-url) | `VideoAnalysisClient`: полный проход по URL | 1.5 д | ✅E0-09 ⬜E2-01 ⬜E2-02 |  |  |
 | ⬜ | [E2-04](32_E2_TASKS.md#e2-04-hook-pass-и-режим-локального-файла) | Hook pass и режим локального файла | 1 д | ⬜E2-03 |  |  |
-| ⬜ | [E2-05](32_E2_TASKS.md#e2-05-бд-миграция-0002intel-репозиторий-анализов) | БД: миграция `0002_intel`, репозиторий анализов | 0.5 д | ⬜E2-04 |  |  |
+| ⬜ | [E2-05](32_E2_TASKS.md#e2-05-бд-миграция-0002_intel-репозиторий-анализов) | БД: миграция `0002_intel`, репозиторий анализов | 0.5 д | ⬜E2-04 |  |  |
 | ⬜ | [E2-06](32_E2_TASKS.md#e2-06-джобы-intelanalyze-video-и-intelhook-pass-автозапуск) | Джобы `intel.analyze-video` и `intel.hook-pass`, автозапуск | 1.5 д | ✅E0-08 ⬜E1-06 ⬜E2-05 |  |  |
 | ⬜ | [E2-07](32_E2_TASKS.md#e2-07-api-и-контракты-intelligence) | API и контракты Intelligence | 0.5–1 д | ⬜E2-06 |  |  |
 | ⬜ | [E2-08](32_E2_TASKS.md#e2-08-ui-карточка-content-dna) | UI: карточка Content DNA | 2 д | ⬜E1-10 ⬜E2-07 |  |  |
@@ -162,7 +165,7 @@ _Нет задач в работе._
 | | Задача | Название | Оценка | Зависимости | Начата | Готова |
 |---|---|---|---|---|---|---|
 | ⬜ | [E3-01](33_E3_TASKS.md#e3-01-sfcore-схема-карточки-ранжирование-дедупликация-статусы) | `@sf/core`: схема карточки, ранжирование, дедупликация, статусы | 1 д | ✅E0-05 |  |  |
-| ⬜ | [E3-02](33_E3_TASKS.md#e3-02-бд-миграция-0003inbox-репозитории) | БД: миграция `0003_inbox`, репозитории | 0.5–1 д | ✅E0-04 ⬜E3-01 |  |  |
+| ⬜ | [E3-02](33_E3_TASKS.md#e3-02-бд-миграция-0003_inbox-репозитории) | БД: миграция `0003_inbox`, репозитории | 0.5–1 д | ✅E0-04 ⬜E3-01 |  |  |
 | ⬜ | [E3-03](33_E3_TASKS.md#e3-03-отбор-кандидатов-и-генерация-карточки-через-llm) | Отбор кандидатов и генерация карточки через LLM | 1.5 д | ⬜E1-07 ⬜E2-05 ⬜E3-01 |  |  |
 | ⬜ | [E3-04](33_E3_TASKS.md#e3-04-job-inboxbuild) | Job `inbox.build` | 1 д | ⬜E3-02 ⬜E3-03 |  |  |
 | ⬜ | [E3-05](33_E3_TASKS.md#e3-05-job-inboxlater-return-и-истечение) | Job `inbox.later-return` и истечение | 0.5 д | ⬜E3-04 |  |  |
@@ -178,8 +181,8 @@ _Нет задач в работе._
 | ⬜ | [E4-01](34_E4_TASKS.md#e4-01-sfcore-схемы-брифа-и-правило-верификации) | `@sf/core`: схемы брифа и правило верификации | 1 д | ✅E0-05 |  |  |
 | ⬜ | [E4-02](34_E4_TASKS.md#e4-02-llmclient-grounding-urlcontext-нормализация-источников) | `LlmClient`: grounding, urlContext, нормализация источников | 1 д | ⬜E1-07 |  |  |
 | ⬜ | [E4-03](34_E4_TASKS.md#e4-03-промпты-researchplan-researchverify-researchbrief) | Промпты `research.plan`, `research.verify`, `research.brief` | 1 д | ⬜E2-02 ⬜E4-01 ⬜E4-02 |  |  |
-| ⬜ | [E4-04](34_E4_TASKS.md#e4-04-бд-миграция-0004research-репозиторий-версий) | БД: миграция `0004_research`, репозиторий версий | 0.5 д | ⬜E4-01 |  |  |
-| ⬜ | [E4-05](34_E4_TASKS.md#e4-05-job-researchrun-оркестрация-plan-→-verify-→-brief) | Job `research.run`: оркестрация plan → verify → brief | 2 д | ⬜E3-06 ⬜E4-03 ⬜E4-04 |  |  |
+| ⬜ | [E4-04](34_E4_TASKS.md#e4-04-бд-миграция-0004_research-репозиторий-версий) | БД: миграция `0004_research`, репозиторий версий | 0.5 д | ⬜E4-01 |  |  |
+| ⬜ | [E4-05](34_E4_TASKS.md#e4-05-job-researchrun-оркестрация-plan--verify--brief) | Job `research.run`: оркестрация plan → verify → brief | 2 д | ⬜E3-06 ⬜E4-03 ⬜E4-04 |  |  |
 | ⬜ | [E4-06](34_E4_TASKS.md#e4-06-api-и-контракты-research) | API и контракты Research | 1 д | ⬜E4-05 |  |  |
 | ⬜ | [E4-07](34_E4_TASKS.md#e4-07-ui-страница-брифа) | UI: страница брифа | 2 д | ⬜E3-07 ⬜E4-06 |  |  |
 | ⬜ | [E4-08](34_E4_TASKS.md#e4-08-оценка-качества-на-10-идеях) | Оценка качества на 10 идеях | 1 д | ⬜E4-07 |  |  |
@@ -190,8 +193,8 @@ _Нет задач в работе._
 |---|---|---|---|---|---|---|
 | ⬜ | [E5-01](35_E5_TASKS.md#e5-01-sfcore-схема-скрипта-теги-оценка-длительности-анти-плагиат-проверка-claims) | `@sf/core`: схема скрипта, теги, оценка длительности, анти-плагиат, проверка claims | 1.5 д | ✅E0-05 ⬜E4-01 |  |  |
 | ⬜ | [E5-02](35_E5_TASKS.md#e5-02-промпты-scripthooks-scriptmaster-scriptrevise) | Промпты `script.hooks`, `script.master`, `script.revise` | 1 д | ⬜E2-02 ⬜E5-01 |  |  |
-| ⬜ | [E5-03](35_E5_TASKS.md#e5-03-бд-миграция-0005script-репозиторий) | БД: миграция `0005_script`, репозиторий | 0.5 д | ⬜E5-01 |  |  |
-| ⬜ | [E5-04](35_E5_TASKS.md#e5-04-job-scriptgenerate-regenerate-revise) | Job `script.generate` (+ regenerate / revise) | 2 д | ⬜E4-06 ⬜E5-02 ⬜E5-03 |  |  |
+| ⬜ | [E5-03](35_E5_TASKS.md#e5-03-бд-миграция-0005_script-репозиторий) | БД: миграция `0005_script`, репозиторий | 0.5 д | ⬜E5-01 |  |  |
+| ⬜ | [E5-04](35_E5_TASKS.md#e5-04-job-scriptgenerate--regenerate--revise) | Job `script.generate` (+ regenerate / revise) | 2 д | ⬜E4-06 ⬜E5-02 ⬜E5-03 |  |  |
 | ⬜ | [E5-05](35_E5_TASKS.md#e5-05-api-и-контракты-script) | API и контракты Script | 1 д | ⬜E5-04 |  |  |
 | ⬜ | [E5-06](35_E5_TASKS.md#e5-06-ui-редактор-скрипта) | UI: редактор скрипта | 2 д | ⬜E4-07 ⬜E5-05 |  |  |
 | ⬜ | [E5-07](35_E5_TASKS.md#e5-07-проверка-качества-на-5-идеях) | Проверка качества на 5 идеях | 1 д | ⬜E5-06 |  |  |
@@ -202,7 +205,7 @@ _Нет задач в работе._
 |---|---|---|---|---|---|---|
 | ⬜ | [E6-01](36_E6_TASKS.md#e6-01-sfcore-схема-пакета-построитель-таймлайна-markdown-рендер) | `@sf/core`: схема пакета, построитель таймлайна, Markdown-рендер | 1 д | ⬜E5-01 |  |  |
 | ⬜ | [E6-02](36_E6_TASKS.md#e6-02-промпт-productionpackage-и-job) | Промпт `production.package` и job | 1.5 д | ⬜E2-02 ⬜E5-05 ⬜E6-01 |  |  |
-| ⬜ | [E6-03](36_E6_TASKS.md#e6-03-бд-миграция-0006production-репозитории) | БД: миграция `0006_production`, репозитории | 0.5 д | ⬜E6-01 |  |  |
+| ⬜ | [E6-03](36_E6_TASKS.md#e6-03-бд-миграция-0006_production-репозитории) | БД: миграция `0006_production`, репозитории | 0.5 д | ⬜E6-01 |  |  |
 | ⬜ | [E6-04](36_E6_TASKS.md#e6-04-api-и-контракты-production) | API и контракты Production | 0.5–1 д | ⬜E6-02 ⬜E6-03 |  |  |
 | ⬜ | [E6-05](36_E6_TASKS.md#e6-05-ui-страница-пакета) | UI: страница пакета | 1.5 д | ⬜E5-06 ⬜E6-04 |  |  |
 | ⬜ | [E6-06](36_E6_TASKS.md#e6-06-первый-реальный-short-по-пакету) | Первый реальный Short по пакету | 1 д (без учёта времени монтажа) | ⬜E6-05 |  |  |
@@ -212,11 +215,11 @@ _Нет задач в работе._
 | | Задача | Название | Оценка | Зависимости | Начата | Готова |
 |---|---|---|---|---|---|---|
 | ⬜ | [E7-01](37_E7_TASKS.md#e7-01-google-oauth2-offline-flow-и-шифрование-токена) | Google OAuth2 offline flow и шифрование токена | 1.5 д | ✅E0-06 ✅E0-09 |  |  |
-| ⬜ | [E7-02](37_E7_TASKS.md#e7-02-свой-канал-как-trackedchannel-реестр-ownvideo) | Свой канал как `tracked_channel`, реестр `own_video` | 1 д | ⬜E1-03 ⬜E7-01 |  |  |
+| ⬜ | [E7-02](37_E7_TASKS.md#e7-02-свой-канал-как-tracked_channel-реестр-own_video) | Свой канал как `tracked_channel`, реестр `own_video` | 1 д | ⬜E1-03 ⬜E7-01 |  |  |
 | ⬜ | [E7-03](37_E7_TASKS.md#e7-03-analyticsapiclient) | `AnalyticsApiClient` | 1 д | ⬜E7-01 |  |  |
 | ⬜ | [E7-04](37_E7_TASKS.md#e7-04-job-analyticsingest) | Job `analytics.ingest` | 1.5 д | ⬜E7-02 ⬜E7-03 |  |  |
-| ⬜ | [E7-05](37_E7_TASKS.md#e7-05-витрина-ownvideometrics-и-миграция-0007analytics) | Витрина `own_video_metrics` и миграция `0007_analytics` | 1 д | ⬜E1-05 ⬜E7-04 |  |  |
-| ⬜ | [E7-06](37_E7_TASKS.md#e7-06-журнал-дабов-dubtrack-форма-и-api) | Журнал дабов `dub_track`: форма и API | 1 д | ⬜E7-02 |  |  |
+| ⬜ | [E7-05](37_E7_TASKS.md#e7-05-витрина-own_video_metrics-и-миграция-0007_analytics) | Витрина `own_video_metrics` и миграция `0007_analytics` | 1 д | ⬜E1-05 ⬜E7-04 |  |  |
+| ⬜ | [E7-06](37_E7_TASKS.md#e7-06-журнал-дабов-dub_track-форма-и-api) | Журнал дабов `dub_track`: форма и API | 1 д | ⬜E7-02 |  |  |
 | ⬜ | [E7-07](37_E7_TASKS.md#e7-07-api-и-контракты-analytics) | API и контракты Analytics | 0.5–1 д | ⬜E7-05 ⬜E7-06 |  |  |
 | ⬜ | [E7-08](37_E7_TASKS.md#e7-08-ui-analytics) | UI Analytics | 2 д | ✅E0-10 ⬜E7-07 |  |  |
 | ⬜ | [E7-09](37_E7_TASKS.md#e7-09-сверка-с-youtube-studio-adr) | Сверка с YouTube Studio, ADR | 1 д | ⬜E7-08 |  |  |
@@ -227,7 +230,7 @@ _Нет задач в работе._
 |---|---|---|---|---|---|---|
 | ⬜ | [E8-01](38_E8_TASKS.md#e8-01-sfcore-схема-фич-с-провенансом-и-автозаполнение) | `@sf/core`: схема фич с провенансом и автозаполнение | 1 д | ⬜E2-04 ⬜E5-01 |  |  |
 | ⬜ | [E8-02](38_E8_TASKS.md#e8-02-sfcorestats) | `@sf/core/stats` | 1.5 д | ✅E0-05 |  |  |
-| ⬜ | [E8-03](38_E8_TASKS.md#e8-03-бд-миграция-0008experiments-репозитории) | БД: миграция `0008_experiments`, репозитории | 0.5–1 д | ⬜E8-01 |  |  |
+| ⬜ | [E8-03](38_E8_TASKS.md#e8-03-бд-миграция-0008_experiments-репозитории) | БД: миграция `0008_experiments`, репозитории | 0.5–1 д | ⬜E8-01 |  |  |
 | ⬜ | [E8-04](38_E8_TASKS.md#e8-04-job-experimentfeatures-и-ручная-правка) | Job `experiment.features` и ручная правка | 0.5–1 д | ⬜E7-05 ⬜E8-03 |  |  |
 | ⬜ | [E8-05](38_E8_TASKS.md#e8-05-job-experimentrecompute) | Job `experiment.recompute` | 1.5 д | ⬜E8-02 ⬜E8-04 |  |  |
 | ⬜ | [E8-06](38_E8_TASKS.md#e8-06-рекомендации) | Рекомендации | 1 д | ⬜E1-07 ⬜E8-05 |  |  |
@@ -245,10 +248,10 @@ _Нет задач в работе._
 | ⬜ | [E9-03](39_E9_TASKS.md#e9-03-sfcore-схема-локализованного-скрипта-тайминг-captions-qa-правила) | `@sf/core`: схема локализованного скрипта, тайминг, captions, QA-правила | 1 д | ⬜E5-01 |  |  |
 | ⬜ | [E9-04](39_E9_TASKS.md#e9-04-промпты-localizescript-localizemetadata-localizetighten-localizeqa) | Промпты `localize.script`, `localize.metadata`, `localize.tighten`, `localize.qa` | 1 д | ⬜E2-02 ⬜E9-03 |  |  |
 | ⬜ | [E9-05](39_E9_TASKS.md#e9-05-job-localizescript) | Job `localize.script` | 1.5 д | ⬜E5-05 ⬜E9-04 |  |  |
-| ⬜ | [E9-06](39_E9_TASKS.md#e9-06-бд-миграция-0009localization-репозитории-sfstorage) | БД: миграция `0009_localization`, репозитории, `@sf/storage` | 0.5–1 д | ⬜E9-03 |  |  |
+| ⬜ | [E9-06](39_E9_TASKS.md#e9-06-бд-миграция-0009_localization-репозитории-sfstorage) | БД: миграция `0009_localization`, репозитории, `@sf/storage` | 0.5–1 д | ⬜E9-03 |  |  |
 | ⬜ | [E9-07](39_E9_TASKS.md#e9-07-api-контракты-и-ui-локализации-по-видео) | API, контракты и UI локализации по видео | 2 д | ⬜E5-06 ⬜E9-05 ⬜E9-06 |  |  |
 | ⬜ | [E9-08](39_E9_TASKS.md#e9-08-handoff-пакет) | Handoff-пакет | 1 д | ⬜E9-07 |  |  |
-| ⬜ | [E9-09](39_E9_TASKS.md#e9-09-пилот-2-языка-×-2-видео-adr) | Пилот: 2 языка × 2 видео, ADR | 1 д | ⬜E9-08 |  |  |
+| ⬜ | [E9-09](39_E9_TASKS.md#e9-09-пилот-2-языка--2-видео-adr) | Пилот: 2 языка × 2 видео, ADR | 1 д | ⬜E9-08 |  |  |
 
 ### E10. Voice Factory
 
@@ -258,7 +261,7 @@ _Нет задач в работе._
 | ⬜ | [E10-02](40_E10_TASKS.md#e10-02-адаптер-elevenlabs) | Адаптер ElevenLabs | 1 д | ⬜E10-01 |  |  |
 | ⬜ | [E10-03](40_E10_TASKS.md#e10-03-адаптеры-google-chirp-3-hd-и-gemini-tts) | Адаптеры Google Chirp 3 HD и Gemini TTS | 1.5 д | ⬜E10-01 |  |  |
 | ⬜ | [E10-04](40_E10_TASKS.md#e10-04-адаптеры-openai-tts-и-cartesia) | Адаптеры OpenAI TTS и Cartesia | 1.5 д | ⬜E10-01 |  |  |
-| ⬜ | [E10-05](40_E10_TASKS.md#e10-05-реестр-голосов-voiceprofile) | Реестр голосов `voice_profile` | 1 д | ⬜E10-02 ⬜E10-04 |  |  |
+| ⬜ | [E10-05](40_E10_TASKS.md#e10-05-реестр-голосов-voice_profile) | Реестр голосов `voice_profile` | 1 д | ⬜E10-02 ⬜E10-04 |  |  |
 | ⬜ | [E10-06](40_E10_TASKS.md#e10-06-bake-off-раннер-и-ui-оценок) | Bake-off: раннер и UI оценок | 2 д | ⬜E10-05 ⬜E9-07 |  |  |
 | ⬜ | [E10-07](40_E10_TASKS.md#e10-07-job-ttsgenerate-финальная-дорожка-mode-b) | Job `tts.generate`: финальная дорожка Mode B | 1.5 д | ⬜E10-06 ⬜E9-08 |  |  |
 | ⬜ | [E10-08](40_E10_TASKS.md#e10-08-бюджет-tts) | Бюджет TTS | 0.5 д | ⬜E10-06 |  |  |
@@ -282,7 +285,7 @@ _Нет задач в работе._
 | | Задача | Название | Оценка | Зависимости | Начата | Готова |
 |---|---|---|---|---|---|---|
 | ⬜ | [E13-01](43_E13_TASKS.md#e13-01-навигация-и-оболочка) | Навигация и оболочка | 1 д | ✅E0-10 |  |  |
-| ⬜ | [E13-02](43_E13_TASKS.md#e13-02-очереди-планировщики-dlq-—-просмотр-и-управление) | Очереди, планировщики, DLQ — просмотр и управление | 1.5 д | ✅E0-08 ✅E0-09 |  |  |
+| ⬜ | [E13-02](43_E13_TASKS.md#e13-02-очереди-планировщики-dlq--просмотр-и-управление) | Очереди, планировщики, DLQ — просмотр и управление | 1.5 д | ✅E0-08 ✅E0-09 |  |  |
 | ⬜ | [E13-03](43_E13_TASKS.md#e13-03-история-расходов-и-прогнозы) | История расходов и прогнозы | 1 д | ✅E0-09 |  |  |
 | ⬜ | [E13-04](43_E13_TASKS.md#e13-04-центр-алертов) | Центр алертов | 1 д | ⬜E13-03 |  |  |
 | ⬜ | [E13-05](43_E13_TASKS.md#e13-05-внешние-условия) | Внешние условия | 0.5 д | ✅E0-06 |  |  |

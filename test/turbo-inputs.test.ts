@@ -206,7 +206,7 @@ function packageIntInputViolations(turbos: readonly PackageTurbo[]): string[] {
 }
 
 /**
- * Rule (e), :531 of docs/TECH_DEBT.md: the integration runs of api and worker
+ * Rule (e), docs/TECH_DEBT.md § E0-12F: the integration runs of api and worker
  * start after the one of `@sf/db`, which resets and migrates the database
  * they work on. turbo gives that order through the graph: `test:int` depends
  * on `^test:int`, and both apps depend on `@sf/db`.
@@ -854,7 +854,7 @@ describe("turbo cache hash", () => {
   });
 
   // The test of a package hashes the files of its internal dependencies
-  // through these nodes (docs/TECH_DEBT.md, the worker#test row).
+  // through these nodes (docs/TECH_DEBT.md § E0-12).
   it("makes test depend on the test of the internal dependencies", () => {
     expect(repository().root.tasks.test?.dependsOn).toContain("^test");
   });

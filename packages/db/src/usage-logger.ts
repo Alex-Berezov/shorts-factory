@@ -29,7 +29,7 @@ const COST_PRECISION = 12;
  * against, and a cap may never be shown less than was really spent. `toFixed`
  * alone would round a call of $0.000004 down to zero - and a batch of cheap
  * calls to "nothing spent at all", which is exactly how a budget guard lets
- * spending run past its cap (docs/TECH_DEBT.md, 07.09.2026). What the rounding
+ * spending run past its cap (docs/TECH_DEBT.md § E0-09). What the rounding
  * costs instead is under $0.00001 per call, in our favour.
  *
  * Zero stays zero: a call that really was free must not be recorded as the

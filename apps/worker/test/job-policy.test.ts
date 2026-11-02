@@ -8,8 +8,8 @@ import {
 /**
  * `WORKER_CONCURRENCY` is a per-queue ceiling, so with a worker per queue the
  * process can hold that many paid calls times the number of paid queues - a
- * batch that leaves before any daily cap notices (docs/TECH_DEBT.md,
- * 06.09.2026).
+ * batch that leaves before any daily cap notices (docs/TECH_DEBT.md
+ * § E0-08).
  */
 describe("queueConcurrency", () => {
   it("caps a queue whose every job costs money", () => {

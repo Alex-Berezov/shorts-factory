@@ -167,7 +167,7 @@ describe("seedAppSettings", () => {
    * The other direction of the same row: a queue that was renamed or dropped
    * leaves its switch behind, because the merge only ever adds keys. An
    * operator then sees a live-looking toggle for a queue that is not there
-   * (docs/TECH_DEBT.md, 06.09.2026, and the decision of 10.09.2026).
+   * (docs/TECH_DEBT.md § E0-08, and the decision of 10.09.2026).
    */
   it("drops switches of queues that are gone, keeping the operator's choices", async () => {
     const stillThere = QUEUE_NAMES[0];
