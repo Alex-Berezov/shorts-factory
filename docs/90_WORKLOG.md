@@ -114,3 +114,4 @@ _Добавляется автоматически командами `node scri
 - 2026-11-02 ➕ **E0-12AK** test-support db и git: хвосты E0-12Q/E0-12T (добавлена в трекер)
 - 2026-11-02 ➕ **E0-12AL** Compose-контракт в тестах worker: healthcheck по compose.yaml (добавлена в трекер)
 - 2026-11-02 ✅ **E0-12W** Общий test-support приложений: @sf/runtime/test-support (dev-command, child-run, imports), int-хелперы, assertHashed, ADR-0011 — общий test-support api и worker в @sf/runtime/test-support, int-наборы на useTestDb, хвосты тестов закрыты, ADR-0011; :679 -> E0-12AJ, хвосты db/git -> E0-12AK, healthcheck по compose -> E0-12AL
+- 2026-11-02 ⛔ **E0-12AK** blocked — stop 3: after two /fix and techlead Р-3 (Fix 3) a blocker introduced by Fix 3 remains - shared calleeName ElementAccess branch weakens root-reads pathCallName; diff on wip/E0-12AK

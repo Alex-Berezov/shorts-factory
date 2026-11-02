@@ -2188,8 +2188,9 @@
       "E0-12W"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-11-02"
+    "status": "blocked",
+    "added_at": "2026-11-02",
+    "blocked_reason": "stop 3: after two /fix and techlead Р-3 (Fix 3) a blocker introduced by Fix 3 remains - shared calleeName ElementAccess branch weakens root-reads pathCallName; diff on wip/E0-12AK"
   },
   {
     "id": "E0-12AL",
