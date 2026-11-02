@@ -113,3 +113,4 @@ _Добавляется автоматически командами `node scri
 - 2026-11-02 ➕ **E0-12AJ** Один разборщик импортов: @sf/runtime/test-support/imports, корень реэкспортом, selftest на нём (добавлена в трекер)
 - 2026-11-02 ➕ **E0-12AK** test-support db и git: хвосты E0-12Q/E0-12T (добавлена в трекер)
 - 2026-11-02 ➕ **E0-12AL** Compose-контракт в тестах worker: healthcheck по compose.yaml (добавлена в трекер)
+- 2026-11-02 ✅ **E0-12W** Общий test-support приложений: @sf/runtime/test-support (dev-command, child-run, imports), int-хелперы, assertHashed, ADR-0011 — общий test-support api и worker в @sf/runtime/test-support, int-наборы на useTestDb, хвосты тестов закрыты, ADR-0011; :679 -> E0-12AJ, хвосты db/git -> E0-12AK, healthcheck по compose -> E0-12AL

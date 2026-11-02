@@ -2038,9 +2038,11 @@
       "E0-12N"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-10-21",
-    "started_at": "2026-11-02"
+    "started_at": "2026-11-02",
+    "done_at": "2026-11-02",
+    "note": "общий test-support api и worker в @sf/runtime/test-support, int-наборы на useTestDb, хвосты тестов закрыты, ADR-0011; :679 -> E0-12AJ, хвосты db/git -> E0-12AK, healthcheck по compose -> E0-12AL"
   },
   {
     "id": "E0-12X",
