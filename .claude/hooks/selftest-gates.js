@@ -937,7 +937,7 @@ function registerGateProbes(ctx, deps) {
       '.env.test',
       // Вложенные .env.test int-пакетов выбирает маска пакета: turbo хеширует файл как вход узла
       // (E0-12M, В1). Наборы их не читают: testEnvFilePath - только корень, это сверяет проба
-      // «int-наборы не читают scripts/, infra/ и вложенный .env.test» ниже.
+      // «граф чтений конфигов, setup и импортов int-наборов …» ниже.
       'apps/api/.env.test',
       'packages/db/.env.test',
       'package.json',
@@ -958,9 +958,14 @@ function registerGateProbes(ctx, deps) {
       'docs/30_E0_TASKS.md',
       'README.md',
       '.claude/hooks/rules.sf.json',
-      // Стек Compose и его гейт int-наборы не читают (E0-12M, решение техлида Р4): адрес стека -
-      // из корневого .env.test (testEnvFilePath - только корень), стек перезапускает человек;
-      // что наборы их не читают, сверяет проба «int-наборы не читают …» ниже.
+      // Гейт test:int правку Compose не выбирает намеренно (E0-12M, решение техлида Р4; E0-12AL, Р2):
+      // адрес стека наборы берут из корневого .env.test (testEnvFilePath - только корень), стек
+      // перезапускает человек. Int-набор воркера читает команду healthcheck из Compose
+      // (apps/worker/test/healthcheck-command.ts), но замок флагов healthcheck - гейт compose
+      // (check-compose.mjs, правило 4: WORKER_HEALTHCHECK точным совпадением; test/compose-rules.test.ts
+      // сажает само правило на фикстуре), юнит читателя воркера ловит смену формы, int воркера гоняет CI. Проба
+      // «граф чтений конфигов, setup и импортов …» ниже обходит граф конфиг/setup/импорты, а не тест-файлы (L-018):
+      // чтение Compose тест-файлом она не видит.
       'infra/docker-compose.yml',
       'infra/docker-compose.app.yml',
       'scripts/check-compose.mjs',
@@ -984,7 +989,7 @@ function registerGateProbes(ctx, deps) {
         // scripts/, infra/ и вложенный .env.test; имена из mustSkip под scripts/ и infra/ и
         // вложенные .env.test из mustRun в нём не встречаются; детектор - стаб с join(repoRoot,
         // "scripts/tasks.mjs") обязан покраснеть.
-        name: 'int-наборы не читают scripts/, infra/ и вложенный .env.test (граф чтений; имена mustSkip и mustRun сверены; проба отказа - стаб с join(repoRoot, "scripts/tasks.mjs"))',
+        name: 'граф чтений конфигов, setup и импортов int-наборов (тест-файлы граф не обходит) не доходит до scripts/, infra/ и вложенного .env.test (имена mustSkip и mustRun сверены; проба отказа - стаб с join(repoRoot, "scripts/tasks.mjs"))',
         int: true,
         fn: (_probe, spec) => {
           const reads = liveIntReads();

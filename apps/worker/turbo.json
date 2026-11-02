@@ -3,7 +3,13 @@
   "extends": ["//"],
   "tasks": {
     "test": {
-      "inputs": ["$TURBO_EXTENDS$", "$TURBO_ROOT$/.env.test"]
+      "inputs": [
+        "$TURBO_EXTENDS$",
+        "$TURBO_ROOT$/.env.test",
+        "$TURBO_ROOT$/compose.yaml",
+        "$TURBO_ROOT$/infra/docker-compose.yml",
+        "$TURBO_ROOT$/infra/docker-compose.app.yml"
+      ]
     }
   }
 }

@@ -16,7 +16,8 @@ import {
  */
 export const DEV_COMMAND = "node --import tsx src/index.ts";
 
-const PACKAGE_DIR = fileURLToPath(new URL("../", import.meta.url));
+/** The directory of this package. */
+export const PACKAGE_DIR = fileURLToPath(new URL("../", import.meta.url));
 
 /** The scripts of this package's manifest, by name. */
 export function manifestScripts(): Record<string, string> {

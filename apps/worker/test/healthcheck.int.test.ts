@@ -2,8 +2,8 @@ import { fork } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { type Server, type Socket, createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SEC } from "@sf/core";
 import { closeRedis } from "@sf/runtime";
 import {
@@ -13,28 +13,32 @@ import {
   endOf,
   endWithin,
 } from "@sf/runtime/test-support/child-run";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import type { DevCommandParts } from "@sf/runtime/test-support/dev-command";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { PACKAGE_DIR } from "./dev-command.js";
+import { workerHealthcheckOfRepo } from "./healthcheck-command.js";
 import { openTestRedis } from "./helpers.int.js";
 
 /**
  * The container healthcheck of the worker, run the way Compose runs it - a
- * separate node process with the flags of the healthcheck of the image
- * (`HEALTHCHECK_EXEC_ARGV`) - against the test Redis and against a port
- * nothing listens on. A fake client could not show the one property that
- * matters for a dead Redis: that the process ends on its own, with 1, before
- * Docker's own timeout would have to kill it.
+ * separate node process with the flags and the script of the healthcheck of
+ * the image, read from the Compose files (`healthcheck-command.ts`), not
+ * written out here - against the test Redis and against a port nothing
+ * listens on. A fake client could not show the one property that matters for
+ * a dead Redis: that the process ends on its own, with 1, before Docker's own
+ * timeout would have to kill it. The flags are locked by the `compose` gate
+ * (rule 4, `WORKER_HEALTHCHECK` of `scripts/compose-rules.mjs`), not by this
+ * test: a harmless change of them passes here.
+ *
+ * The command is read in `beforeAll`, not at the top of the module: a Compose
+ * file the reader refuses then fails the cases with its reason, not the
+ * collection of the file without a name.
  */
-const CLI = fileURLToPath(
-  new URL("../src/cli/healthcheck.ts", import.meta.url),
-);
-/**
- * The flags of node in the healthcheck of the image: `WORKER_HEALTHCHECK` of
- * `scripts/compose-rules.mjs`, which the root project holds Compose to
- * (`test/compose-rules.test.ts`). Not the flags of `pnpm dev`: the container
- * does not run that command, and a flag added to it would reach a healthcheck
- * that only this test runs.
- */
-const HEALTHCHECK_EXEC_ARGV = ["--import", "tsx"];
+let healthcheck: DevCommandParts;
+
+beforeAll(() => {
+  healthcheck = workerHealthcheckOfRepo();
+});
 /** A port nothing listens on; connecting is refused rather than hanging. */
 const DEAD_REDIS = "redis://127.0.0.1:1";
 /** The command's own deadline; Compose gives it 10 s (`timeout:`). */
@@ -65,8 +69,9 @@ async function runHealthcheck(
 ): Promise<HealthcheckRun> {
   // Monotonic: a step of the wall clock is no time the run took.
   const startedAt = performance.now();
-  const child = fork(CLI, [], {
-    execArgv: [...HEALTHCHECK_EXEC_ARGV, ...preload],
+  const cli = resolve(PACKAGE_DIR, healthcheck.script);
+  const child = fork(cli, [], {
+    execArgv: [...healthcheck.execArgv, ...preload],
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     env: { ...process.env, ...env },
   });

@@ -366,9 +366,14 @@ function repository(): Repository {
  * `$TURBO_ROOT$/apps/worker/package.json` in `packages/db/turbo.json`. The
  * setup of `@sf/config` (`vitest/setup.ts`) and the stack guard test of
  * `@sf/db` read `.env.test` through `testEnvFilePath` - in the inputs of both
- * packages (rule (c)).
+ * packages (rule (c)). The reader of the Compose files in `apps/worker`
+ * (`healthcheck-command.ts`, loaded by the unit and the integration test of
+ * the worker; the unit test's oracle opens every file by `include`) opens
+ * `compose.yaml` and the two files it includes - closed by an input for each.
  */
 const ROOT_READERS = [
+  "apps/worker/test/healthcheck-command.test.ts",
+  "apps/worker/test/healthcheck-command.ts",
   "apps/worker/test/healthcheck-imports.test.ts",
   "packages/config/test/env-example.test.ts",
   "packages/config/test/env-file.test.ts",
@@ -382,20 +387,33 @@ const ROOT_READERS = [
 /**
  * The root readers of `ROOT_READERS` closed by an input, each with that input:
  * the reader sees a change of the file only while the `turbo.json` of its
- * package keeps it in `test.inputs`.
+ * package keeps each of its inputs in `test.inputs` - one for the public
+ * surface test of `@sf/db`, the three Compose files for the reader of the
+ * healthcheck command of the worker.
  */
-const CLOSED_BY_INPUT: Record<string, string> = {
-  "packages/db/test/public-surface.test.ts":
+const COMPOSE_INPUTS = [
+  "$TURBO_ROOT$/compose.yaml",
+  "$TURBO_ROOT$/infra/docker-compose.yml",
+  "$TURBO_ROOT$/infra/docker-compose.app.yml",
+] as const;
+
+const CLOSED_BY_INPUT: Record<string, readonly string[]> = {
+  "apps/worker/test/healthcheck-command.test.ts": COMPOSE_INPUTS,
+  "apps/worker/test/healthcheck-command.ts": COMPOSE_INPUTS,
+  "packages/db/test/public-surface.test.ts": [
     "$TURBO_ROOT$/apps/worker/package.json",
+  ],
 };
 
 /** Rule (g): a root reader closed by an input keeps it in its package. */
 function closedReaderViolations(
   packages: PackageInputs[],
-  closed: Record<string, string>,
+  closed: Record<string, readonly string[]>,
 ): string[] {
   const problems: string[] = [];
-  for (const [reader, input] of Object.entries(closed)) {
+  for (const [reader, input] of Object.entries(closed).flatMap(([name, list]) =>
+    list.map((entry) => [name, entry] as const),
+  )) {
     const owner = packages.find(({ dir }) => reader.startsWith(`${dir}/`));
     if (owner === undefined) {
       problems.push(`${reader}: no package of the workspace holds it`);
@@ -721,24 +739,31 @@ describe("turbo input rules on broken copies", () => {
     ).toEqual([]);
   });
 
-  it("(g) refuses a closed root reader whose package dropped the input", () => {
-    const db = repository().packages.find(({ dir }) => dir === "packages/db");
-    if (db?.turbo === undefined)
-      throw new Error("no turbo.json of packages/db");
-    const broken = TurboSchema.parse(structuredClone(db.turbo));
+  it.each(
+    Object.entries(CLOSED_BY_INPUT).flatMap(([reader, inputs]) =>
+      inputs.map((input) => [reader, input] as const),
+    ),
+  )("(g) refuses %s whose package dropped the input %s", (reader, input) => {
+    const owner = repository().packages.find((pkg) =>
+      reader.startsWith(`${pkg.dir}/`),
+    );
+    if (owner?.turbo === undefined) {
+      throw new Error(`no package with a turbo.json holds ${reader}`);
+    }
+    const { dir } = owner;
+    const broken = TurboSchema.parse(structuredClone(owner.turbo));
     broken.tasks.test = {
       inputs: (broken.tasks.test?.inputs ?? []).filter(
-        (input) =>
-          input !== CLOSED_BY_INPUT["packages/db/test/public-surface.test.ts"],
+        (kept) => kept !== input,
       ),
     };
 
     expect(
-      closedReaderViolations([{ ...db, turbo: broken }], CLOSED_BY_INPUT),
+      closedReaderViolations([{ ...owner, turbo: broken }], {
+        [reader]: [input],
+      }),
     ).toEqual([
-      expect.stringContaining(
-        "packages/db: packages/db/test/public-surface.test.ts is closed by",
-      ),
+      expect.stringContaining(`${dir}: ${reader} is closed by ${input}`),
     ]);
   });
 
