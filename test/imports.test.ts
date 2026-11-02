@@ -82,6 +82,41 @@ describe("importSpecifiers", () => {
     expect(importSpecifiers("a.ts", text)).toEqual([]);
   });
 
+  it("reads with values only the imports that load at run time", () => {
+    const text = [
+      'import type { a } from "@sf/type-import";',
+      'export type { b } from "@sf/type-export";',
+      'type C = typeof import("@sf/type-query");',
+      'let d: import("@sf/type-node").D;',
+      'import { type e } from "@sf/inline-type";',
+      'import f from "@sf/value";',
+      'export * from "@sf/reexport";',
+      'const g = await import("@sf/dynamic");',
+      'const h = require("@sf/required");',
+      'import i = require("@sf/equals");',
+    ].join("\n");
+    expect(importSpecifiers("a.ts", text, { values: true })).toEqual([
+      "@sf/inline-type",
+      "@sf/value",
+      "@sf/reexport",
+      "@sf/dynamic",
+      "@sf/required",
+      "@sf/equals",
+    ]);
+    expect(importSpecifiers("a.ts", text)).toEqual([
+      "@sf/type-import",
+      "@sf/type-export",
+      "@sf/type-query",
+      "@sf/type-node",
+      "@sf/inline-type",
+      "@sf/value",
+      "@sf/reexport",
+      "@sf/dynamic",
+      "@sf/required",
+      "@sf/equals",
+    ]);
+  });
+
   it.each([
     "await import(name);",
     "require(path);",

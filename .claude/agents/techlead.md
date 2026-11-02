@@ -20,10 +20,9 @@ model: fable
 
 ## Что прочитать прежде, чем отвечать
 
-1. `docs/10_SYSTEM_DESIGN.md` - стек, направление зависимостей (§6: apps → packages,
-   integrations → core+config, db → core, runtime → config+core, contracts → core,
-   api-client → contracts и больше ни на что, core ни от чего), очереди §4, модель данных §5,
-   интеграции §7, нефункциональные требования §8.
+1. `docs/10_SYSTEM_DESIGN.md` - стек, направление зависимостей (hard rules `CLAUDE.md` и §6;
+   замок - `test/dependency-direction.test.ts`, таблица `ALLOWED_EDGES`), очереди §4, модель
+   данных §5, интеграции §7, нефункциональные требования §8.
 2. Документ задачи - путь из поля `doc` трекера (`docs/<doc>`; обычно `docs/3x_Ex_TASKS.md`
    текущего эпика, у задач из долга - `docs/TECH_DEBT.md`) - раздел «Архитектурные решения» и DoD задачи:
    решения там уже приняты по умолчанию, и менять их можно только осознанно с объяснением.

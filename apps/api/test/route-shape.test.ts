@@ -27,9 +27,10 @@ import { TEST_PASSWORD, testDeps } from "./helpers.js";
  * The error envelope on every failure status of every route, checked on what
  * Fastify registered rather than on the text of the route files: a computed
  * key (`[HEALTH_STATUS_CODES.degraded]`) is beyond a pattern over a line, and
- * the rule of `rules.sf.json` (S14) only says whether `...errorResponses()` is
- * in the file at all. What a route must declare (`src/routes/README.md`,
- * `src/lib/define-route.ts`):
+ * the type `RouteResponses` requires `4xx`/`5xx` with `ErrorBodySchema` - a route
+ * without `...errorResponses()` does not compile (the cases are in
+ * `define-route.test.ts`) - but reads structure, not the schema itself. What a
+ * route must declare (`src/routes/README.md`, `src/lib/define-route.ts`):
  *
  * - `4xx` and `5xx`, each the error envelope - `ErrorBodySchema` of
  *   `@sf/contracts`, the schema `errorResponses()` spreads;

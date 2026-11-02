@@ -1,9 +1,13 @@
+import { createRequire } from "node:module";
 import { posix } from "node:path";
+import { z } from "zod";
 import { DYNAMIC_SPECIFIER, importSpecifiers } from "./imports.js";
 import {
   type Manifest,
+  RULES_FILE,
   readManifest,
   readRepoFile,
+  readRules,
   repoFilesUnder,
   repoWorkspaceDirs,
 } from "./repo-files.js";
@@ -13,9 +17,14 @@ import {
  * (docs/10_SYSTEM_DESIGN.md §6), checked on the manifests and on the imports
  * of every file of every package. The table below is the lock; the rules
  * S07, S11, S15 and S16 of `.claude/hooks/rules.sf.json` give a quick signal
- * on the lines being written and say the same for their packages - a new edge
- * is a row here and, for those packages, a line there.
+ * on the lines being written and say the same for their packages. A new edge
+ * is a row of the table; the rules are held to it by
+ * `directionRuleViolations` below (the `describe` "the rules of standards
+ * against the table"), and a rule that disagrees with the table is red.
  */
+
+/** The table of allowed edges by package name: the `@sf/*` packages each may depend on. */
+export type EdgeTable = Readonly<Record<string, readonly string[]>>;
 
 /**
  * The `@sf/*` packages each package may depend on, by package name - the
@@ -25,7 +34,7 @@ import {
  * from the table is a violation, not a free pass, and so is a row naming a
  * package the workspace does not have.
  */
-const ALLOWED_EDGES: Readonly<Record<string, readonly string[]>> = {
+const ALLOWED_EDGES: EdgeTable = {
   "@sf/core": [],
   "@sf/config": [],
   "@sf/contracts": ["@sf/core"],
@@ -85,8 +94,10 @@ const DB_CLI = { name: "@sf/db", dir: "src/cli/" } as const;
 
 /**
  * The files of a package that never ship: its tests, its test support and
- * its vitest configs. Every other file - `src/`, `next.config.*`, the scripts
- * an image runs, `drizzle.config.ts` - ships, and takes no test support.
+ * its vitest configs. Every other file - `src/`, `next.config.*` (`next
+ * start` loads it), the scripts an image runs, `drizzle.config.ts` - ships,
+ * and takes no test support; only `devOnlyImports` reads `drizzle.config.ts`
+ * as the config of a dev tool (`DEV_TOOL_CONFIGS`, E0-12V).
  * A test under `src/` is no file that ships only under the name the preset
  * of ADR-0011 runs, `*.test.ts`: the probe of each image holds its packages
  * to no file of that name at any depth (`noTests` of `scripts/probe-image.mjs`).
@@ -99,6 +110,14 @@ const NOT_SHIPPED = [
   /(?:^|\/)[^/]+\.test\.ts$/,
   /^vitest[^/]*\.config\.[cm]?[jt]s$/,
 ];
+
+/**
+ * The configs of a dev tool, which only that tool reads (`drizzle-kit`
+ * reads `drizzle.config.ts`): they ship and take no test support, but may
+ * import a package of `devDependencies`. Only `devOnlyImports` passes them
+ * (E0-12V).
+ */
+const DEV_TOOL_CONFIGS = [/^drizzle\.config\.[cm]?[jt]s$/];
 
 /**
  * Web takes `@sf/config` in its own code only through the server entry
@@ -418,4 +437,328 @@ export function sourceFilesByPackage(
     else list.push(path);
   }
   return owned;
+}
+
+/**
+ * A line rule of `standards` in `RULES_FILE`, by the fields `standards.js`
+ * reads to apply it to a file and to match a line (`prepare`, `hits`,
+ * `checkFile`). Only the rules of `DIRECTION_RULES` are read by it: the hook
+ * takes a rule without an id, and the other rules are not this check's.
+ */
+const StandardRuleSchema = z.object({
+  id: z.string(),
+  kind: z.string().optional(),
+  files: z.array(z.string()).optional(),
+  pattern: z.string(),
+  skipIf: z.string().optional(),
+  flags: z.string().optional(),
+});
+export type StandardRule = z.infer<typeof StandardRuleSchema>;
+
+/**
+ * The rules of standards that say the direction of one package each, with
+ * the package they speak for and the source files of that package the rule
+ * has to see (`zone`, a path from the directory of the package): what that
+ * package may import is a row of the table, and the rule has to refuse
+ * exactly the rest. Web is held in `src/` only, as in `WEB_CONFIG`: its
+ * build scripts and configs take the edge of the table.
+ */
+const DIRECTION_RULES = [
+  { id: "S07", owner: "@sf/core", zone: /^/ },
+  { id: "S11", owner: "@sf/web", zone: WEB_CONFIG.files },
+  { id: "S15", owner: "@sf/contracts", zone: /^/ },
+  { id: "S16", owner: "@sf/api-client", zone: /^/ },
+] as const;
+
+const RuleIdSchema = z.object({ id: z.string() }).passthrough();
+
+/**
+ * The rules of `DIRECTION_RULES` among `standards` (those of `RULES_FILE` by
+ * default), checked by shape; a rule of another id, or one without an id,
+ * is passed over unread.
+ */
+export function readStandardRules(
+  standards: readonly unknown[] = readRules().standards,
+): StandardRule[] {
+  const ids = new Set<string>(DIRECTION_RULES.map((rule) => rule.id));
+  return standards
+    .filter((rule) => {
+      const named = RuleIdSchema.safeParse(rule);
+      return named.success && ids.has(named.data.id);
+    })
+    .map((rule) => StandardRuleSchema.parse(rule));
+}
+
+/**
+ * A name no package has yet: a rule written as a list of what is refused
+ * passes it, a rule written as what is allowed refuses it.
+ */
+export const NEW_PACKAGE = "@sf/zz-new";
+
+/** The subpath every name is tried with as well: where a name ends is part of the rule. */
+const SUBPATH = "zz-sub";
+
+/**
+ * `.claude/hooks/import-forms.js` by shape: the branches of the head of the
+ * rules of direction and the forms of an import on one line, each with the
+ * branch it is caught by and with each quote the hook reads. One table for
+ * the probes of harness-selftest and for this check (E0-12V): a rule
+ * has to say the same in every form, as `standards.js` meets them in the
+ * lines being written. A form is a function of the module, so its result is
+ * checked when it is called.
+ */
+const ImportFormsSchema = z
+  .object({
+    IMPORT_HEADS: z.array(z.string()).nonempty(),
+    IMPORT_FORMS: z
+      .array(
+        z.object({
+          head: z.string(),
+          form: z.function().args(z.string()).returns(z.string()),
+        }),
+      )
+      .nonempty(),
+  })
+  .superRefine((table, context) => {
+    for (const { head } of table.IMPORT_FORMS) {
+      if (!table.IMPORT_HEADS.includes(head)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `a form of the head ${head}, which IMPORT_HEADS does not have`,
+        });
+      }
+    }
+  });
+type ImportForms = z.infer<typeof ImportFormsSchema>;
+
+/** `hooks` (the module `.claude/hooks/import-forms.js` by default), checked by shape. */
+export function readImportForms(
+  hooks: unknown = createRequire(import.meta.url)(
+    "../.claude/hooks/import-forms.js",
+  ),
+): ImportForms {
+  return ImportFormsSchema.parse(hooks);
+}
+
+/** `matchAny` of `.claude/hooks/lib.js`: whether a glob of `files` takes `path`, as the hook picks the rules of a file. */
+function hookMatchAny(): (files: readonly string[], path: string) => boolean {
+  const lib: unknown = createRequire(import.meta.url)(
+    "../.claude/hooks/lib.js",
+  );
+  if (
+    typeof lib !== "object" ||
+    lib === null ||
+    !("matchAny" in lib) ||
+    typeof lib.matchAny !== "function"
+  ) {
+    throw new Error(".claude/hooks/lib.js exports no matchAny");
+  }
+  const matchAny = lib.matchAny;
+  return (files, path) =>
+    Reflect.apply(matchAny, undefined, [files, path]) === true;
+}
+
+/**
+ * Where the rules of standards of `DIRECTION_RULES` disagree with the table
+ * `edges`, over the names of the packages of `workspace` and `NEW_PACKAGE`,
+ * each also with a subpath. A rule has to be a line rule (`kind` as
+ * `standards.js` reads it: an empty one is a line rule), its package has to
+ * have a row in `edges` and to be in `workspace`, and the `files` of the
+ * rule have to take every source file of that package in the zone of the
+ * rule - not one sample: a rule narrowed to some of the files of its package
+ * leaves the rest without a word. Then, for each name and in every form of
+ * `readImportForms`, the line is refused when the pattern matches and its
+ * `skipIf`, if any, does not - the reading of `standards.js`, which resets
+ * the position of a global pattern before each line - and it has to be
+ * refused exactly when the name is not the owner itself and the row of the
+ * owner does not have it. For web, `@sf/config` and every subpath of it is
+ * refused but exactly `WEB_CONFIG.entry`, as in its own code, and the entry
+ * too when the row of web does not have `@sf/config`. A rule missing
+ * from `rules` is a violation. A pattern that is not a regular expression
+ * throws: the hook turns such a rule off without a word (`makeRe` gives
+ * null), here it is an error with its reason.
+ */
+export function directionRuleViolations(
+  rules: readonly StandardRule[],
+  workspace: readonly WorkspacePackage[],
+  edges: EdgeTable = ALLOWED_EDGES,
+): string[] {
+  const matchAny = hookMatchAny();
+  const forms = readImportForms().IMPORT_FORMS;
+  const violations: string[] = [];
+  const names = workspace.map((pkg) => pkg.manifest.name);
+  const everyName = [...new Set([...names, NEW_PACKAGE])];
+  for (const { id, owner, zone } of DIRECTION_RULES) {
+    const rule = rules.find((candidate) => candidate.id === id);
+    if (rule === undefined) {
+      violations.push(`${id}: no rule with this id in ${RULES_FILE}`);
+      continue;
+    }
+    const row = Object.hasOwn(edges, owner) ? edges[owner] : undefined;
+    if (row === undefined) {
+      violations.push(`${id}: ${owner} is not in the table of allowed edges`);
+      continue;
+    }
+    const kind = rule.kind || "line";
+    if (kind !== "line") {
+      violations.push(
+        `${id}: kind ${kind}, a rule of direction is a line rule`,
+      );
+      continue;
+    }
+    const pkg = workspace.find(
+      (candidate) => candidate.manifest.name === owner,
+    );
+    if (pkg === undefined) {
+      violations.push(`${id}: ${owner} is not in the workspace`);
+      continue;
+    }
+    const code = pkg.files
+      .filter((file) => zone.test(file.path))
+      .map((file) => `${pkg.dir}/${file.path}`);
+    if (code.length === 0) {
+      violations.push(
+        `${id}: ${owner} has no source file for the files of the rule to take`,
+      );
+      continue;
+    }
+    const untaken = code.filter((path) => !matchAny(rule.files ?? [], path));
+    if (untaken.length > 0) {
+      violations.push(
+        `${id}: the files of the rule do not take ${untaken.join(", ")}, of ${owner}`,
+      );
+      continue;
+    }
+    const pattern = new RegExp(rule.pattern, rule.flags ?? "");
+    const skip =
+      rule.skipIf === undefined
+        ? null
+        : new RegExp(rule.skipIf, rule.flags ?? "");
+    const isRefusedLine = (line: string): boolean => {
+      pattern.lastIndex = 0;
+      if (!pattern.test(line)) return false;
+      if (skip === null) return true;
+      skip.lastIndex = 0;
+      return !skip.test(line);
+    };
+    const expected: Array<readonly [string, boolean]> = everyName.flatMap(
+      (name) => {
+        const isRefused =
+          (owner === WEB_CONFIG.from && name === WEB_CONFIG.to) ||
+          (name !== owner && !row.includes(name));
+        return [
+          [name, isRefused],
+          [`${name}/${SUBPATH}`, isRefused],
+        ] as const;
+      },
+    );
+    if (owner === WEB_CONFIG.from) {
+      expected.push(
+        [WEB_CONFIG.entry, !row.includes(WEB_CONFIG.to)],
+        [`${WEB_CONFIG.entry}/${SUBPATH}`, true],
+      );
+    }
+    for (const [specifier, isRefused] of expected) {
+      const line = forms
+        .map(({ form }) => form(specifier))
+        .find((candidate) => isRefusedLine(candidate) !== isRefused);
+      if (line === undefined) continue;
+      violations.push(
+        isRefused
+          ? `${id} passes an edge the table does not have: ${owner} -> ${specifier}, in: ${line}`
+          : `${id} refuses an edge of the table: ${owner} -> ${specifier}, in: ${line}`,
+      );
+    }
+  }
+  return violations;
+}
+
+/** `zod` and its subpaths (`zod/v4`). */
+const ZOD = /^zod(?:\/|$)/;
+
+/**
+ * The files of every package that import `zod` without the manifest of
+ * their package declaring it: a file that ships needs `zod` in
+ * `dependencies` - the images install with `--prod` - and a file that never
+ * ships (`NOT_SHIPPED`) has enough with `devDependencies`. The root manifest
+ * is no package and is not read: its `zod` would cover nothing in an image.
+ */
+export function undeclaredZodImports(
+  workspace: readonly WorkspacePackage[],
+): string[] {
+  const violations: string[] = [];
+  for (const pkg of workspace) {
+    const shipped = Object.hasOwn(pkg.manifest.dependencies ?? {}, "zod");
+    const dev = Object.hasOwn(pkg.manifest.devDependencies ?? {}, "zod");
+    for (const file of pkg.files) {
+      const specifiers = importSpecifiers(file.path, file.text);
+      if (!specifiers.some((specifier) => ZOD.test(specifier))) continue;
+      const ships = !NOT_SHIPPED.some((pattern) => pattern.test(file.path));
+      if (shipped || (!ships && dev)) continue;
+      violations.push(
+        `${pkg.dir}/${file.path}: zod is not in ${ships ? "dependencies" : "dependencies or devDependencies"} of ${pkg.dir}/package.json`,
+      );
+    }
+  }
+  return violations;
+}
+
+/**
+ * The package a bare specifier names - `@scope/name` or `name`, subpath
+ * dropped; null for a relative path, a `node:` builtin and an import that
+ * cannot be read (`DYNAMIC_SPECIFIER`, refused by `importViolations`).
+ */
+function dependencyOf(specifier: string): string | null {
+  if (
+    specifier === DYNAMIC_SPECIFIER ||
+    specifier.startsWith(".") ||
+    specifier.startsWith("/") ||
+    specifier.startsWith("node:")
+  ) {
+    return null;
+  }
+  return /^(?:@[^/]+\/)?[^/]+/.exec(specifier)?.[0] ?? null;
+}
+
+/**
+ * The files that ship and import a package their manifest has in
+ * `devDependencies` and not in `dependencies`: the images install with
+ * `--prod`, so the import fails there with ERR_MODULE_NOT_FOUND (`vitest`
+ * in `packages/core/src`, E0-12V). A file that never ships
+ * (`NOT_SHIPPED`) and the config of a dev tool (`DEV_TOOL_CONFIGS`) take
+ * their dev dependencies freely; a package in neither
+ * field is not this check's. Only the imports that load at run time count
+ * (`importSpecifiers` with `values`): a type-only import is erased by the
+ * build. Every package of `workspace`, every file.
+ */
+export function devOnlyImports(
+  workspace: readonly WorkspacePackage[],
+): string[] {
+  const violations: string[] = [];
+  for (const pkg of workspace) {
+    const shipped = pkg.manifest.dependencies ?? {};
+    const dev = pkg.manifest.devDependencies ?? {};
+    for (const file of pkg.files) {
+      if (
+        [...NOT_SHIPPED, ...DEV_TOOL_CONFIGS].some((pattern) =>
+          pattern.test(file.path),
+        )
+      ) {
+        continue;
+      }
+      const names = new Set(
+        importSpecifiers(file.path, file.text, { values: true }).map(
+          dependencyOf,
+        ),
+      );
+      for (const name of names) {
+        if (name === null || !Object.hasOwn(dev, name)) continue;
+        if (Object.hasOwn(shipped, name)) continue;
+        violations.push(
+          `${pkg.dir}/${file.path}: ${name} is only in devDependencies of ${pkg.dir}/package.json, and the file ships`,
+        );
+      }
+    }
+  }
+  return violations;
 }

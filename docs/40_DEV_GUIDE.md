@@ -31,7 +31,7 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
    (сегодня `cache-control: no-store`; расширение - новым ADR); заголовок вне таблицы в этой
    опции не компилируется и бросает. Это только про опцию: `reply.header`/`removeHeader`/`type`/
    `serializer` из хендлера и разрешённых хуков роута открыты - держит ревью
-   (`docs/TECH_DEBT.md`, открыто -> E0-12V). `this` и слово `server` в любой позиции
+   (`docs/TECH_DEBT.md`, открыто -> E0-12AI). `this` и слово `server` в любой позиции
    (`request.server`, `const server = …`, `request["server"]`) в модуле роута не пишутся: что
    нужно хендлеру - в `deps`.
    _Почему:_ конверт ошибки попадает в OpenAPI и в сериализатор, а тип ответа читается с той же
@@ -41,9 +41,9 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
    _Замки:_ регистрацию мимо `defineRoute` держит тип `RouteRegistrar`: каждая форма обхода
    (методы экземпляра, `.route(`, `withTypeProvider`, скобки, деструктуризация, `register`,
    `addHook`, `decorate`, `set*`) стоит под `@ts-expect-error` в `apps/api/test/define-route.test.ts`,
-   там же типы помощника под `tsc` и рантайм-кейсы регистратора; стандарт S14
-   (`.claude/hooks/rules.sf.json`) при записи файла в `apps/api/src/routes/` ловит `defineRoute(`
-   в файле без `...errorResponses()` в коде (упоминание в комментарии не в счёт);
+   там же типы помощника под `tsc` и рантайм-кейсы регистратора; тип `RouteResponses` требует
+   `4xx`/`5xx` с `ErrorBodySchema`: роут без `...errorResponses()` не компилируется (кейсы в
+   `define-route.test.ts`);
    `apps/api/test/route-shape.test.ts` в `pnpm test` проверяет каждый зарегистрированный роут,
    включая роуты корня приложения: `config` от `defineRoute` (`isDefinedRoute`; роут из `src/lib`,
    плагина или `app.ts` мимо помощника - красный, кроме роутов документации);

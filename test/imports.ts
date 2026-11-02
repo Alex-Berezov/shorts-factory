@@ -71,8 +71,18 @@ export function loadsModule(callee: ts.Expression): boolean {
  * with: what it loads cannot be checked, so it is reported rather than
  * skipped - except `vi.mock(import("…"))`, whose `import("…")` is read on
  * its own.
+ *
+ * With `values`, only the imports that load at run time: `import type …`,
+ * `export type … from` and `typeof import("…")` are erased by the build and
+ * left out; an inline `import { type X } from` stays, since the declaration
+ * itself is kept (decision of the tech lead, E0-12V, docs/DECISIONS.md).
  */
-export function importSpecifiers(fileName: string, text: string): string[] {
+export function importSpecifiers(
+  fileName: string,
+  text: string,
+  options: { values?: boolean } = {},
+): string[] {
+  const values = options.values === true;
   const source = ts.createSourceFile(
     fileName,
     text,
@@ -83,13 +93,16 @@ export function importSpecifiers(fileName: string, text: string): string[] {
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
       const specifier = literal(node.moduleSpecifier);
-      if (specifier !== null) found.push(specifier);
+      if (specifier !== null && !(values && isTypeOnly(node))) {
+        found.push(specifier);
+      }
     } else if (
       ts.isImportEqualsDeclaration(node) &&
       ts.isExternalModuleReference(node.moduleReference)
     ) {
       found.push(literal(node.moduleReference.expression) ?? DYNAMIC_SPECIFIER);
     } else if (ts.isImportTypeNode(node)) {
+      if (values) return;
       const argument = node.argument;
       if (ts.isLiteralTypeNode(argument)) {
         found.push(literal(argument.literal) ?? DYNAMIC_SPECIFIER);
@@ -104,6 +117,15 @@ export function importSpecifiers(fileName: string, text: string): string[] {
   };
   visit(source);
   return found;
+}
+
+/** `import type …` or `export type … from`: erased by the build. */
+function isTypeOnly(
+  node: ts.ImportDeclaration | ts.ExportDeclaration,
+): boolean {
+  return ts.isImportDeclaration(node)
+    ? node.importClause?.isTypeOnly === true
+    : node.isTypeOnly;
 }
 
 /** The path functions whose call with `repoRoot` first names a file. */

@@ -2022,8 +2022,9 @@
       "E0-12D"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "todo",
-    "added_at": "2026-10-21"
+    "status": "in_progress",
+    "added_at": "2026-10-21",
+    "started_at": "2026-11-02"
   },
   {
     "id": "E0-12W",
@@ -2158,5 +2159,19 @@
     "status": "blocked",
     "added_at": "2026-10-28",
     "blocked_reason": "стоп 3: после двух /fix и захода по Р-8 точечное /qa нашло новые блокеры (fail-open маркера поломки против HEAD, __proto__ в brokenHooks, ложные тексты про edits); пакет А на ветке wip/E0-12AE, задачи E0-12AF/AG/AH там же"
+  },
+  {
+    "id": "E0-12AI",
+    "epic": "E0",
+    "title": "apps/api и @sf/runtime: хвост замков роутов E0-12P и замки импортов модулей",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-12P",
+      "E0-12Q"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-11-02"
   }
 ]

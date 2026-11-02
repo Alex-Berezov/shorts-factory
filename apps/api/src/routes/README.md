@@ -81,7 +81,7 @@ Three rules the registry cannot state on its own:
   That holds for the option alone: `reply.header`, `reply.removeHeader`,
   `reply.type` and `reply.serializer` in the handler and in the hooks a
   route may have (`onRequest`, `preValidation`, `preHandler`, `onError`)
-  stay open - review holds them (docs/TECH_DEBT.md, open -> E0-12V).
+  stay open - review holds them (docs/TECH_DEBT.md, open -> E0-12AI).
   The options the error envelope rests on (`errorHandler`,
   `serializerCompiler`, `validatorCompiler`, `schemaErrorFormatter`,
   `attachValidation`) belong to the app, and the hooks that get the body and
@@ -103,7 +103,7 @@ Three rules the registry cannot state on its own:
   (`request[key]`, `Object.values(request)`, `Object.entries(request)`,
   `for ... in`) is beyond that reading, and nothing holds
   `request.server.close()` or `.inject()` from a handler (docs/TECH_DEBT.md,
-  open -> E0-12V).
+  open -> E0-12AI).
   What this does not cover: bodies sent with `reply.status(...).send(...)`
   under another status, which only the serializer checks.
 
@@ -115,9 +115,10 @@ handlers and compilers - is
 a `@ts-expect-error` in `apps/api/test/define-route.test.ts`, next to the
 types of the helper under `tsc` (a handler returning the error envelope and
 a `schema` with a `response` of its own do not compile) and the run-time
-cases of the registrar. The rule S14 of `.claude/hooks/rules.sf.json`
-refuses `defineRoute(` in a file without `...errorResponses()` in its code,
-a mention in a comment not counting.
+cases of the registrar. The type `RouteResponses` requires `4xx`/`5xx` with
+`ErrorBodySchema`: a route without `...errorResponses()` does not compile
+(the cases are in `define-route.test.ts`; the line rule S14 that held this
+before is gone).
 `apps/api/test/route-shape.test.ts` checks every registered route in
 `pnpm test`, those the app puts straight on its root included: its
 `config` is the one `defineRoute` registered it with (`isDefinedRoute`), so

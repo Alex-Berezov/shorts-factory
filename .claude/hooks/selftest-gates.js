@@ -1026,7 +1026,7 @@ function registerGateProbes(ctx, deps) {
   // пакетов) самопроверку не выбирают: их сверяют с glob test:int и build сами пробы этих гейтов;
   // новый join(repoRoot, …) в глубине модуля ловит прогон selftest в CI. next.config.* ни одна
   // проба не читает (граф сборки - у turbo), на нём самопроверка не выбирается. Боевые формы роута
-  // (ROUTE_FORMS) читают пробы S14 и пропуска standards в модуле роута - их сверка здесь же (E0-12D).
+  // (ROUTE_FORMS) читает проба пропуска standards модуля роута - их сверка здесь же (E0-12D).
   /**
    * Близнец workspaceGlobs (Р4 техлида E0-12T) - под intGuard (int): require(esm) manifest.mjs -
    * та же граница Node, что у require test/imports.ts (IMPORTS_GATE), а не граф turbo (замечание
@@ -1158,10 +1158,10 @@ function registerGateProbes(ctx, deps) {
         },
       },
       {
-        name: 'его выбирает каждая боевая форма роута, которую читают пробы S14 и пропуска standards',
+        name: 'его выбирает каждая боевая форма роута, которую читает проба пропуска standards модуля роута',
         fn: ({ runs }) => {
           const stray = ROUTE_FORMS.filter((f) => !runs(f));
-          if (stray.length) return 'пробы S14 и пропуска standards читают вне glob harness-selftest: ' + stray.join(', ');
+          if (stray.length) return 'проба пропуска standards модуля роута читает вне glob harness-selftest: ' + stray.join(', ');
           return { note: ROUTE_FORMS.length + ' файла' };
         },
       },

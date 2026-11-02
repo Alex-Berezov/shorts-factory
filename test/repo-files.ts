@@ -193,3 +193,22 @@ export function repoFileExists(path: string): boolean {
 export function repoWorkspaceDirs(): string[] {
   return workspaceDirs(repoRoot, repository.under("."));
 }
+
+/** The rules of the hooks of this repository: the standards and the gates. */
+export const RULES_FILE = ".claude/hooks/rules.sf.json";
+
+/**
+ * `RULES_FILE` by its two lists, each entry left to the reader that needs
+ * it: a test of the gates is not held to the shape of the standards, nor the
+ * other way round.
+ */
+const RulesSchema = z.object({
+  standards: z.array(z.unknown()),
+  gates: z.array(z.unknown()),
+});
+type Rules = z.infer<typeof RulesSchema>;
+
+/** `RULES_FILE`, read and checked by its two lists. */
+export function readRules(): Rules {
+  return RulesSchema.parse(readRepoJson(RULES_FILE));
+}

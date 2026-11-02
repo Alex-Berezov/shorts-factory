@@ -57,7 +57,11 @@ type SuccessReply<Responses extends Record<typeof OK_STATUS, z.ZodTypeAny>> =
  * a plugin invents are covered without a route having to predict them.
  * Spreading this first leaves the exact keys of the route - `503` on
  * `/health` - in charge of their own statuses, which is what
- * `withErrorEnvelope` below is for.
+ * `withErrorEnvelope` below is for. `RouteResponses` requires both keys with
+ * a schema of the type of `ErrorBodySchema`, so a route that leaves them out
+ * does not compile; the type is structural and does not hold the schema to
+ * be this very one - see `RouteResponses` for what it does not see and what
+ * holds that at run time.
  */
 export function errorResponses(): {
   "4xx": typeof ErrorBodySchema;
@@ -84,8 +88,25 @@ export function withErrorEnvelope<Schema extends z.ZodTypeAny>(
   return z.union([schema, ErrorBodySchema]);
 }
 
-/** The responses of a route: `OK_STATUS` and whatever else it declares. */
-type RouteResponses = Record<typeof OK_STATUS, z.ZodTypeAny>;
+/**
+ * The responses of a route: `OK_STATUS`, the error envelope on `4xx` and
+ * `5xx`, and whatever else it declares.
+ *
+ * The wildcards are required with the very shape `errorResponses` returns, so
+ * that a route without `...errorResponses()` - or with a wildcard of its own
+ * schema, or a union in place of the envelope - does not compile, whether the
+ * object is a literal, a spread of a variable or a constant built elsewhere.
+ * What the type does not see: a cast (`as RouteResponses`, or through
+ * `unknown`) gets any object past it; a key in another case (`"4XX"`) is a
+ * key of its own to the type, while Fastify lowercases it into the wildcard;
+ * and it is structural - another zod schema with the same inferred type as
+ * `ErrorBodySchema` passes it. All three are held at run time by
+ * `test/route-shape.test.ts`, which reads every registered route the way
+ * Fastify does and compares the envelope it declares. The compile-time cases
+ * are in `test/define-route.test.ts`.
+ */
+type RouteResponses = Record<typeof OK_STATUS, z.ZodTypeAny> &
+  ReturnType<typeof errorResponses>;
 
 /**
  * The schema of a route without its responses: those come in `responses`
@@ -152,7 +173,7 @@ const REFUSED_OPTIONS = {
  * does not compile and is thrown on. `reply.header`, `reply.removeHeader`,
  * `reply.type` and `reply.serializer` in the handler and in the hooks a
  * route may have (`onRequest`, `preValidation`, `preHandler`, `onError`)
- * are open - review holds them (docs/TECH_DEBT.md, open -> E0-12V).
+ * are open - review holds them (docs/TECH_DEBT.md, open -> E0-12AI).
  */
 const REPLY_HEADERS = {
   "cache-control": ["no-store"],

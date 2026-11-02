@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { z } from "zod";
-import { readRepoJson } from "./repo-files.js";
+import { readRules } from "./repo-files.js";
 
 /**
  * A gate of .claude/hooks/rules.sf.json and whether the hook chooses it on a
@@ -17,23 +17,24 @@ import { readRepoJson } from "./repo-files.js";
  */
 const GateSchema = z.object({ id: z.string(), when: z.string() }).passthrough();
 
-const RulesSchema = z.object({ gates: z.array(GateSchema) });
-
 const ChoiceSchema = z.array(z.object({ run: z.boolean() }).passthrough());
 
 /** A gate as rules.sf.json has it. */
 export type Gate = z.infer<typeof GateSchema>;
 
 /**
- * The gate `id` of rules.sf.json (or of `rules`, given); throws when there is
+ * The gate `id` among `gates` - by default the gates of rules.sf.json, as
+ * `readRules` of test/repo-files.ts reads the file; throws when there is
  * none. Call it inside a case, not on the collection of a file.
  */
 export function gateOf(
   id: string,
-  rules: unknown = readRepoJson(".claude/hooks/rules.sf.json"),
+  gates: readonly unknown[] = readRules().gates,
 ): Gate {
-  const { gates } = RulesSchema.parse(rules);
-  const gate = gates.find((one) => one.id === id);
+  const gate = z
+    .array(GateSchema)
+    .parse(gates)
+    .find((one) => one.id === id);
   if (gate === undefined) throw new Error(`no ${id} gate`);
   return gate;
 }

@@ -19,9 +19,8 @@ model: sonnet
    - TypeScript strict; `any` запрещён во всех формах (`unknown` + сужение, `z.infer`,
      типы Drizzle); клапан `// any-ok: причина (E?-??)` только в безвыходном случае и с
      упоминанием в итоге;
-   - направление зависимостей: `apps → packages`, `integrations → core+config`,
-     `db → core`, `runtime → config+core`, `contracts → core`, `api-client → contracts`
-     (и больше ни на что), `@sf/core` не зависит ни от чего, кроме `zod`;
+   - направление зависимостей - hard rules `CLAUDE.md` и `docs/10_SYSTEM_DESIGN.md` §6; замок -
+     `test/dependency-direction.test.ts` (таблица `ALLOWED_EDGES`);
    - `process.env` читается только в `@sf/config`; логи через pino, не `console`;
    - код, комментарии, сообщения коммитов - на английском; документы - на русском;
    - никаких упоминаний ИИ в коде, комментариях и коммитах;

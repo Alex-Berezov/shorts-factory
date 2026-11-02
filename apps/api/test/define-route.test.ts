@@ -1,5 +1,6 @@
 import {
   type ErrorBody,
+  ErrorBodySchema,
   HealthResponseSchema,
   REQUEST_ID_HEADER,
 } from "@sf/contracts";
@@ -13,6 +14,7 @@ import {
   errorResponses,
   isDefinedRoute,
   routeRegistrar,
+  withErrorEnvelope,
 } from "../src/lib/define-route.js";
 import { AUTH_HEADER, buildTestApp } from "./helpers.js";
 
@@ -23,7 +25,8 @@ import { AUTH_HEADER, buildTestApp } from "./helpers.js";
  * by `tsc` over this file (`pnpm typecheck`): each `@ts-expect-error` below
  * names a route that must not compile, and the directive itself turns red the
  * day that route compiles - when the reply type stops coming from the
- * responses, when the schema takes its own `response` again, or when the
+ * responses, when the schema takes its own `response` again, when the
+ * responses stop requiring the error envelope on `4xx` and `5xx`, or when the
  * registrar lets a module reach the instance. What they do at run time is
  * held by the cases.
  */
@@ -109,6 +112,79 @@ function compileTimeCases(registrar: RouteRegistrar): void {
       schema: {},
     },
     async () => ({ status: "ok" as const }),
+  );
+
+  defineRoute(
+    registrar,
+    {
+      method: "GET",
+      url: "/no-error-envelope",
+      // @ts-expect-error - the responses of a route have to declare `4xx` and `5xx` with the error envelope: `...errorResponses()`
+      responses: { [OK_STATUS]: HealthResponseSchema },
+      schema: {},
+    },
+    async () => ({ status: "ok" as const }),
+  );
+
+  defineRoute(
+    registrar,
+    {
+      method: "GET",
+      url: "/no-5xx",
+      // @ts-expect-error - `5xx` is required as well as `4xx`: a server failure needs the envelope too
+      responses: { "4xx": ErrorBodySchema, [OK_STATUS]: HealthResponseSchema },
+      schema: {},
+    },
+    async () => ({ status: "ok" as const }),
+  );
+
+  defineRoute(
+    registrar,
+    {
+      method: "GET",
+      url: "/foreign-5xx",
+      responses: {
+        "4xx": ErrorBodySchema,
+        // @ts-expect-error - a wildcard holds the error envelope, not a schema of the route's own
+        "5xx": z.object({ other: z.string() }),
+        [OK_STATUS]: HealthResponseSchema,
+      },
+      schema: {},
+    },
+    async () => ({ status: "ok" as const }),
+  );
+
+  defineRoute(
+    registrar,
+    {
+      method: "GET",
+      url: "/union-5xx",
+      responses: {
+        ...errorResponses(),
+        // @ts-expect-error - a union belongs on an exact key (`withErrorEnvelope`), the wildcard holds the envelope itself
+        "5xx": withErrorEnvelope(HealthResponseSchema),
+        [OK_STATUS]: HealthResponseSchema,
+      },
+      schema: {},
+    },
+    async () => ({ status: "ok" as const }),
+  );
+
+  // The envelope spread from a variable compiles with no directive: the type
+  // reads the object, not how it was written. The case below reads the
+  // schema it registers on 4xx and 5xx, and the failure it answers.
+  const failures = errorResponses();
+  defineRoute(
+    registrar,
+    {
+      method: "GET",
+      url: "/envelope-from-variable",
+      responses: { ...failures, [OK_STATUS]: HealthResponseSchema },
+      schema: {},
+    },
+    async () => {
+      throw new Error("a failure of the route");
+    },
   );
 }
 
@@ -590,9 +666,21 @@ describe("defineRoute", () => {
     }
   });
 
-  it("registers the routes whose types are checked, and the typed ones answer", async () => {
+  it("registers the routes whose types are checked: the typed ones answer, the envelope spread from a variable is the schema of 4xx and 5xx", async () => {
+    // The body of the failure alone does not tell the envelope from its
+    // absence - the error handler answers the same shape with no schema on
+    // 5xx - so the schema the route registers is read where Fastify takes it.
+    const fromVariableResponses: unknown[] = [];
     const app = buildTestApp({
       routes: (root) => {
+        root.addHook("onRoute", (route) => {
+          if (
+            route.url === "/envelope-from-variable" &&
+            route.method === "GET"
+          ) {
+            fromVariableResponses.push(route.schema?.response);
+          }
+        });
         root.register(async (child) => {
           compileTimeCases(routeRegistrar(child));
         });
@@ -610,10 +698,31 @@ describe("defineRoute", () => {
         url: "/neighbours?id=a",
         headers,
       });
+      const fromVariable = await app.inject({
+        method: "GET",
+        url: "/envelope-from-variable",
+        headers,
+      });
       expect(typed.statusCode).toBe(OK_STATUS);
       expect(typed.json()).toEqual({ status: "ok" });
       expect(neighbours.statusCode).toBe(OK_STATUS);
       expect(neighbours.json()).toEqual({ status: "ok" });
+      expect(fromVariable.statusCode).toBe(500);
+      expect(ErrorBodySchema.strict().parse(fromVariable.json())).toEqual({
+        error: expect.objectContaining({
+          code: "INTERNAL_ERROR",
+          message: "Internal Server Error",
+        }),
+      });
+      expect(fromVariableResponses).toHaveLength(1);
+      // The very schemas, not copies of them: a copy of the envelope is equal and is no envelope.
+      const registered = z.record(z.unknown()).parse(fromVariableResponses[0]);
+      expect(Object.keys(registered).sort()).toEqual(
+        ["4xx", "5xx", String(OK_STATUS)].sort(),
+      );
+      expect(registered["4xx"]).toBe(ErrorBodySchema);
+      expect(registered["5xx"]).toBe(ErrorBodySchema);
+      expect(registered[OK_STATUS]).toBe(HealthResponseSchema);
     } finally {
       await app.close();
     }

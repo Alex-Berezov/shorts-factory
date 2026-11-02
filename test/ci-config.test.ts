@@ -16,7 +16,7 @@ import {
   parseRepoYaml,
   readManifest,
   readRepoFile,
-  readRepoJson,
+  readRules,
   readTurbo,
 } from "./repo-files.js";
 import {
@@ -250,9 +250,9 @@ describe("ci.yml job ci", () => {
 
   const GateSchema = z.object({ cmd: z.string() });
   const gates = z
-    .object({ gates: z.array(GateSchema) })
-    .parse(readRepoJson(".claude/hooks/rules.sf.json"))
-    .gates.map((gate) => gate.cmd);
+    .array(GateSchema)
+    .parse(readRules().gates)
+    .map((gate) => gate.cmd);
   // The gates that are not `pnpm` tasks: those have their places above.
   const scriptGates = gates.filter((cmd) => !cmd.startsWith("pnpm "));
 

@@ -50,7 +50,7 @@
   `harness-selftest.js`: модуль роута с `repo.get(`, `map.delete(`, `searchParams.get(`,
   `this` в строке, `deps.config.server` и `defineRoute` не отказывается ни одним правилом
   standards. S14 (`defineRoute` без
-  `...errorResponses()`) остаётся правилом до E0-12V.
+  `...errorResponses()`) снят E0-12V, см. абзац 02.11.2026 в «Последствиях».
 
 ## Кто держит регистрацию мимо `defineRoute`
 
@@ -95,7 +95,7 @@
   Все девять форм рантайм отклоняет после старта; формы без броска замер не нашёл. Не замерены
   и ничем не держатся `close()` и `inject()` из хендлера (`close()` гасит сервис без броска), а
   также `setNotFoundHandler`, `addContentTypeParser`, `decorateRequest`/`decorateReply`,
-  `addSchema` - долг `docs/TECH_DEBT.md`, открыто -> E0-12V.
+  `addSchema` - долг `docs/TECH_DEBT.md`, открыто -> E0-12AI.
 - **Имена в модулях роутов - тест на гейте `test`.** `apps/api/test/route-modules.test.ts`
   разбирает по AST (`apps/api/test/source-ast.ts`) каждый исходник `apps/api/src/routes/**`
   (`.ts`, `.mts`, `.cts`, `.tsx`) на любой глубине и отказывает на любой `this` и на слово
@@ -145,7 +145,7 @@
 - Запрет выше - про опцию `replyHeaders`: «не компилируется и бросает» только там.
   `reply.header`/`removeHeader`/`type`/`serializer` из хендлера и разрешённых хуков роута
   (`onRequest`, `preValidation`, `preHandler`, `onError`) открыты - держит ревью, долг
-  `docs/TECH_DEBT.md`, открыто -> E0-12V; рантайм-обёртки `reply` нет.
+  `docs/TECH_DEBT.md`, открыто -> E0-12AI; рантайм-обёртки `reply` нет.
 - Новое имя или значение в таблице и динамические заголовки - только новым ADR.
 
 ## Альтернативы
@@ -178,3 +178,9 @@
 - `defineRoute` и `routeRegistrar` должны импортироваться из одного модуля
   (`src/lib/define-route.js`): вторая копия модуля - второй `WeakMap`, и регистратор одной
   копии будет «чужим» для другой.
+- 02.11.2026, E0-12V: S14 снято, конверт ошибки держит тип `RouteResponses`
+  (`apps/api/src/lib/define-route.ts`) - `responses` роута обязаны нести `4xx` и `5xx` ровно
+  типа `typeof ErrorBodySchema` (форма `errorResponses()`), иначе роут не компилируется; кейсы
+  (нет обоих ключей, нет `5xx`, чужая схема, объединение на шаблонном ключе; спред из переменной -
+  пропуск) - `apps/api/test/define-route.test.ts`. Тип структурный: другая схема с тем же
+  выводимым типом проходит его, её держит `route-shape.test.ts` в рантайме.

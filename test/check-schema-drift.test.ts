@@ -1133,15 +1133,13 @@ describe("the schema-drift gate", () => {
 
 describe("gateOf", () => {
   it("reads a gate of only an id and a when, next to gates of their own shape", () => {
-    const rules = {
-      gates: [
-        { id: "other", cmd: "node x.mjs", when: "x/**", timeoutSec: 30 },
-        { id: "bare", when: "y/**" },
-      ],
-    };
+    const gates = [
+      { id: "other", cmd: "node x.mjs", when: "x/**", timeoutSec: 30 },
+      { id: "bare", when: "y/**" },
+    ];
 
-    expect(gateOf("bare", rules)).toEqual({ id: "bare", when: "y/**" });
-    expect(chosenOn(gateOf("bare", rules), "y/z.ts")).toBe(true);
+    expect(gateOf("bare", gates)).toEqual({ id: "bare", when: "y/**" });
+    expect(chosenOn(gateOf("bare", gates), "y/z.ts")).toBe(true);
   });
 });
 

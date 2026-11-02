@@ -87,7 +87,7 @@ const SELFTEST_LOADS = ['graph', 'gates', null];
 const HOOK_FILES = [
   'lib.js', 'diff-hash.js', 'standards.js', 'commit-gate.js',
   'answer-length.js', 'report-honesty.js', 'remind-format.js',
-  'gates.js', ...SELFTEST_MODULES.map((m) => m.file),
+  'gates.js', 'import-forms.js', ...SELFTEST_MODULES.map((m) => m.file),
 ];
 
 const results = [];
@@ -1020,7 +1020,7 @@ check('у каждого гейта есть id, cmd и when', () => {
 });
 
 /**
- * Боевые формы роута: пробы S14 и пропуска standards в модуле роута читают эти файлы как пропуск,
+ * Боевые формы роута: проба пропуска standards в модуле роута читает эти файлы как пропуск,
  * поэтому каждый из них выбирает гейт harness-selftest (сверка - в его пробе выбора, selftest-gates.js).
  */
 const ROUTE_FORMS = ['apps/api/src/routes/health/index.ts', 'apps/api/src/routes/system/index.ts'];
@@ -1411,10 +1411,26 @@ check('standards runtime: крах standards.js внутри guard называ�
   return JSON.stringify(got) === JSON.stringify(want) || 'ожидалось ' + JSON.stringify(want) + ', получено ' + JSON.stringify(got);
 });
 
-/** Текст файла пробы standards: строка line и строка кода после неё - один помощник проб S04, S11, S15, S16. */
+/** Текст файла пробы standards: строка line и строка кода после неё - один помощник проб S04, S07, S11, S15, S16. */
 function lineFile(line) {
   return line + '\nexport const x = 1;\n';
 }
+/**
+ * Формы импорта одной строкой - таблица .claude/hooks/import-forms.js, общая с
+ * test/dependency-direction.ts (E0-12V, решения техлида В7 и В8). Спаун-проба каждого правила
+ * направления S07, S11, S15, S16 берёт по одной форме на ветвь головы (heads: from, import, require -
+ * oneOfEachHead) на одном запрещённом имени (отказ) и на одном разрешённом (пропуск), прочие имена -
+ * первой формой; тела «после закрытого блочного комментария», «звезда-слеш в голове строки»,
+ * «экранированная кавычка», «после строкового литерала» - отдельные тела. Полноту форм x имён x кавычек
+ * держит directionRuleViolations в процессе vitest, а не спауны хука. Строка отказа standardsCases
+ * печатает тело - по нему видно, какую форму правило не поймало.
+ */
+const { IMPORT_HEADS, IMPORT_FORMS, oneOfEachHead } = require('./import-forms.js');
+const HEAD_FORMS = oneOfEachHead(IMPORT_FORMS).map((entry) => entry.form);
+if (HEAD_FORMS.length !== IMPORT_HEADS.length) {
+  throw new Error('import-forms.js: форм по ветвям головы ' + HEAD_FORMS.length + ', ветвей IMPORT_HEADS ' + IMPORT_HEADS.length + ' - у каждой ветви должна быть форма');
+}
+const FROM_FORM = IMPORT_FORMS.find((entry) => entry.head === 'from').form;
 
 /**
  * Отказ и пропуск одного правила standards на файле rel дерева пробы (L-008). refused / allowed -
@@ -1604,27 +1620,100 @@ check('lib.js: isGone и isNotFile отвечают как одноимённы�
   return { note: codes.map((code, i) => code + '=' + original[i]).join(', ') };
 });
 
+/**
+ * S11 - allowlist (E0-12V): из @sf/* web берёт только @sf/contracts, @sf/api-client (с подпутями),
+ * самоимпорт и ровно @sf/config/server - та же таблица, что ALLOWED_EDGES['@sf/web'] и WEB_CONFIG
+ * в test/dependency-direction.ts (их сверяет test/dependency-direction.test.ts). Отказ - по форме на
+ * ветвь головы (HEAD_FORMS) на пакете, которого нет (@sf/storage: формула, а не перечень), корень и
+ * подпуть config, core, похожие имена, метка server-only в строке импорта, импорт после закрытия
+ * блочного комментария в голове строки и после закрытого на той же строке, импорт после строкового
+ * литерала с экранированной кавычкой и после простого литерала; пропуск - по форме на ветвь на
+ * @sf/config/server, боевая форма api.server.ts, вход web, самоимпорт (@sf/web, подпуть), не @sf/*
+ * (next, react, алиас @/), текст импорта в строковом литерале, в комментарии и в хвосте строки после
+ * //; .css и .md под apps/web/src - не исходник, пропуск. Реэкспорт - первым телом отдельного
+ * вызова: ветку from краснит он сам.
+ */
 check('standards: серверные пакеты в apps/web/src (корень, подпуть, побочный импорт) пойманы S11, вход web - нет', () => {
   const gone = missingDirs(['apps/web/src/lib']);
   if (gone) return gone;
-  return standardsCases('S11', 'apps/web/src/lib/zz_selftest_s11.ts', [
-    'import { withDeadline } from "@sf/runtime";',
-    "import { createProbeRedis } from '@sf/runtime/redis';",
-    'import { createDb } from "@sf/db";',
-    'import { withFixture } from "@sf/db/test-support/fixture";',
-    'import type { Env } from "@sf/config";',
-    'import { loadRedisUrl } from "@sf/config/redis-url";',
-    'import { REPO_ROOT } from "@sf/config/paths";',
-    'import { createClient } from "@sf/youtube";',
-    'import "@sf/db";',
-    "import '@sf/config/redis-url';",
-    'export { createDb } from "@sf/db";',
-  ].map(lineFile), [
-    'import { env } from "@sf/config/server";',
-    'import { createServerClient } from "@sf/api-client/server";',
-    'import { BuildInfoSchema } from "@sf/contracts";',
-    'import "server-only";',
-  ].map(lineFile));
+  const rel = 'apps/web/src/lib/zz_selftest_s11.ts';
+  const reexport = standardsCases('S11', rel, [lineFile('export { createDb } from "@sf/db";')], []);
+  if (typeof reexport === 'string') return reexport;
+  const own = standardsCases('S11', rel, HEAD_FORMS.map((form) => form('@sf/storage')).concat(
+    ['@sf/config', '@sf/config/paths', '@sf/core', '@sf/config/serverx', '@sf/contracts-x'].map(FROM_FORM),
+    [
+      'import { createDb } from "@sf/db"; // server-only',
+      '*/ import { createDb } from "@sf/db";',
+      '/* c */ import { createDb } from "@sf/db";',
+      'const s = "\\""; import { createDb } from "@sf/db";',
+      'const n = "a"; export * from "@sf/db";',
+      ' * end */ export * from "@sf/db";',
+    ],
+  ).map(lineFile), HEAD_FORMS.map((form) => form('@sf/config/server')).concat(
+    ['@sf/api-client/server', '@sf/contracts', '@sf/web', '@sf/web/x', 'next/server', 'react', '@/lib/utils'].map(FROM_FORM),
+    [
+      '  const { env } = await import("@sf/config/server");',
+      'import "server-only";',
+      "const s = \"import { x } from '@sf/db'\";",
+      '// import { createDb } from "@sf/db";',
+      'const a = 1; // copied from "@sf/db"',
+      ' * moved from "@sf/db" */',
+    ],
+  ).map(lineFile));
+  if (typeof own === 'string') return own;
+  const text = lineFile('import { createDb } from "@sf/db";');
+  const css = standardsCases('S11', 'apps/web/src/lib/zz_selftest_s11.css', [], [text]);
+  if (typeof css === 'string') return css;
+  const md = standardsCases('S11', 'apps/web/src/lib/zz_selftest_s11.md', [], [text]);
+  if (typeof md === 'string') return md;
+  return { note: own.note + '; .css: ' + css.note + '; .md: ' + md.note };
+});
+/**
+ * S07 - allowlist (E0-12V): @sf/core берёт только zod (с подпутями), vitest, относительный импорт и
+ * самоимпорт; всё прочее - @sf/*, node:*, внешний пакет не из старого перечня - отказ. Отказ - по
+ * форме на ветвь головы (HEAD_FORMS) на @aws-sdk/client-s3, прочие классы имён первой формой
+ * (import("…") - ещё на pino), импорт после закрытия блочного комментария в голове строки (skipIf
+ * rules.sf.json: строка от звезды с кодом после звезды-слеша - код, отказ; строка от звезды, которую
+ * звезда-слеш закрывает, - комментарий, пропуск) и после закрытого на той же строке, импорт после литерала с экранированной
+ * кавычкой и после простого литерала; пропуск - по форме на ветвь на zod, подпуть zod, относительные
+ * пути (в том числе "." и ".." без слеша), самоимпорт, комментарий, текст после // в хвосте строки и
+ * в закрытом на строке блочном комментарии; на тесте пакета - vitest и текст настоящего
+ * packages/core/vitest.config.ts; проза (.md) - не исходник. vitest в отгружаемом файле (src) правило
+ * не ловит: он devDependency, его держит devOnlyImports test/dependency-direction.test.ts (решение
+ * техлида В1).
+ */
+check('standards: S07 ловит любой импорт в packages/core, кроме zod, vitest, относительного и самоимпорта', () => {
+  const gone = missingDirs(['packages/core/src', 'packages/core/test', 'packages/core/vitest.config.ts']);
+  if (gone) return gone;
+  const own = standardsCases('S07', 'packages/core/src/zz_selftest_s07.ts', HEAD_FORMS.map((form) => form('@aws-sdk/client-s3')).concat(
+    ['@sf/config', '@sf/contracts', 'pino', 'node:fs', '@sf/corex', 'zodx'].map(FROM_FORM),
+    [
+      'const m = await import("pino");',
+      "*/ import x from 'fastify';",
+      '/* c */ import x from "pino";',
+      'const s = "\\""; import { createDb } from "@sf/db";',
+      'const n = "a"; export * from "pino";',
+      ' * end */ export * from "pino";',
+    ],
+  ).map(lineFile), HEAD_FORMS.map((form) => form('zod')).concat(
+    ['zod/v4', './x.js', '../domain/y.js', '.', '..', '@sf/core/queues'].map(FROM_FORM),
+    [
+      '// import { x } from "pino";',
+      "const s = \"import { x } from 'pino'\";",
+      'const a = 1; // copied from "lodash"',
+      '/** Read from "redis" keys */',
+      '/* moved from "x" */',
+      ' * moved from "@sf/db" */',
+    ],
+  ).map(lineFile));
+  if (typeof own === 'string') return own;
+  const config = fs.readFileSync(path.join(ROOT, 'packages/core/vitest.config.ts'), 'utf8');
+  const vitest = lineFile('import { describe, expect, it } from "vitest";');
+  const tests = standardsCases('S07', 'packages/core/test/zz_selftest_s07.test.ts', [], [vitest, config]);
+  if (typeof tests === 'string') return tests;
+  const prose = standardsCases('S07', 'packages/core/zz_selftest_s07.md', [], [lineFile('import x from "pino";')]);
+  if (typeof prose === 'string') return prose;
+  return { note: own.note + '; тест пакета: ' + tests.note + '; .md: ' + prose.note };
 });
 
 /**
@@ -1633,10 +1722,9 @@ check('standards: серверные пакеты в apps/web/src (корень,
  * без единого ключа экземпляра (apps/api/test/define-route.test.ts, docs/adr/0015-route-registrar.md),
  * построчное правило S13 снято; экземпляр из хендлера (request.server, reply.server, this) держит
  * разбор по AST в apps/api/test/route-modules.test.ts, построчное правило S17 снято (В1 E0-12P). Обе
- * боевые формы - сами файлы health и system из репозитория - пропуск S14 и всех правил standards.
- * Отказ S14 - defineRoute в файле без ...errorResponses() в коде: без спреда, спред только в
- * комментарии (//, блочный, строка JSDoc, хвост строки); пропуск - ключ response: в файле без
- * defineRoute (лог, тело ответа). Точные статусы 4xx/5xx правило не видит - их проверяет
+ * боевые формы - сами файлы health и system из репозитория - пропуск всех правил standards.
+ * S14 снято (E0-12V): конверт ошибки держит тип RouteResponses (src/lib/define-route.ts
+ * требует 4xx/5xx с ErrorBodySchema; кейсы - apps/api/test/define-route.test.ts), точные статусы -
  * apps/api/test/route-shape.test.ts.
  */
 function routeFile(lines) {
@@ -1647,7 +1735,7 @@ const ROUTE_DEFINITION = [
   'defineRoute(registrar, { method: "GET", url: "/x", responses, schema: { tags: ["x"] } }, handler);',
 ];
 /**
- * Тексты боевых форм роута (ROUTE_FORMS) из репозитория - пропуск в пробах S14 и модуля роута;
+ * Тексты боевых форм роута (ROUTE_FORMS) из репозитория - пропуск в пробе модуля роута;
  * с диска - один раз за прогон (TECH_DEBT 19.10.2026 E0-12D круг 5, хелпер `file(line)` и `ROUTE_FORMS`).
  */
 let routeFormsMemo = null;
@@ -1663,10 +1751,11 @@ function routeFormTexts() {
  * литерале; `deps.config.server` правила standards не отказывают, его отказывает разбор по AST
  * (apps/api/test/route-modules.test.ts), не S17. Отказ - любой [id] правила standards в замечаниях (standardsCases с
  * ANY_RULE); крах - красный. Сторона отказа в том же пути показывает, что предикат совпадает и на
- * S-, и на W-правиле: тело без ...errorResponses() (S14) и тело с @ts-ignore (W03 общего файла -
- * действует здесь через склейку standards в lib.rulesFor, проба склейки ниже).
+ * S- (S03), и на W-правиле (W03): тело с console.log (S03 действует в apps/api/src/**) и тело с
+ * @ts-ignore (W03 общего файла - действует здесь через склейку standards в lib.rulesFor, проба
+ * склейки ниже).
  */
-check('standards: модуль роута с repo.get(, map.delete(, searchParams.get(, this в строке и defineRoute не отказывается ни одним правилом; S14 и W03 в том же пути - отказ', () => {
+check('standards: модуль роута с repo.get(, map.delete(, searchParams.get(, this в строке и defineRoute не отказывается ни одним правилом; S03 и W03 в том же пути - отказ', () => {
   const gone = missingDirs(ROUTE_FORMS);
   if (gone) return gone;
   const bodies = routeFormTexts().concat([
@@ -1680,7 +1769,7 @@ check('standards: модуль роута с repo.get(, map.delete(, searchParam
     ])),
   ]);
   return standardsCases(ANY_RULE, 'apps/api/src/routes/zz_selftest/index.ts', [
-    routeFile(['const responses = { [OK_STATUS]: X };', ROUTE_DEFINITION[1]]),
+    routeFile(ROUTE_DEFINITION.concat(['console.log(id);'])),
     routeFile(ROUTE_DEFINITION.concat(['// @ts-ignore', 'const n: number = id;'])),
   ], bodies);
 });
@@ -1754,92 +1843,86 @@ check('lib.mergeStandards: общее правило без id пережива�
   if (seen !== want) return 'склейка ' + seen + ', ждали ' + want;
   return { note: 'правила без id в обоих списках сохранены' };
 });
-check('standards: S14 ловит defineRoute без ...errorResponses() в коде файла, боевые роуты - нет', () => {
-  const gone = missingDirs(ROUTE_FORMS);
-  if (gone) return gone;
-  const route = ROUTE_DEFINITION[1];
-  return standardsCases('S14', 'apps/api/src/routes/zz_selftest/index.ts', [
-    routeFile(['const responses = { [OK_STATUS]: X };', route]),
-    routeFile(['const failures = errorResponses();', 'const responses = { ...failures, [OK_STATUS]: X };', route]),
-    routeFile(['// const responses = { ...errorResponses(), [OK_STATUS]: X };', 'const responses = { [OK_STATUS]: X };', route]),
-    routeFile(['/* ...errorResponses() */', 'const responses = { [OK_STATUS]: X };', route]),
-    routeFile(['/**', ' * ...errorResponses() goes first', ' */', 'const responses = { [OK_STATUS]: X };', route]),
-    routeFile(['const responses = { [OK_STATUS]: X }; // no ...errorResponses() here', route]),
-  ], routeFormTexts().concat([
-    routeFile(ROUTE_DEFINITION),
-    routeFile(['request.log.info({ response: answer }, "answered");', 'const body = { response: x, ok: true };', 'reply.send({ response });']),
-  ]));
-});
-
 /**
  * Направление зависимостей по импортам (E0-12D, §6, ADR-0007): contracts -> core, api-client ->
- * contracts. Формы - from, побочный import, export … from, import("…"), require("…"), в том
- * числе после строкового литерала в той же строке; граница имени - с обеих сторон: пакет, имя
- * которого лишь начинается с разрешённого (@sf/core-x), - отказ, подпуть разрешённого
- * (@sf/core/sub) - пропуск; импорт пакетом самого себя (@sf/contracts/health в contracts,
- * @sf/api-client/server в api-client) - не ребро, пропуск, как в test/dependency-direction.ts,
- * а пакет с тем же началом имени (@sf/contracts-x) - отказ. Текст импорта внутри строкового литерала - не импорт, пропуск.
- * vi.mock, require.resolve, from на другой строке и манифесты проверяет
- * test/dependency-direction.test.ts.
+ * contracts. Голова и skipIf - те же, что у S07 и S11 (решение техлида В11). Отказ - по форме на
+ * ветвь головы (HEAD_FORMS: from, import("…"), require("…")) на одном запрещённом имени, новый пакет
+ * (@sf/zz-new), прочие имена первой формой; импорт после строкового литерала, после закрытия блочного
+ * комментария в голове строки (звезда-слеш, затем export … from), после закрытого на той же строке
+ * блочного комментария и после
+ * литерала с экранированной кавычкой - отдельные тела, каждое краснеет своим откатом; пропуск - по
+ * форме на ветвь на разрешённом имени, самоимпорт, текст импорта в строковом литерале, в комментарии,
+ * в хвосте строки после // и в закрытом на строке блочном комментарии. Граница имени - с обеих сторон: пакет, имя
+ * которого лишь начинается с разрешённого (@sf/core-x), - отказ, подпуть разрешённого (@sf/core/sub) -
+ * пропуск; импорт пакетом самого себя (@sf/contracts/health в contracts, @sf/api-client/server в
+ * api-client) - не ребро, пропуск, как в test/dependency-direction.ts, а пакет с тем же началом имени
+ * (@sf/contracts-x) - отказ. Полноту форм x имён x кавычек, vi.mock, require.resolve, from на другой
+ * строке и манифесты проверяет test/dependency-direction.test.ts.
  */
 check('standards: S15 ловит @sf/* кроме @sf/core в packages/contracts, @sf/core и самоимпорт - нет', () => {
   const gone = missingDirs(['packages/contracts/src']);
   if (gone) return gone;
-  return standardsCases('S15', 'packages/contracts/src/zz_selftest_s15.ts', [
-    'import { env } from "@sf/config";',
-    'import type { Env } from "@sf/config/server";',
-    'export * from "@sf/db";',
-    "import '@sf/runtime';",
-    'export { createClient } from "@sf/youtube";',
-    'import { createApiClient } from "@sf/api-client";',
-    'import { x } from "@sf/core-x";',
-    'import { x } from "@sf/corex";',
-    'import { x } from "@sf/contracts-x";',
-    'import { x } from "@sf/contractsx";',
-    'const m = await import("@sf/config");',
-    'const db = require("@sf/db");',
-    'const n = "a"; const m = await import("@sf/db");',
-    "const k = 'it' + \"s\"; export * from '@sf/runtime';",
-  ].map(lineFile), [
-    'import { AppError } from "@sf/core";',
-    "const s = \"import { x } from '@sf/db'\";",
-    'const t = `export * from "@sf/config"`;',
-    "import type { QueueName } from '@sf/core';",
-    'import { QUEUE_NAMES } from "@sf/core/queues";',
-    'const m = await import("@sf/core");',
-    'import { HEALTH_STATUS_CODES } from "@sf/contracts/health";',
-    'export * from "@sf/contracts";',
-    'import { z } from "zod";',
-    '// import { env } from "@sf/config";',
-  ].map(lineFile));
+  return standardsCases('S15', 'packages/contracts/src/zz_selftest_s15.ts', HEAD_FORMS.map((form) => form('@sf/config')).concat(
+    ['@sf/zz-new', '@sf/config/server', '@sf/api-client', '@sf/core-x', '@sf/corex', '@sf/contracts-x', '@sf/contractsx'].map(FROM_FORM),
+    [
+      "const k = 'it' + \"s\"; export * from '@sf/runtime';",
+      '*/ export * from "@sf/db";',
+      '/* c */ import { createDb } from "@sf/db";',
+      'const s = "\\""; import { createDb } from "@sf/db";',
+      ' * end */ export * from "@sf/db";',
+    ],
+  ).map(lineFile), HEAD_FORMS.map((form) => form('@sf/core')).concat(
+    ['@sf/core/queues', '@sf/contracts/health', '@sf/contracts', 'zod'].map(FROM_FORM),
+    [
+      "const s = \"import { x } from '@sf/db'\";",
+      'const t = `export * from "@sf/config"`;',
+      '// import { env } from "@sf/config";',
+      'foo(); // moved from "@sf/db"',
+      '/* moved from "@sf/db" */',
+      ' * moved from "@sf/db" */',
+    ],
+  ).map(lineFile));
 });
 check('standards: S16 ловит @sf/* кроме @sf/contracts в packages/api-client, @sf/contracts и самоимпорт - нет', () => {
   const gone = missingDirs(['packages/api-client/src']);
   if (gone) return gone;
-  return standardsCases('S16', 'packages/api-client/src/zz_selftest_s16.ts', [
-    'import { QUEUE_NAMES } from "@sf/core";',
-    'import { env } from "@sf/config";',
-    'import "@sf/config/server";',
-    'export * from "@sf/db";',
-    "export type { AppError } from '@sf/core';",
-    'import { x } from "@sf/contracts-x";',
-    'import { x } from "@sf/api-client-x";',
-    'import { x } from "@sf/api-clientx";',
-    'const m = await import("@sf/core");',
-    'const env = require("@sf/config");',
-    'const n = "a"; const m = await import("@sf/core");',
-  ].map(lineFile), [
-    'import { ErrorBodySchema } from "@sf/contracts";',
-    "const s = \"import { x } from '@sf/core'\";",
-    "const t = `require('@sf/config')`;",
-    "export type { ErrorBody } from '@sf/contracts';",
-    'import { HEALTH_STATUS_CODES } from "@sf/contracts/health";',
-    'const m = await import("@sf/contracts");',
-    'import { createServerClient } from "@sf/api-client/server";',
-    "export type { ApiClient } from '@sf/api-client';",
-    'import "server-only";',
-    ' * import { QUEUE_NAMES } from "@sf/core";',
-  ].map(lineFile));
+  return standardsCases('S16', 'packages/api-client/src/zz_selftest_s16.ts', HEAD_FORMS.map((form) => form('@sf/core')).concat(
+    ['@sf/zz-new', '@sf/config', '@sf/config/server', '@sf/contracts-x', '@sf/api-client-x', '@sf/api-clientx'].map(FROM_FORM),
+    [
+      'const n = "a"; export * from "@sf/core";',
+      '*/ export * from "@sf/db";',
+      '/* c */ import { createDb } from "@sf/db";',
+      'const s = "\\""; import { createDb } from "@sf/db";',
+      ' * end */ export * from "@sf/db";',
+    ],
+  ).map(lineFile), HEAD_FORMS.map((form) => form('@sf/contracts')).concat(
+    ['@sf/contracts/health', '@sf/api-client/server', '@sf/api-client'].map(FROM_FORM),
+    [
+      'import "server-only";',
+      "const s = \"import { x } from '@sf/core'\";",
+      "const t = `require('@sf/config')`;",
+      ' * import { QUEUE_NAMES } from "@sf/core";',
+      'foo(); // moved from "@sf/db"',
+      '/* moved from "@sf/db" */',
+      ' * moved from "@sf/db" */',
+    ],
+  ).map(lineFile));
+});
+/**
+ * S02 (E0-12V, строка долга про skipIf `\.test\.` из E0-12P): skipIf сверяется с текстом строки, а
+ * не с путём (standards.js, checkFile), поэтому ветка `\.test\.` пропускала любую строку с `.test.`
+ * в тексте - обход; путь-исключения для тестов нет. Отказ - на тесте пакета и в src, в том числе
+ * строка, в тексте которой есть `.test.`; пропуск - комментарий и одиночный `as`.
+ */
+check('standards: S02 ловит as unknown as и в тесте, и в строке с .test. в тексте; комментарий - нет', () => {
+  const gone = missingDirs(['packages/core/src', 'packages/core/test']);
+  if (gone) return gone;
+  const refused = ['const t = x as unknown as T;', 'const m = load("./a.test.ts") as unknown as T;'].map(lineFile);
+  const tests = standardsCases('S02', 'packages/core/test/zz_selftest_s02.test.ts', refused, ['// x as unknown as T', 'const t = x as T;'].map(lineFile));
+  if (typeof tests === 'string') return tests;
+  const src = standardsCases('S02', 'packages/core/src/zz_selftest_s02.ts', refused, []);
+  if (typeof src === 'string') return src;
+  return { note: 'тест пакета: ' + tests.note + '; src: ' + src.note };
 });
 /**
  * Пробы Stop- и UserPromptSubmit-хуков. Состояние - L.statePath(), то есть временная папка
