@@ -1,6 +1,6 @@
 import { QUEUE_SWITCHES_KEY, QueueSwitchesSchema } from "@sf/core";
 import type { QueueName } from "@sf/core";
-import { appSettingRepo, closeDb } from "@sf/db";
+import { appSettingRepo } from "@sf/db";
 import { closeRedis } from "@sf/runtime";
 import { pino } from "pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -12,10 +12,12 @@ import {
   startQueueSwitchSync,
 } from "../src/lib/queue-switches.js";
 import {
+  keepDatabase,
   obliterateQueues,
-  openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  useTestDb,
+  waitFor,
   workerQueueFactory,
 } from "./helpers.int.js";
 
@@ -27,7 +29,11 @@ import {
  */
 const QUEUES = ["system.smoke", "system.dlq"] as const;
 
-const db = openTestDb();
+// The switches go back to their defaults before the handle closes.
+const db = useTestDb(
+  { beforeAll, afterAll },
+  { prepare: keepDatabase, beforeClose: (handle) => seedQueueSwitches(handle) },
+);
 const redis = openTestRedis();
 const queues = workerQueueFactory(redis);
 
@@ -50,26 +56,30 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await seedQueueSwitches(db);
+  await seedQueueSwitches(db());
   await queues.get("system.smoke").resume();
 });
 
+// This hook closes what the file opened and never reaches for the database.
+// A hook that throws here skips the afterAll hooks registered before it,
+// `beforeClose`/`closeDb` of `useTestDb` included (vitest 2 stack, E0-12AK).
 afterAll(async () => {
-  await queues.close();
-  await seedQueueSwitches(db);
-  await obliterateQueues(redis, QUEUES);
-  await closeDb(db);
-  await closeRedis(redis);
+  try {
+    await queues.close();
+    await obliterateQueues(redis, QUEUES);
+  } finally {
+    await closeRedis(redis);
+  }
 });
 
 describe("queue switches", () => {
   it("pauses a queue that is switched off and resumes it when it comes back", async () => {
     const { log } = recordingLogger();
     const smoke = queues.get("system.smoke");
-    await seedQueueSwitches(db, { "system.smoke": false });
+    await seedQueueSwitches(db(), { "system.smoke": false });
 
     const paused = await applyQueueSwitches({
-      db,
+      db: db(),
       log,
       getQueue: (name) => queues.get(name),
     });
@@ -79,9 +89,9 @@ describe("queue switches", () => {
 
     // Without a restart: the operator writes the setting and the next tick
     // picks it up.
-    await seedQueueSwitches(db);
+    await seedQueueSwitches(db());
     const resumed = await applyQueueSwitches({
-      db,
+      db: db(),
       log,
       getQueue: (name) => queues.get(name),
     });
@@ -95,7 +105,7 @@ describe("queue switches", () => {
     const { log } = recordingLogger();
 
     const result = await applyQueueSwitches({
-      db,
+      db: db(),
       log,
       getQueue: (name) => queues.get(name),
     });
@@ -107,10 +117,10 @@ describe("queue switches", () => {
     // The seed drops such keys; a worker refusing to start over a leftover
     // would turn a cosmetic problem into an outage.
     const { log, lines } = recordingLogger();
-    await seedQueueSwitches(db, { "radar.sync": true });
+    await seedQueueSwitches(db(), { "radar.sync": true });
 
     const result = await applyQueueSwitches({
-      db,
+      db: db(),
       log,
       getQueue: (name) => queues.get(name),
     });
@@ -122,13 +132,13 @@ describe("queue switches", () => {
   it("warns about a queue with no switch instead of assuming it is enabled", async () => {
     const { log, lines } = recordingLogger();
     const stored = QueueSwitchesSchema.parse(
-      await appSettingRepo.get(db, QUEUE_SWITCHES_KEY),
+      await appSettingRepo.get(db(), QUEUE_SWITCHES_KEY),
     );
     const { "system.smoke": _dropped, ...withoutSmoke } = stored;
-    await appSettingRepo.set(db, QUEUE_SWITCHES_KEY, withoutSmoke);
+    await appSettingRepo.set(db(), QUEUE_SWITCHES_KEY, withoutSmoke);
 
     const result = await applyQueueSwitches({
-      db,
+      db: db(),
       log,
       getQueue: (name) => queues.get(name),
     });
@@ -140,20 +150,21 @@ describe("queue switches", () => {
   it("refuses to start against a database that was never seeded", async () => {
     // "No row" is not "everything enabled": guessing would run jobs the
     // operator may have turned off.
-    await db.$client`delete from app_setting where key = ${QUEUE_SWITCHES_KEY}`;
+    await db()
+      .$client`delete from app_setting where key = ${QUEUE_SWITCHES_KEY}`;
 
-    await expect(readQueueSwitches(db)).rejects.toThrow(
+    await expect(readQueueSwitches(db())).rejects.toThrow(
       QueueSwitchesUnavailableError,
     );
-    await expect(readQueueSwitches(db)).rejects.toThrow(/db:seed/);
+    await expect(readQueueSwitches(db())).rejects.toThrow(/db:seed/);
   });
 
   it("refuses a stored value that is not a map of booleans", async () => {
-    await appSettingRepo.set(db, QUEUE_SWITCHES_KEY, {
+    await appSettingRepo.set(db(), QUEUE_SWITCHES_KEY, {
       "system.smoke": "false",
     });
 
-    await expect(readQueueSwitches(db)).rejects.toThrow(
+    await expect(readQueueSwitches(db())).rejects.toThrow(
       QueueSwitchesUnavailableError,
     );
   });
@@ -168,24 +179,26 @@ describe("queue switch resync", () => {
     const { log } = recordingLogger();
     const smoke = queues.get("system.smoke");
     const stop = startQueueSwitchSync({
-      db,
+      db: db(),
       log,
       getQueue: (name) => queues.get(name),
       intervalMs: 100,
     });
 
     try {
-      await seedQueueSwitches(db, { "system.smoke": false });
-      await waitForCondition(
-        async () => await smoke.isPaused(),
-        "the tick to pause the queue",
-      );
+      await seedQueueSwitches(db(), { "system.smoke": false });
+      await waitFor(async () => (await smoke.isPaused()) || undefined, {
+        what: "the tick to pause the queue",
+        timeoutMs: 5_000,
+        intervalMs: 25,
+      });
 
-      await seedQueueSwitches(db);
-      await waitForCondition(
-        async () => !(await smoke.isPaused()),
-        "the tick to resume the queue",
-      );
+      await seedQueueSwitches(db());
+      await waitFor(async () => !(await smoke.isPaused()) || undefined, {
+        what: "the tick to resume the queue",
+        timeoutMs: 5_000,
+        intervalMs: 25,
+      });
     } finally {
       await stop();
     }
@@ -212,12 +225,16 @@ describe("queue switch resync", () => {
     };
 
     const stop = startQueueSwitchSync({
-      db,
+      db: db(),
       log,
       getQueue: (_name: QueueName) => slowQueue,
       intervalMs: 20,
     });
-    await waitForCondition(async () => asked > 0, "the tick to start");
+    await waitFor(async () => asked > 0 || undefined, {
+      what: "the tick to start",
+      timeoutMs: 5_000,
+      intervalMs: 25,
+    });
 
     let stopped = false;
     const stopping = stop().then(() => {
@@ -256,7 +273,7 @@ describe("queue switch resync", () => {
     };
 
     await applyQueueSwitches({
-      db,
+      db: db(),
       log,
       getQueue: (_name: QueueName) => countingQueue,
     });
@@ -270,15 +287,15 @@ describe("queue switch resync", () => {
     // the first real error under thousands of lines a day.
     const { log, lines } = recordingLogger();
     const stored = QueueSwitchesSchema.parse(
-      await appSettingRepo.get(db, QUEUE_SWITCHES_KEY),
+      await appSettingRepo.get(db(), QUEUE_SWITCHES_KEY),
     );
     const { "system.smoke": _dropped, ...withoutSmoke } = stored;
-    await appSettingRepo.set(db, QUEUE_SWITCHES_KEY, {
+    await appSettingRepo.set(db(), QUEUE_SWITCHES_KEY, {
       ...withoutSmoke,
       "radar.sync": true,
     });
     const deps = {
-      db,
+      db: db(),
       log,
       getQueue: (name: QueueName) => queues.get(name),
       warned: new Set<string>(),
@@ -304,21 +321,3 @@ describe("queue switch resync", () => {
     expect(() => factory.get("system.smoke")).toThrow(/closed/);
   });
 });
-
-/** Polls until the condition holds, or fails the test by throwing. */
-async function waitForCondition(
-  probe: () => Promise<boolean>,
-  what: string,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (await probe()) {
-      return;
-    }
-    if (Date.now() >= deadline) {
-      throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}

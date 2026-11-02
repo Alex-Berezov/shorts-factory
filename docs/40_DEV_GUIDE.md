@@ -193,7 +193,15 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
    дедлайн и есть вердикт (запрос, CLI, остановка), `true` - когда таймер не должен держать
    процесс (кэш, ожидание при закрытии).
 6. **Тесты** - рекордер `@sf/runtime/test-support/recording-logger` (настоящий pino, уровни
-   именами; `silentLogger()` для кейсов не про лог).
+   именами; `silentLogger()` для кейсов не про лог; `recordingServiceLogger(env)` - на опциях
+   сервиса, когда кейс про то, что логгер сервиса делает со строкой). Ожидание с дедлайном -
+   `within` из `@sf/runtime/test-support/within`, а не свой `setTimeout` рядом; ребёнок-процесс -
+   `@sf/runtime/test-support/child-run` (`collectOutput`, `endOf`, `startOf`, `stopped`, `killed`,
+   `endWithin`, `signalled`, `KILL_DEADLINE_MS`, `freePort`; `signalled` ждут - `await`: отказ
+   отправки проглочен, недошедший сигнал - пропущенный конец в `endWithin`), команда `pnpm dev` -
+   `@sf/runtime/test-support/dev-command`, чтение `package.json` -
+   `@sf/runtime/test-support/manifest`, разбор `CLIENT LIST` - `@sf/runtime/test-support/redis-clients`.
+   Место и границы test-support приложений - ADR-0011.
 
 ## Тесты и гейты
 
@@ -241,6 +249,11 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
   `shorts_factory_test`; без Compose прогон красный, а не пропущенный. Каждый прогон пакета до
   первого файла проходит входную проверку стека (`globalSetup`, который ставит `intTestConfig`:
   `@sf/db/test-support/entry-check/*`, ADR-0011) - новый int-файл за ней без единой строки.
+  Ручка базы int-файла приложения - `useTestDb({ beforeAll, afterAll }, { prepare })` до хуков
+  файла (`sequence.hooks: "stack"` пресета закрывает её после их уборки); у наборов api и
+  worker `prepare` - «база как есть» (`keepDatabase` фикстуры `@sf/db/test-support/fixture`,
+  его реэкспортирует `test/helpers.int.ts` приложения), не сброс. Свои строки файл чистит в `beforeClose` фикстуры, а не в своём
+  `afterAll`: брошенный `afterAll` файла пропускает закрытие ручки (ADR-0011, «Порядок хуков»).
   Команды - `README.md`, «Getting started», шаг 7.
 - `pnpm lint` (Biome), `pnpm typecheck`, `pnpm build` (собирает только `apps/web`, ADR-0005).
 - `node .claude/hooks/gates.js` (выбор - `selectGates` в `.claude/hooks/gates.js`, правила - `.claude/hooks/rules.sf.json`):

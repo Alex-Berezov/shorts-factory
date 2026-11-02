@@ -21,6 +21,7 @@ import {
 } from "@sf/db";
 import { DeadlineError, createRequestRedis } from "@sf/runtime";
 import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
+import { within } from "@sf/runtime/test-support/within";
 import type { Redis } from "ioredis";
 import { describe, expect, it, vi } from "vitest";
 import type { QueuesSnapshot } from "../src/deps.js";
@@ -789,31 +790,6 @@ async function silentRedis(): Promise<{ url: string; stop: () => void }> {
   };
 }
 
-/**
- * Waits for the client to call itself `ready`, and fails with the reason
- * instead of holding the case until the timeout of the runner: a handshake a
- * later ioredis changed is a broken fake, not a slow one.
- */
-async function readyWithin(client: Redis, timeoutMs: number): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    await Promise.race([
-      once(client, "ready"),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(
-            new Error(
-              `the client was not ready against the silent server in ${timeoutMs}ms: its handshake is not the one the server answers`,
-            ),
-          );
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 describe("a command to a Redis that went silent", () => {
   /**
    * The deadline of a request gives up on such a command without ending it,
@@ -826,7 +802,13 @@ describe("a command to a Redis that went silent", () => {
       commandTimeoutMs: DEPENDENCY_TIMEOUT_MS,
     });
     try {
-      await readyWithin(client, 1_000);
+      // A handshake a later ioredis changed is a broken fake, not a slow one:
+      // the wait names it instead of holding the case until the runner's timeout.
+      await within(
+        once(client, "ready"),
+        1_000,
+        "the client against the silent server, whose handshake it may not share",
+      );
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       let outcome: unknown;
       let settled = false;

@@ -172,6 +172,20 @@ function isInjectable(
 }
 
 /**
+ * The values a parameter or a wildcard of a route is filled with, tried in
+ * order: a number, a uuid, a word. The first one the router takes for that
+ * very route is the one asked with - a parameter with a pattern of its own
+ * (`:id(^\\d+$)`) takes no word, and a url it does not take is answered by the
+ * hook of the 404 instead of the route.
+ */
+const PARAM_VALUES = ["1", "00000000-0000-0000-0000-000000000000", "x"];
+
+/** `url` of a route with every parameter and wildcard filled with `value`. */
+function filledUrl(url: string, value: string): string {
+  return url.replace(/:[^/]+/g, value).replace(/\*/g, value);
+}
+
+/**
  * The password over every route of the assembled app, the documentation
  * included: a route that fell out of the global hook of `plugins/auth.ts`
  * answers without credentials, and the shape of its schema says nothing
@@ -181,19 +195,34 @@ describe("the password over the routes of the app", () => {
   it("is asked for on every route but the public ones", async () => {
     registered.routes.length = 0;
     const app = buildTestApp();
+    // The route the router took for the last request: a url that reached the
+    // 404 instead of the route it was built for vouches for nothing.
+    let reached: string | undefined;
+    app.addHook("onResponse", async (request) => {
+      reached = request.routeOptions.url;
+    });
     await app.ready();
     const routes = registered.routes.splice(0);
     try {
       const answered: { route: string; status: number }[] = [];
       for (const route of routes) {
-        // A parameter or a wildcard of the route stands for any value.
-        const url = route.url.replace(/:[^/]+/g, "x").replace(/\*/g, "x");
         for (const method of [route.method].flat()) {
           // A method `inject` cannot send is a route this sweep cannot
           // vouch for: it stands as answered with nothing, which fails.
-          const status = isInjectable(method)
-            ? (await app.inject({ method, url })).statusCode
-            : 0;
+          let status = 0;
+          if (isInjectable(method)) {
+            for (const value of PARAM_VALUES) {
+              reached = undefined;
+              const res = await app.inject({
+                method,
+                url: filledUrl(route.url, value),
+              });
+              if (reached === route.url) {
+                status = res.statusCode;
+                break;
+              }
+            }
+          }
           answered.push({ route: `${method} ${route.url}`, status });
         }
       }

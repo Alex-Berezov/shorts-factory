@@ -2038,9 +2038,9 @@
       "E0-12N"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "blocked",
+    "status": "in_progress",
     "added_at": "2026-10-21",
-    "blocked_reason": "стоп 3: после двух /fix и захода по Р-З круг 4 нашёл 4 блокера, внесённых правками (signalled глотает любую ошибку send, ветки waitFor без кейсов, мёртвый импорт ChildProcess, endWithin/killed ждут close у незапустившегося ребёнка); дифф на ветке wip/E0-12W (c5e4d9a), гейты на ветке зелёные; вопрос техлиду следующей сессии - узкий заход или разрез"
+    "started_at": "2026-11-02"
   },
   {
     "id": "E0-12X",
@@ -2160,5 +2160,46 @@
     "status": "blocked",
     "added_at": "2026-10-28",
     "blocked_reason": "стоп 3: после двух /fix и захода по Р-8 точечное /qa нашло новые блокеры (fail-open маркера поломки против HEAD, __proto__ в brokenHooks, ложные тексты про edits); пакет А на ветке wip/E0-12AE, задачи E0-12AF/AG/AH там же"
+  },
+  {
+    "id": "E0-12AJ",
+    "epic": "E0",
+    "title": "Один разборщик импортов: @sf/runtime/test-support/imports, корень реэкспортом, selftest на нём",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-12W",
+      "E0-12V",
+      "E0-12AC"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-11-02"
+  },
+  {
+    "id": "E0-12AK",
+    "epic": "E0",
+    "title": "test-support db и git: хвосты E0-12Q/E0-12T",
+    "estimate": "0.5 д",
+    "estimate_days": 0.5,
+    "deps": [
+      "E0-12W"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-11-02"
+  },
+  {
+    "id": "E0-12AL",
+    "epic": "E0",
+    "title": "Compose-контракт в тестах worker: healthcheck по compose.yaml",
+    "estimate": "0.25 д",
+    "estimate_days": 0.25,
+    "deps": [
+      "E0-12W"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-11-02"
   }
 ]

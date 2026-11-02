@@ -1,9 +1,9 @@
 import { once } from "node:events";
 import { env } from "@sf/config";
 import type { QueueName } from "@sf/core";
-import { closeDb } from "@sf/db";
 import { type QueueFactory, closeRedis } from "@sf/runtime";
 import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
+import { clientsOf } from "@sf/runtime/test-support/redis-clients";
 import { Worker } from "bullmq";
 import type { Redis } from "ioredis";
 import {
@@ -19,10 +19,11 @@ import { z } from "zod";
 import { defineJob } from "../src/lib/define-job.js";
 import { type WorkerRuntime, startWorkerRuntime } from "../src/runtime.js";
 import {
+  keepDatabase,
   obliterateQueues,
-  openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  useTestDb,
   workerQueueFactory,
 } from "./helpers.int.js";
 
@@ -64,21 +65,23 @@ function marksOn(client: Redis): number {
     .filter((listener) => listener.name === "mark").length;
 }
 
-const db = openTestDb();
+const db = useTestDb({ beforeAll, afterAll }, { prepare: keepDatabase });
 const redis = openTestRedis();
 
 beforeAll(async () => {
   await obliterateQueues(redis, QUEUES);
-  await seedQueueSwitches(db);
+  await seedQueueSwitches(db());
   // The client writes its own errors (`createRedisHealthListeners` of the
   // client factories); an `error` with no listener would throw out of `emit`.
   redis.on("error", () => {});
 });
 
 afterAll(async () => {
-  await obliterateQueues(redis, QUEUES);
-  await closeDb(db);
-  await closeRedis(redis);
+  try {
+    await obliterateQueues(redis, QUEUES);
+  } finally {
+    await closeRedis(redis);
+  }
 });
 
 describe("the error listener of the workers", () => {
@@ -102,7 +105,7 @@ describe("the error listener of the workers", () => {
     const recorder = recordingLogger();
     runtime = await startWorkerRuntime({
       env,
-      db,
+      db: db(),
       redis,
       log: recorder.log,
       processors: {
@@ -250,16 +253,16 @@ describe("the error listener of the workers", () => {
     // name>`); the shared client has no name, and the other worker's copy
     // has its own.
     const name = `bull:${Buffer.from(first.name).toString("base64")}`;
-    const clients = String(await redis.call("CLIENT", "LIST"))
-      .split("\n")
-      .filter((entry) => entry.includes(` name=${name} `));
+    const clients = clientsOf(
+      String(await redis.call("CLIENT", "LIST")),
+    ).filter((client) => client.name === name);
     expect(clients).toHaveLength(1);
-    const id = /(?:^|\s)id=(\d+)\s/.exec(clients[0] ?? "")?.[1];
+    const id = clients[0]?.id;
     if (id === undefined) {
-      throw new Error(`no id in the CLIENT LIST entry of ${name}`);
+      throw new Error(`no CLIENT LIST entry of ${name}`);
     }
     const ready = once(first, "ready");
-    await redis.call("CLIENT", "KILL", "ID", id);
+    await redis.call("CLIENT", "KILL", "ID", String(id));
     await ready;
 
     first.emit("error", refused());

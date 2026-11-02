@@ -1,8 +1,7 @@
-import { env } from "@sf/config";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { closeDb, createDb } from "../src/client.js";
 import { pingDb } from "../src/health.js";
-import { openTestSql } from "../test-support/fixture.js";
+import { openTestDb, openTestSql } from "../test-support/fixture.js";
 import { TEST_STACK } from "../test-support/stack-guard.js";
 
 /**
@@ -45,7 +44,7 @@ describe("pingDb", () => {
    * "reports a failure" is half of its job.
    */
   it("resolves against a reachable database", async () => {
-    const db = createDb(env.DATABASE_URL);
+    const db = openTestDb();
     try {
       await expect(pingDb(db)).resolves.toBeUndefined();
     } finally {

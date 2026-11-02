@@ -9,13 +9,19 @@ import {
   createRequestRedis,
 } from "@sf/runtime";
 import { silentLogger } from "@sf/runtime/test-support/recording-logger";
+import { within } from "@sf/runtime/test-support/within";
 import type { Redis } from "ioredis";
 import {
   DEPENDENCY_TIMEOUT_MS,
   PROBE_DB_BOUNDS,
 } from "../src/lib/dependency-timeout.js";
 
-export { openTestDb } from "@sf/db/test-support/fixture";
+/**
+ * `keepDatabase` is the `prepare` of every file of this suite: the suite does
+ * not reset the database - every file cleans the rows it writes, by its own
+ * job id.
+ */
+export { keepDatabase, useTestDb } from "@sf/db/test-support/fixture";
 
 /**
  * Shared setup for the integration tests of the api.
@@ -28,7 +34,7 @@ export { openTestDb } from "@sf/db/test-support/fixture";
  * `.env.test`, then that `@sf/db`'s integration run has migrated the
  * database (this suite does not migrate it). A file that forgets this module
  * is still behind it. The connections are opened here all the same -
- * `openTestDb` and `openTestRedis` check their URL once more - so that a
+ * `useTestDb` and `openTestRedis` check their URL once more - so that a
  * file written by copying another inherits the guard, not a way around it.
  *
  * The Redis database is the api's own (`suiteRedisUrl(…, "api")`): this suite
@@ -72,10 +78,19 @@ export function openTestQueues(connection: Redis): QueueFactory {
 
 /**
  * How long a test client gets to reach `ready` on the local stack. Exported
- * for the case that tells a refusal apart from this wait
- * (`when-ready.int.test.ts`): its bound follows this one.
+ * for the bounds that follow this one: the case that tells a refusal apart
+ * from this wait, and the cases that sum the waits they make on a client.
  */
 export const READY_TIMEOUT_MS = 5_000;
+
+/** The part of an ioredis client `whenReady` reads: its status and two events. */
+interface ReadyingClient {
+  readonly status: string;
+  once(event: "ready", listener: () => void): unknown;
+  once(event: "error", listener: (err: Error) => void): unknown;
+  off(event: "ready", listener: () => void): unknown;
+  off(event: "error", listener: (err: Error) => void): unknown;
+}
 
 /**
  * Resolves once the client has a usable socket. A client with the offline
@@ -84,24 +99,20 @@ export const READY_TIMEOUT_MS = 5_000;
  * connect is an error with its reason, and one that never answers fails
  * after `READY_TIMEOUT_MS` - not a "Test timed out" that names nothing.
  */
-export async function whenReady(redis: Redis): Promise<void> {
+export async function whenReady(redis: ReadyingClient): Promise<void> {
   if (redis.status === "ready") {
     return;
   }
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      finish();
-      reject(
-        new Error(
-          `the test Redis client was not ready within ${READY_TIMEOUT_MS} ms (status ${redis.status})`,
-        ),
-      );
-    }, READY_TIMEOUT_MS);
+  let finish = (): void => undefined;
+  let answered = false;
+  const ready = new Promise<void>((resolve, reject) => {
     const onReady = (): void => {
+      answered = true;
       finish();
       resolve();
     };
     const onError = (err: Error): void => {
+      answered = true;
       finish();
       reject(
         new Error(`the test Redis client failed to connect: ${err.message}`, {
@@ -109,12 +120,23 @@ export async function whenReady(redis: Redis): Promise<void> {
         }),
       );
     };
-    const finish = (): void => {
-      clearTimeout(timer);
+    finish = (): void => {
       redis.off("ready", onReady);
       redis.off("error", onError);
     };
     redis.once("ready", onReady);
     redis.once("error", onError);
   });
+  try {
+    await within(ready, READY_TIMEOUT_MS, "the test Redis client to be ready");
+  } catch (err) {
+    if (answered || !(err instanceof Error)) {
+      throw err;
+    }
+    // The status once the wait ran out, not when it began: what the client
+    // was doing at the deadline is what explains it.
+    throw new Error(`${err.message} (status ${redis.status})`, { cause: err });
+  } finally {
+    finish();
+  }
 }

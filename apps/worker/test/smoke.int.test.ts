@@ -1,5 +1,4 @@
 import { env } from "@sf/config";
-import { closeDb } from "@sf/db";
 import { closeRedis } from "@sf/runtime";
 import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -8,10 +7,12 @@ import { type WorkerRuntime, startWorkerRuntime } from "../src/runtime.js";
 import {
   deleteSmokeUsage,
   findUsageRow,
+  keepDatabase,
   obliterateQueues,
-  openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  startedRuntime,
+  useTestDb,
   waitFor,
 } from "./helpers.int.js";
 
@@ -22,17 +23,21 @@ import {
  */
 const QUEUES = ["system.smoke", "system.dlq", "system.heartbeat"] as const;
 
-const db = openTestDb();
+const db = useTestDb(
+  { beforeAll, afterAll },
+  { prepare: keepDatabase, beforeClose: deleteSmokeUsage },
+);
 const redis = openTestRedis();
-let runtime: WorkerRuntime;
+/** Unset until the `beforeAll` of the file starts it. */
+let runtime: WorkerRuntime | undefined;
 
 beforeAll(async () => {
   await obliterateQueues(redis, QUEUES);
-  await deleteSmokeUsage(db);
-  await seedQueueSwitches(db);
+  await deleteSmokeUsage(db());
+  await seedQueueSwitches(db());
   runtime = await startWorkerRuntime({
     env,
-    db,
+    db: db(),
     redis,
     log: silentLogger(),
     processors: { "system.smoke": systemSmokeJob },
@@ -42,24 +47,28 @@ beforeAll(async () => {
   });
 });
 
+// This hook closes what the file opened and never reaches for the database.
+// A hook that throws here skips the afterAll hooks registered before it,
+// `beforeClose`/`closeDb` of `useTestDb` included (vitest 2 stack, E0-12AK).
 afterAll(async () => {
-  await runtime.close();
-  await obliterateQueues(redis, QUEUES);
-  await deleteSmokeUsage(db);
-  await closeDb(db);
-  await closeRedis(redis);
+  try {
+    await runtime?.close();
+    await obliterateQueues(redis, QUEUES);
+  } finally {
+    await closeRedis(redis);
+  }
 });
 
 describe("system.smoke", () => {
   it("runs the job and writes what it cost", async () => {
     const jobId = await systemSmokeJob.enqueue(
-      runtime.queues.get("system.smoke"),
+      startedRuntime(runtime).queues.get("system.smoke"),
       { requestedAtMs: Date.now() },
     );
 
     // Polled, not awaited on an event: the job runs in another event loop and
     // what is asserted is the row it leaves behind.
-    const row = await waitFor(() => findUsageRow(db, jobId), {
+    const row = await waitFor(() => findUsageRow(db(), jobId), {
       what: `the api_usage_log row of job ${jobId}`,
     });
 

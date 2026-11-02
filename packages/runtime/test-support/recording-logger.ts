@@ -1,4 +1,6 @@
+import type { Env } from "@sf/config";
 import { type Logger, type LoggerOptions, pino } from "pino";
+import { buildLoggerOptions } from "../src/logger.js";
 
 /**
  * A real pino logger whose lines a test can read - the one capture of the
@@ -70,6 +72,17 @@ export function recordingLogger(
       written.length = 0;
     },
   };
+}
+
+/**
+ * A recorder on the options the service builds its logger from
+ * (`buildLoggerOptions`, as the entry points do) - its serializers and its
+ * `redact` - without the transport, which would write to a stream of its own
+ * instead of the recorder (and which pino refuses next to a stream).
+ */
+export function recordingServiceLogger(env: Env): Recorder {
+  const { transport: _unused, ...options } = buildLoggerOptions(env);
+  return recordingLogger(options);
 }
 
 /** A logger that writes nothing, for the cases that assert something else. */

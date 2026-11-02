@@ -1,5 +1,4 @@
 import { env } from "@sf/config";
-import { closeDb } from "@sf/db";
 import { closeRedis } from "@sf/runtime";
 import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -7,10 +6,12 @@ import { z } from "zod";
 import { defineJob } from "../src/lib/define-job.js";
 import { type WorkerRuntime, startWorkerRuntime } from "../src/runtime.js";
 import {
+  keepDatabase,
   obliterateQueues,
-  openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  startedRuntime,
+  useTestDb,
   waitFor,
 } from "./helpers.int.js";
 
@@ -38,16 +39,17 @@ const slowJob = defineJob({
   opts: { attempts: 1 },
 });
 
-const db = openTestDb();
+const db = useTestDb({ beforeAll, afterAll }, { prepare: keepDatabase });
 const redis = openTestRedis();
-let runtime: WorkerRuntime;
+/** Unset until the `beforeAll` of the file starts it. */
+let runtime: WorkerRuntime | undefined;
 
 beforeAll(async () => {
   await obliterateQueues(redis, QUEUES);
-  await seedQueueSwitches(db);
+  await seedQueueSwitches(db());
   runtime = await startWorkerRuntime({
     env,
-    db,
+    db: db(),
     redis,
     log: silentLogger(),
     processors: { "system.smoke": slowJob },
@@ -56,15 +58,17 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await runtime.close();
-  await obliterateQueues(redis, QUEUES);
-  await closeDb(db);
-  await closeRedis(redis);
+  try {
+    await runtime?.close();
+    await obliterateQueues(redis, QUEUES);
+  } finally {
+    await closeRedis(redis);
+  }
 });
 
 describe("graceful shutdown", () => {
   it("waits for the job in flight before it lets go of the worker", async () => {
-    const queue = runtime.queues.get("system.smoke");
+    const queue = startedRuntime(runtime).queues.get("system.smoke");
     const jobId = await slowJob.enqueue(queue, {
       marker: `drain-${Date.now()}`,
     });
@@ -75,7 +79,7 @@ describe("graceful shutdown", () => {
     );
     expect(finished).toBe(false);
 
-    await runtime.closeWorkers();
+    await startedRuntime(runtime).closeWorkers();
 
     expect(finished).toBe(true);
     const job = await queue.getJob(jobId);

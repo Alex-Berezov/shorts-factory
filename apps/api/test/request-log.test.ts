@@ -1,5 +1,8 @@
 import { loadEnv } from "@sf/config";
-import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
+import {
+  recordingLogger,
+  recordingServiceLogger,
+} from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AppInstance } from "../src/lib/app-instance.js";
 import {
@@ -13,12 +16,7 @@ import {
   ROOT_CAUSE,
   registerFailingRoutes,
 } from "./error-routes.js";
-import {
-  AUTH_HEADER,
-  buildTestApp,
-  parseErrorBody,
-  recordingServiceLogger,
-} from "./helpers.js";
+import { AUTH_HEADER, buildTestApp, parseErrorBody } from "./helpers.js";
 
 /**
  * The log is the one place a failure is recorded in full - and the one place

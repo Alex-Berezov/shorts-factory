@@ -2,7 +2,7 @@ import { type Env, loadEnv } from "@sf/config";
 import { AppError } from "@sf/core";
 import { describe, expect, it } from "vitest";
 import { LOGGED_DETAILS, buildLoggerOptions } from "../src/logger.js";
-import { recordingLogger } from "../test-support/recording-logger.js";
+import { recordingServiceLogger } from "../test-support/recording-logger.js";
 
 /** A parsed config, built the way the services build it - no hand-made object. */
 function envWith(overrides: Record<string, string> = {}): Env {
@@ -13,12 +13,6 @@ function envWith(overrides: Record<string, string> = {}): Env {
     ADMIN_PASSWORD: "testtest",
     ...overrides,
   });
-}
-
-/** A recorder on the options the services build their logger from. */
-function serviceLogger() {
-  const { transport: _unused, ...options } = buildLoggerOptions(envWith());
-  return recordingLogger(options);
 }
 
 const REDIS_PASSWORD = "sup3r-s3cret";
@@ -61,7 +55,7 @@ describe("the logger of a service", () => {
   it("keeps the redis password out of the log, and the command name in", () => {
     // ioredis hangs the command on the error it emits; the client of every
     // process logs the whole error on purpose.
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.error({ err: ioredisError() }, "redis client error");
 
@@ -71,7 +65,7 @@ describe("the logger of a service", () => {
   });
 
   it("keeps the password of a redis error under another key out of the log", () => {
-    const { log, raw } = serviceLogger();
+    const { log, raw } = recordingServiceLogger(envWith());
 
     log.error({ queue: "system.smoke", failure: ioredisError() }, "job failed");
 
@@ -94,7 +88,7 @@ describe("the logger of a service", () => {
     (_where, wrap: (inner: Error) => Error) => {
       // `throw new Error(msg, { cause })` around a failed command: a wildcard
       // of `redact` reaches one level, a cause can be any number deep.
-      const { log, lines, raw } = serviceLogger();
+      const { log, lines, raw } = recordingServiceLogger(envWith());
 
       log.error({ err: wrap(ioredisError()) }, "start failed");
 
@@ -112,7 +106,7 @@ describe("the logger of a service", () => {
       config: { url: "https://example.test/v3/videos?key=AIza-leaked-key" },
       response: { status: 403, data: { owner: "private-channel-data" } },
     });
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.error({ err: new Error("sync failed", { cause: refused }) }, "x");
     log.error({ err: refused }, "y");
@@ -131,7 +125,7 @@ describe("the logger of a service", () => {
       query: "insert into secrets values ($1)",
       parameters: ["user-private-value"],
     });
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.error({ err: refused }, "query failed");
     log.error({ err: new Error("write failed", { cause: refused }) }, "x");
@@ -147,7 +141,7 @@ describe("the logger of a service", () => {
     const thrown = new AppError("YT_UNAVAILABLE", "upstream refused", 503, {
       url: "https://example.test/?key=AIza-leaked-key",
     });
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.error({ err: thrown }, "job failed");
     log.error({ err: new Error("sync failed", { cause: thrown }) }, "x");
@@ -172,7 +166,7 @@ describe("the logger of a service", () => {
       url: "https://example.test/?key=AIza-leaked-key",
     });
     Object.defineProperty(thrown, LOGGED_DETAILS, { value: "[omitted]" });
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.error({ err: thrown }, "request failed");
 
@@ -186,7 +180,7 @@ describe("the logger of a service", () => {
       code: "FST_ERR_CTP_INVALID_MEDIA_TYPE",
       statusCode: 415,
     });
-    const { log, lines } = serviceLogger();
+    const { log, lines } = recordingServiceLogger(envWith());
 
     log.error({ err: refused }, "request failed");
 
@@ -200,7 +194,7 @@ describe("the logger of a service", () => {
     const foreign = Object.assign(new Error("refused"), {
       details: { token: "foreign-token" },
     });
-    const { log, raw } = serviceLogger();
+    const { log, raw } = recordingServiceLogger(envWith());
 
     log.error({ err: foreign }, "x");
 
@@ -208,7 +202,7 @@ describe("the logger of a service", () => {
   });
 
   it("writes the members of an AggregateError through the same rule", () => {
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.error(
       { err: new AggregateError([ioredisError(), new Error("second")], "all") },
@@ -225,7 +219,7 @@ describe("the logger of a service", () => {
     const first = new Error("first");
     const second = new Error("second", { cause: first });
     Object.defineProperty(first, "cause", { value: second });
-    const { log, lines } = serviceLogger();
+    const { log, lines } = recordingServiceLogger(envWith());
 
     log.error({ err: first }, "circular");
 
@@ -242,7 +236,7 @@ describe("the logger of a service", () => {
   it("keeps the redis password out of a cause that is a plain object", () => {
     // Not an error - no class, no stack - but the command rides on it all
     // the same.
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.error(
       {
@@ -274,7 +268,7 @@ describe("the logger of a service", () => {
       cause: { code: "WRAPPED", cause: new Error("under the wrapper") },
     });
     const chained = new Error("outer", { cause: new Error("in the chain") });
-    const { log, lines } = serviceLogger();
+    const { log, lines } = recordingServiceLogger(envWith());
 
     log.error({ err: new AggregateError([member], "all") }, "a");
     log.error({ err: wrapped }, "b");
@@ -303,7 +297,7 @@ describe("the logger of a service", () => {
 
   it("writes a cause and members that are not objects as they are", () => {
     // `new Error(msg, { cause: "ECONNRESET" })` names its reason in a string.
-    const { log, lines } = serviceLogger();
+    const { log, lines } = recordingServiceLogger(envWith());
 
     log.error(
       { err: new Error("read failed", { cause: "ECONNRESET by the peer" }) },
@@ -331,7 +325,7 @@ describe("the logger of a service", () => {
     for (let i = 0; i < 12; i += 1) {
       chain = new Error(`link ${i}`, { cause: chain });
     }
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.error({ err: chain }, "deep");
 
@@ -357,7 +351,7 @@ describe("the logger of a service", () => {
         return bottom;
       },
     });
-    const { log, lines } = serviceLogger();
+    const { log, lines } = recordingServiceLogger(envWith());
 
     log.error({ err: outer }, "counted");
 
@@ -384,7 +378,7 @@ describe("the logger of a service", () => {
       links.unshift(deep);
     }
     const deepOuter = new Error("link 0", { cause: deep });
-    const { log, lines } = serviceLogger();
+    const { log, lines } = recordingServiceLogger(envWith());
 
     log.error({ err: outer }, "a");
     log.error({ err: deepOuter }, "b");
@@ -466,7 +460,7 @@ describe("the logger of a service", () => {
   ])(
     "writes %s under err without throwing and without a secret",
     (_what, err) => {
-      const { log, lines, raw } = serviceLogger();
+      const { log, lines, raw } = recordingServiceLogger(envWith());
 
       expect(() => log.error({ err }, "odd")).not.toThrow();
 
@@ -512,7 +506,7 @@ describe("the logger of a service", () => {
     (_where, line: () => Record<string, unknown>) => {
       // `redact` reaches one level per wildcard; a command can sit at any
       // depth of what a caller logs.
-      const { log, raw } = serviceLogger();
+      const { log, raw } = recordingServiceLogger(envWith());
 
       log.error(line(), "job failed");
 
@@ -523,7 +517,7 @@ describe("the logger of a service", () => {
   );
 
   it("redacts a command that is the whole object of a line", () => {
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.info({ name: "auth", args: [REDIS_PASSWORD] }, "command");
 
@@ -532,7 +526,7 @@ describe("the logger of a service", () => {
   });
 
   it("leaves what the caller logged as it was", () => {
-    const { log } = serviceLogger();
+    const { log } = recordingServiceLogger(envWith());
     const command = { name: "auth", args: [REDIS_PASSWORD] };
     const error = ioredisError();
     const line = { a: { b: { command } }, list: [{ command }], error };
@@ -549,7 +543,7 @@ describe("the logger of a service", () => {
   });
 
   it("redacts a command met twice in a line, and one in a cycle", () => {
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
     const command = { name: "auth", args: [REDIS_PASSWORD] };
     const looped: Record<string, unknown> = { command };
     looped.self = looped;
@@ -569,7 +563,7 @@ describe("the logger of a service", () => {
   it("writes an error under another key with its class and fields", () => {
     // Copied rather than changed, and copied as what it is: what pino writes
     // of an error that is not under `err` is its enumerable fields.
-    const { log, lines } = serviceLogger();
+    const { log, lines } = recordingServiceLogger(envWith());
 
     log.error(
       { failure: Object.assign(ioredisError(), { code: "WRONGPASS" }) },
@@ -584,7 +578,7 @@ describe("the logger of a service", () => {
 
   it("keeps args that are not a command's", () => {
     // Only the shape of a command of ioredis: a name and a list of args.
-    const { log, lines } = serviceLogger();
+    const { log, lines } = recordingServiceLogger(envWith());
 
     log.info(
       { cli: { args: ["--dry-run"] }, call: { name: "probe", args: "x" } },
@@ -607,7 +601,7 @@ describe("the logger of a service", () => {
   }
 
   it("redacts a command at the deepest level the walk goes to, and keeps its name", () => {
-    const { log, raw } = serviceLogger();
+    const { log, raw } = recordingServiceLogger(envWith());
 
     // The command is eight levels below the object of the line, the last
     // one the walk goes into.
@@ -619,7 +613,7 @@ describe("the logger of a service", () => {
 
   it("writes a branch past the deepest level as truncated, not as it was", () => {
     // Fail closed: what the walk did not look into may hold a password.
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.error(nested(9, { command: { name: "auth", args: [REDIS_PASSWORD] } }));
 
@@ -630,7 +624,7 @@ describe("the logger of a service", () => {
   it("walks again a value met first too deep to be walked whole", () => {
     // Met first at the limit, its command was cut off; met again near the
     // top, it is written whole - not with the cut of its first answer.
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
     const shared = {
       inner: { command: { name: "auth", args: [REDIS_PASSWORD] } },
     };
@@ -657,7 +651,7 @@ describe("the logger of a service", () => {
         readonly id = "job-1";
         readonly command = { name: "auth", args: [REDIS_PASSWORD] };
       }
-      const { log, raw } = serviceLogger();
+      const { log, raw } = recordingServiceLogger(envWith());
 
       log.error(line(new Holder()), "x");
 
@@ -673,7 +667,7 @@ describe("the logger of a service", () => {
       readonly name = "auth";
       readonly args = [REDIS_PASSWORD];
     }
-    const { log, raw } = serviceLogger();
+    const { log, raw } = recordingServiceLogger(envWith());
 
     log.error({ a: { b: { pending: new Command() } } }, "x");
 
@@ -692,7 +686,7 @@ describe("the logger of a service", () => {
     (_where, bindings) => {
       // pino writes the bindings of `log.child()` through `redact` and the
       // serializers, not through `formatters.log`.
-      const { log, raw } = serviceLogger();
+      const { log, raw } = recordingServiceLogger(envWith());
 
       log.child(bindings).error("x");
 
@@ -720,7 +714,7 @@ describe("the logger of a service", () => {
   it.each(["req", "res"])(
     "keeps the redis password of a command under %s out of the log of a worker",
     (key) => {
-      const { log, raw } = serviceLogger();
+      const { log, raw } = recordingServiceLogger(envWith());
 
       log.error(
         {
@@ -751,7 +745,7 @@ describe("the logger of a service", () => {
 
   it("names the command of an error whose args are not a list", () => {
     // The name is what an operator reads; it does not depend on the args.
-    const { log, lines } = serviceLogger();
+    const { log, lines } = recordingServiceLogger(envWith());
     const err = Object.assign(new Error("ERR wrong number of arguments"), {
       command: { name: "get", args: "key" },
     });
@@ -762,7 +756,7 @@ describe("the logger of a service", () => {
   });
 
   it("copies a frozen command without throwing and without its password", () => {
-    const { log, raw } = serviceLogger();
+    const { log, raw } = recordingServiceLogger(envWith());
     const command = Object.freeze({ name: "auth", args: [REDIS_PASSWORD] });
     const line = Object.freeze({ held: Object.freeze({ command }) });
 
@@ -777,7 +771,7 @@ describe("the logger of a service", () => {
     // `inner` walked first under `outer` points back at it, a cycle there;
     // met again under `elsewhere` at the same depth, `outer` is no ancestor
     // of it, and is written.
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
     const outer: Record<string, unknown> = {
       command: { name: "auth", args: [REDIS_PASSWORD] },
     };
@@ -824,7 +818,7 @@ describe("the logger of a service", () => {
   it("redacts the credentials a caller sends", () => {
     // Basic auth puts the only secret of the api into `authorization`; one
     // plugin logging the headers would write it to disk in plain base64.
-    const { log, lines, raw } = serviceLogger();
+    const { log, lines, raw } = recordingServiceLogger(envWith());
 
     log.info(
       {

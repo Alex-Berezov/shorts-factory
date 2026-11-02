@@ -174,6 +174,64 @@
   своя входная проверка; `fileParallelism: false` и `globalSetup` безусловны. Живой кейс
   `closeRedis` - int-набор `apps/api` (`test/close-redis.int.test.ts`), своего int-набора у
   `@sf/runtime` нет.
+- **test-support приложений** (E0-12W; решения техлида Р1 E0-12N 21.10.2026, Р-Б и Р-В E0-12W
+  02.11.2026). Тестовые помощники, которые нужны и api, и worker, живут в одном месте -
+  `packages/runtime/test-support/`, по подпути на модуль в `exports` `@sf/runtime`:
+  - `@sf/runtime/test-support/within` - `within(work, ms, what)`: одно ожидание с дедлайном поверх
+    `withDeadline` рантайма (`unref: false`), отказ называет `what` и предел, отказ самой работы
+    проходит как есть, таймер снимается в обоих исходах; заменил ручные таймеры четырёх ожиданий:
+    `readyWithin` и `exitOf` сняты (вызов `within` на месте), `verdictOn` и `whenReady` остались
+    своими функциями поверх `within` (у них своя работа: подписка и разбор исхода). `startOf` остаётся на `withDeadline`
+    напрямую: его отказ по дедлайну - свой текст с хвостом вывода ребёнка, а не «`what`: no answer»;
+  - `.../child-run` - ребёнок-процесс: `collectOutput`, `endOf` (отказ наблюдается сразу, без
+    unhandled rejection до `await`), `startOf` (имя ребёнка параметром, причина - хвост вывода и по
+    дедлайну, и по `close`), `stopped` (сигнал и `close` под дедлайном; не ответивший к дедлайну
+    ребёнок добивается `SIGKILL` с ожиданием `close` не дольше `KILL_DEADLINE_MS`, отказ - исходный,
+    о пропущенной остановке; остановка самим `SIGKILL` второго не шлёт - предел `deadlineMs`, иначе
+    `deadlineMs + KILL_DEADLINE_MS`; уже вышедшему ребёнку сигнал не шлётся, но его `close` ждётся
+    под `deadlineMs`, закрывшийся - сразу; «закрылся» - вышел, пайпы закрыты и IPC-канал разорван,
+    `connected === false`: Node до `close` ждёт и конца канала), `killed(child, name)` (добивание
+    после провала: `SIGKILL` под `KILL_DEADLINE_MS`, свой отказ проглочен, бросает вызывающий -
+    исходный), `endWithin(child, ended, ms, name)` (конец под пределом, промах - `killed`, затем
+    отказ о конце), `signalled(child)` (`"signal"` по IPC - ребёнок поднимает сигнал сам: на Windows
+    родитель его не доставит; вызов ждут - `await signalled(child)`; при `connected === false` не
+    шлёт ничего; любой отказ отправки - канал закрылся или закрывается под ней - уходит в колбэк
+    отправки, а не в `error` ребёнка, и вызов завершается успешно: недошедший сигнал виден как
+    пропущенный конец в `endWithin`, а не как ошибка отправки), `freePort`. Бюджет хука или кейса - сумма
+    этих констант по каждому ожиданию;
+  - `.../manifest` - `readPackageManifest(packageDir, schema)` - единственный читатель
+    `package.json` в тестах приложений (JSON и схема Zod, отказ с путём файла); его берут
+    `dev-command` и `apps/worker/test/healthcheck-imports.test.ts`. Корневой `readManifest(dir)`
+    (`test/repo-files.ts`) - читатель корневого проекта, отдельный;
+  - `.../dev-command` - `manifestScripts(packageDir)` поверх `readPackageManifest` (`zod` - только в
+    `devDependencies` рантайма и только в `test-support/**`/`test/**`), `devCommandParts(command)`
+    (части через ровно один пробел, иначе отказ),
+    `isWatcherCommand`, `watcherScripts`; у приложения в `test/dev-command.ts` остаются свой
+    `DEV_COMMAND` и тонкие привязки к своему каталогу и команде;
+  - `.../recording-logger` - `recordingLogger`, `silentLogger` и `recordingServiceLogger(env)`
+    (опции `buildLoggerOptions` без `transport` - срез в одном месте);
+  - `.../redis-clients` - `clientsOf` (разбор `CLIENT LIST`: `id`, `db`, `lib`, `name`; строка без
+    `id`/`db` - бросок со строкой); окно id и голый клиент (`forkClientsOf`, `openBareClient`) -
+    у единственного потребителя, `apps/api/test/entry-point.int.test.ts`.
+
+  `test-support/stub-redis.ts` вне `exports`: его берут только тесты рантайма. Импортируют
+  подпути `apps/api/test`, `apps/worker/test` и тесты самого рантайма (`packages/runtime/test`,
+  относительным путём); корневой `test/` в эти модули не ходит - один разборщик импортов для
+  корня и приложений вынесен в E0-12AJ. Граница с `src`: test-support берёт из `src` своего
+  пакета (`../src/deadline.js`, `../src/logger.js`), `src` из test-support - никогда (замок
+  `NOT_SHIPPED`/`intoTestSupport` в `test/dependency-direction.ts`). Подпуть заводится, только
+  когда у модуля есть потребитель в `apps/*` (правило «test-support в `exports`» выше).
+- **Порядок хуков** (E0-12W, :695): оба конфига пресета несут `sequence: { hooks: "stack" }` -
+  `beforeAll` в порядке регистрации, `afterAll` в обратном. Это умолчание vitest 2, записанное
+  явно: `useTestDb`, вызванный до хуков файла, открывает ручку раньше их и закрывает позже их
+  уборки. Замки: настройка в обоих конфигах - кейс «the order of the hooks»
+  `test/vitest-preset.test.ts`; сам порядок у vitest - `packages/db/test/hook-order.int.test.ts`
+  (настоящие `useTestDb` и `afterAll` файла, обращающийся к базе через ручку; при `list` и
+  `parallel` файл красный). Следствие для файлов: в стеке хуки идут циклом, и брошенный `afterAll`
+  файла пропускает все следующие, в том числе закрытие ручки `useTestDb`. Поэтому строки базы
+  файл убирает в `beforeClose` фикстуры, свои ручки закрывает в `finally`, а то, что строит его
+  `beforeAll` (приложение, рантайм), держит как `T | undefined` - упавший `beforeAll` не даёт
+  вторичного `TypeError` в `afterAll`.
 - **Границы** (решение техлида 17.10.2026, круг 2): корень репозитория пакеты берут только из
   `@sf/config/paths` (`repoRoot`, `testEnvFilePath`), корневые тесты и `scripts/*.mjs` - только
   из `scripts/lib/paths.mjs` (E0-12F); перекрёстных импортов нет. Подпуть `./paths` держит

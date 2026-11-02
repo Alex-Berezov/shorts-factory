@@ -1,6 +1,8 @@
+import { loadEnv } from "@sf/config";
 import { describe, expect, it } from "vitest";
 import {
   recordingLogger,
+  recordingServiceLogger,
   silentLogger,
 } from "../test-support/recording-logger.js";
 
@@ -83,5 +85,36 @@ describe("silentLogger", () => {
 
     expect(log.level).toBe("silent");
     expect(log.isLevelEnabled("fatal")).toBe(false);
+  });
+});
+
+describe("recordingServiceLogger", () => {
+  /**
+   * The config of a developer's machine: the one whose options carry the
+   * pretty transport, which the recorder has to leave out.
+   */
+  const developmentEnv = loadEnv({
+    NODE_ENV: "development",
+    DATABASE_URL: "postgres://sf:sf@localhost:5442/shorts_factory_test",
+    REDIS_URL: "redis://localhost:6389/1",
+    ADMIN_PASSWORD: "testtest",
+  });
+
+  it("records through the redact of the service, without its transport", () => {
+    const { log, lines, raw } = recordingServiceLogger(developmentEnv);
+
+    log.info(
+      { req: { headers: { authorization: "Basic c2VjcmV0LXRva2Vu" } } },
+      "a request",
+    );
+
+    expect(raw()).not.toContain("c2VjcmV0LXRva2Vu");
+    expect(lines).toEqual([
+      expect.objectContaining({
+        level: "info",
+        msg: "a request",
+        req: { headers: { authorization: "[Redacted]" } },
+      }),
+    ]);
   });
 });

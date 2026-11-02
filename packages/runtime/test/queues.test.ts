@@ -389,9 +389,10 @@ describe("createQueueFactory", () => {
 
   /**
    * BullMQ hands every error of the shared client to every `Queue` on it. A
-   * refusal that is not a connection failure - a wrong password, a name the
-   * resolver of Docker cannot answer yet - must still be one line per event:
-   * the client's own, at the level that fades.
+   * refusal that is not a connection failure - a wrong password, no password
+   * at all - must still be one line per event: the client's own, at the level
+   * that fades. A name the resolver of Docker cannot answer yet (`EAI_AGAIN`)
+   * is a connection failure, and the case above keeps it silent.
    */
   it.each([
     Object.assign(

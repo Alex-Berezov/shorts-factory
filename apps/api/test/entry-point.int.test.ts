@@ -9,11 +9,25 @@ import {
   TEST_REDIS_DATABASE_OF,
   suiteRedisUrl,
 } from "@sf/db/test-support/stack-guard";
+import {
+  KILL_DEADLINE_MS,
+  collectOutput,
+  endOf,
+  freePort,
+  killed,
+  stopped,
+} from "@sf/runtime/test-support/child-run";
+import { recordingServiceLogger } from "@sf/runtime/test-support/recording-logger";
+import {
+  type ListedClient,
+  clientsOf,
+} from "@sf/runtime/test-support/redis-clients";
+import { within } from "@sf/runtime/test-support/within";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { SHUTDOWN_TIMEOUT_MS, composeApp } from "../src/compose-app.js";
 import { devCommandParts } from "./dev-command.js";
-import { openTestRedis, whenReady } from "./helpers.int.js";
-import { basicAuthHeader, recordingServiceLogger } from "./helpers.js";
+import { READY_TIMEOUT_MS, openTestRedis, whenReady } from "./helpers.int.js";
+import { basicAuthHeader } from "./helpers.js";
 
 /**
  * The entry point itself, against the stack of `infra/docker-compose.yml`:
@@ -32,75 +46,41 @@ const REJECTED_COMMIT = "abc1234 (dirty)";
 /** How long the process may take to come up and answer. */
 const START_DEADLINE_MS = 10_000;
 
-/** A port nothing listens on right now. */
-async function freePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>((resolve) => {
-    probe.listen(0, "127.0.0.1", resolve);
-  });
-  const address = probe.address();
-  await new Promise<void>((resolve) => {
-    probe.close(() => {
-      resolve();
-    });
-  });
-  if (address === null || typeof address === "string") {
-    throw new Error("the port probe is not listening on a tcp port");
-  }
-  return address.port;
-}
+/**
+ * Room past a deadline the process or the test keeps by itself: for the
+ * process to exit once its stop is done, for the hook to return once its
+ * waits are done.
+ */
+const EXIT_ROOM_MS = 1_000;
+
+/**
+ * How long a stopped process may take to close: the deadline of its stop and
+ * the room for its exit (`EXIT_ROOM_MS`).
+ */
+const STOP_DEADLINE_MS = SHUTDOWN_TIMEOUT_MS + EXIT_ROOM_MS;
+
+/**
+ * The bound of a hook that stops a forked api: the stop (`stopApi`), the
+ * kill of a process that missed it (`KILL_DEADLINE_MS`, `stopped`) and the
+ * room for the hook to return (`EXIT_ROOM_MS`).
+ */
+const STOP_HOOK_MS = STOP_DEADLINE_MS + KILL_DEADLINE_MS + EXIT_ROOM_MS;
+
+/** The api as the failures of its waits name it. */
+const NAME = "the api";
 
 /** Asks the page until the process answers it or the deadline passes. */
-async function statusOf(port: number): Promise<unknown> {
-  const deadline = performance.now() + START_DEADLINE_MS;
-  for (;;) {
-    try {
+function statusOf(port: number): Promise<unknown> {
+  return vi.waitFor(
+    async () => {
       const res = await fetch(`http://127.0.0.1:${port}/system/status`, {
         headers: { authorization: basicAuthHeader(env.ADMIN_PASSWORD) },
       });
       expect(res.status).toBe(200);
       return await res.json();
-    } catch (error) {
-      if (performance.now() > deadline) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-}
-
-/** A client of `CLIENT LIST`, by the fields the cases read. */
-interface ListedClient {
-  id: number;
-  db: string;
-  /** What the client said it is (`CLIENT SETINFO LIB-NAME`); "" when it said nothing. */
-  lib: string;
-}
-
-/**
- * `id`, `db` and `lib-name` of each client `CLIENT LIST` names. A line
- * without an `id` or a `db` it can read is thrown with the line: a client
- * that became `NaN` would fall out of every window of ids without a word
- * (L-028).
- */
-function clientsOf(list: string): ListedClient[] {
-  return list
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map((line) => {
-      const id = /(?:^|\s)id=(\d+)(?=\s|$)/.exec(line)?.[1];
-      const db = /(?:^|\s)db=(\d+)(?=\s|$)/.exec(line)?.[1];
-      if (id === undefined || db === undefined) {
-        throw new Error(
-          `CLIENT LIST gave a line without an id or a db to read: ${JSON.stringify(line)}`,
-        );
-      }
-      return {
-        id: Number(id),
-        db,
-        lib: /(?:^|\s)lib-name=(\S*)/.exec(line)?.[1] ?? "",
-      };
-    });
+    },
+    { timeout: START_DEADLINE_MS, interval: 100 },
+  );
 }
 
 /** The library name ioredis gives its connections: `ioredis`, or `ioredis(<tag>)`. */
@@ -153,7 +133,9 @@ interface BareClient {
  * answer is a rejection that says so, and an error after it - the server
  * dropping the socket - is the end of the socket, not an uncaught exception
  * of the vitest worker. An answer that is no id is a rejection with the
- * answer, the socket destroyed; otherwise the caller destroys it.
+ * answer, the socket destroyed; so is a server that gives none within
+ * `READY_TIMEOUT_MS`, the wait of a test client for its server. Otherwise
+ * the caller destroys the socket.
  */
 async function openBareClient(redisUrl: string): Promise<BareClient> {
   const { hostname, port } = new URL(redisUrl);
@@ -163,7 +145,7 @@ async function openBareClient(redisUrl: string): Promise<BareClient> {
     );
   }
   const socket = connect({ host: hostname, port: Number(port) });
-  const id = await new Promise<number>((resolve, reject) => {
+  const answered = new Promise<number>((resolve, reject) => {
     let reply = "";
     const settle = (): void => {
       socket.off("error", onError);
@@ -204,6 +186,18 @@ async function openBareClient(redisUrl: string): Promise<BareClient> {
       socket.write("CLIENT ID\r\n");
     });
   });
+  let id: number;
+  try {
+    id = await within(
+      answered,
+      READY_TIMEOUT_MS,
+      "the answer of the server to CLIENT ID of the bare client",
+    );
+  } catch (err) {
+    // A socket that got no answer is not left open behind the failure.
+    socket.destroy();
+    throw err;
+  }
   // From here on an error only ends the socket; the case reads the list.
   socket.on("error", () => undefined);
   return { id, socket };
@@ -226,31 +220,30 @@ const CONNECTIONS_GONE_DEADLINE_MS = 5_000;
 /**
  * The bound of the case of the Redis databases: every wait in it ends by its
  * own deadline, with its own reason, before the bound of the case would cut
- * it short with none - the page (`START_DEADLINE_MS`), the named clients of
- * the fork (`START_DEADLINE_MS`, `forkClientsOf`), the stop of the process
- * (`SHUTDOWN_TIMEOUT_MS`, and a second for its exit), the connections
- * leaving with it (`CONNECTIONS_GONE_DEADLINE_MS`) - and five seconds of
- * room. The test timeout of the suite (15 s) is below their sum.
+ * it short with none - the page (`START_DEADLINE_MS`), the bare client and
+ * the test client (`READY_TIMEOUT_MS` each: `openBareClient`, `whenReady`),
+ * the named clients of the fork (`START_DEADLINE_MS`, `forkClientsOf`), the
+ * stop of the process (`STOP_DEADLINE_MS`, and `KILL_DEADLINE_MS` for one
+ * that misses it), the connections leaving with it
+ * (`CONNECTIONS_GONE_DEADLINE_MS`) - and five seconds of room. The test
+ * timeout of the suite (15 s) is below their sum.
  */
 const REDIS_DATABASES_CASE_MS =
   2 * START_DEADLINE_MS +
-  SHUTDOWN_TIMEOUT_MS +
-  1_000 +
+  2 * READY_TIMEOUT_MS +
+  STOP_DEADLINE_MS +
+  KILL_DEADLINE_MS +
   CONNECTIONS_GONE_DEADLINE_MS +
   5_000;
 
-/** Stops a child and waits for its end; a child already ended is left be. */
-async function stopped(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-  const exited = new Promise<void>((resolve) => {
-    child.on("exit", () => {
-      resolve();
-    });
-  });
-  child.kill();
-  await exited;
+/**
+ * Stops a forked api (`stopped`): a process that misses `STOP_DEADLINE_MS`
+ * is killed, so the stop lasts `STOP_DEADLINE_MS + KILL_DEADLINE_MS` at
+ * most; one that has ended is sent nothing and its close is awaited within
+ * `STOP_DEADLINE_MS`; one that has closed is left be.
+ */
+function stopApi(child: ChildProcess): Promise<void> {
+  return stopped(child, { deadlineMs: STOP_DEADLINE_MS, name: NAME });
 }
 
 /** A forked entry point, and what the cases read of it. */
@@ -290,36 +283,55 @@ async function startApi(): Promise<RunningApi> {
     },
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
-  let output = "";
-  child.stdout?.on("data", (chunk: Buffer) => {
-    output += chunk.toString();
-  });
-  child.stderr?.on("data", (chunk: Buffer) => {
-    output += chunk.toString();
-  });
-  return { child, port, firstClientId, output: () => output };
+  return { child, port, firstClientId, output: collectOutput(child) };
 }
 
+/**
+ * The api the `beforeAll` of a describe started, for its cases: a case that
+ * runs after that `beforeAll` failed is refused by name, not with a
+ * TypeError on `undefined` that hides the failure. The twin of
+ * `startedRuntime` of the worker tests - an app does not import another.
+ */
+function startedApi(api: RunningApi | undefined): RunningApi {
+  if (api === undefined) {
+    throw new Error(
+      "the api of the describe is not started: its beforeAll failed",
+    );
+  }
+  return api;
+}
+
+describe("startedApi", () => {
+  it("refuses an api its beforeAll never started, naming the failed beforeAll", () => {
+    expect(() => startedApi(undefined)).toThrow(/its beforeAll failed$/);
+  });
+});
+
 describe("api entry point", () => {
-  let api: RunningApi;
+  let api: RunningApi | undefined;
 
   beforeAll(async () => {
     api = await startApi();
   });
 
   afterAll(async () => {
-    await stopped(api.child);
-  });
+    if (api !== undefined) {
+      await stopApi(api.child);
+    }
+  }, STOP_HOOK_MS);
 
   it("reports the label it was given and null for the one it dropped", async () => {
-    const status = SystemStatusResponseSchema.parse(await statusOf(api.port));
+    const status = SystemStatusResponseSchema.parse(
+      await statusOf(startedApi(api).port),
+    );
 
     expect(status.build).toEqual({ version: VERSION, commit: null });
   });
 
   it("names the dropped label in its log, without the value", async () => {
-    await statusOf(api.port);
-    const output = api.output();
+    const started = startedApi(api);
+    await statusOf(started.port);
+    const output = started.output();
     const warnings = output
       .split("\n")
       .filter((line) => line.includes("build label ignored"))
@@ -338,20 +350,23 @@ describe("api entry point", () => {
  * them without one, whatever order they run in.
  */
 describe("api entry point and the Redis databases", () => {
-  let api: RunningApi;
+  let api: RunningApi | undefined;
 
   beforeAll(async () => {
     api = await startApi();
   });
 
   afterAll(async () => {
-    await stopped(api.child);
-  });
+    if (api !== undefined) {
+      await stopApi(api.child);
+    }
+  }, STOP_HOOK_MS);
 
   it(
     "keeps its Redis connections out of the database of the worker suite",
     async () => {
-      await statusOf(api.port);
+      const started = startedApi(api);
+      await statusOf(started.port);
       // A client of the window that is not the fork's: `redis-cli ping` of the
       // healthcheck of Compose and CI comes in like this one, in database 0.
       const bare = await openBareClient(env.REDIS_URL);
@@ -371,7 +386,7 @@ describe("api entry point and the Redis databases", () => {
             const found = forkClientsOf(
               clientsOf(String(await redis.client("LIST"))),
               {
-                from: api.firstClientId,
+                from: started.firstClientId,
                 before: own,
                 known: new Set([bare.id]),
               },
@@ -390,7 +405,7 @@ describe("api entry point and the Redis databases", () => {
 
         // And they are the fork's, not some other client's of the window: they
         // leave with it.
-        await stopped(api.child);
+        await stopApi(started.child);
         const forkedIds = new Set(forked.map((client) => client.id));
         await vi.waitFor(
           async () => {
@@ -415,19 +430,6 @@ describe("api entry point and the Redis databases", () => {
  * with its own deadline of ten seconds, and the flush of the log after it.
  */
 const EXIT_DEADLINE_MS = 20_000;
-
-/** The exit code of a child, or a failure once `EXIT_DEADLINE_MS` passes. */
-function exitOf(child: ChildProcess): Promise<number | null> {
-  return new Promise<number | null>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`the api did not exit within ${EXIT_DEADLINE_MS}ms`));
-    }, EXIT_DEADLINE_MS);
-    child.on("exit", (exitCode) => {
-      clearTimeout(timer);
-      resolve(exitCode);
-    });
-  });
-}
 
 describe("api entry point on a port that is taken", () => {
   /**
@@ -459,14 +461,11 @@ describe("api entry point on a port that is taken", () => {
           },
           stdio: ["ignore", "pipe", "pipe", "ipc"],
         });
-        let output = "";
-        child.stdout?.on("data", (chunk: Buffer) => {
-          output += chunk.toString();
-        });
-        child.stderr?.on("data", (chunk: Buffer) => {
-          output += chunk.toString();
-        });
-        const code = await exitOf(child);
+        const { code, output } = await within(
+          endOf(child, collectOutput(child)),
+          EXIT_DEADLINE_MS,
+          `the exit of ${NAME} on a taken port`,
+        );
 
         expect(code).toBe(1);
         const lines = output
@@ -493,12 +492,15 @@ describe("api entry point on a port that is taken", () => {
             )
             .map((line) => line.target),
         ).toEqual(expect.arrayContaining(["app", "db", "queues", "redis"]));
-      } finally {
-        // A process that did not leave on its own - a failed assertion, a
-        // stop that hung - does not outlive the case.
+      } catch (err) {
+        // A process that did not leave on its own - a failed assertion, an
+        // exit that never came - does not outlive the case; `killed` keeps
+        // the failure of the case as the reason of the red.
         if (child !== undefined) {
-          await stopped(child);
+          await killed(child, NAME);
         }
+        throw err;
+      } finally {
         await new Promise<void>((resolve) => {
           taken.close(() => {
             resolve();
@@ -506,7 +508,7 @@ describe("api entry point on a port that is taken", () => {
         });
       }
     },
-    EXIT_DEADLINE_MS + 5_000,
+    EXIT_DEADLINE_MS + KILL_DEADLINE_MS + 5_000,
   );
 });
 
@@ -603,27 +605,6 @@ describe("api stop under a silent Postgres", () => {
   );
 });
 
-describe("clientsOf", () => {
-  it("reads the id, the database and the library of each client", () => {
-    expect(
-      clientsOf(
-        "id=7 addr=127.0.0.1:1 db=2 lib-name=ioredis lib-ver=5.11.1\nid=8 addr=127.0.0.1:2 db=0 lib-name= lib-ver=\n",
-      ),
-    ).toEqual([
-      { id: 7, db: "2", lib: "ioredis" },
-      { id: 8, db: "0", lib: "" },
-    ]);
-  });
-
-  it.each([
-    ["without an id", "addr=127.0.0.1:1 db=2 lib-name=ioredis"],
-    ["with an id that is no number", "id=x addr=127.0.0.1:1 db=2"],
-    ["without a db", "id=7 addr=127.0.0.1:1 lib-name=ioredis"],
-  ])("throws, with the line, on a line %s", (_what, line) => {
-    expect(() => clientsOf(`${line}\n`)).toThrow(JSON.stringify(line));
-  });
-});
-
 describe("forkClientsOf", () => {
   const window = { from: 10, before: 20, known: new Set([12]) };
 
@@ -636,15 +617,15 @@ describe("forkClientsOf", () => {
         window,
       ),
     ).toEqual([
-      { id: 11, db: "2", lib: "ioredis" },
-      { id: 13, db: "2", lib: "ioredis(api)" },
+      { id: 11, db: "2", lib: "ioredis", name: "" },
+      { id: 13, db: "2", lib: "ioredis(api)", name: "" },
     ]);
   });
 
   it("takes a client with the first id of the window: the fork's first connection is the id read before the fork", () => {
     expect(
       forkClientsOf(clientsOf("id=10 db=2 lib-name=ioredis\n"), window),
-    ).toEqual([{ id: 10, db: "2", lib: "ioredis" }]);
+    ).toEqual([{ id: 10, db: "2", lib: "ioredis", name: "" }]);
   });
 
   it("throws, naming it, while a client of the window is unnamed and not known: a connection of the fork before its SETINFO, or one that never names itself", () => {
@@ -759,6 +740,42 @@ describe("openBareClient", () => {
       await server.close();
     }
   });
+
+  it("is refused by its deadline, naming the wait, by a server that never answers, and closes its socket", async () => {
+    let serverSide: Promise<void> | undefined;
+    let asked = (): void => undefined;
+    const reached = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
+    const server = await serverThat((socket) => {
+      serverSide = new Promise<void>((resolve) => {
+        socket.on("error", () => undefined);
+        socket.on("close", () => {
+          resolve();
+        });
+      });
+      // The question arrives and is never answered.
+      socket.once("data", () => {
+        asked();
+      });
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const verdict = expect(openBareClient(server.url)).rejects.toThrow(
+        `the answer of the server to CLIENT ID of the bare client: no answer within ${READY_TIMEOUT_MS} ms`,
+      );
+      await reached;
+
+      await vi.advanceTimersByTimeAsync(READY_TIMEOUT_MS);
+
+      await verdict;
+      // The client let its socket go: the server side of it closes.
+      await serverSide;
+    } finally {
+      vi.useRealTimers();
+      await server.close();
+    }
+  }, 3_000);
 
   it("refuses a URL without a port instead of dialing port 0", async () => {
     await expect(openBareClient("redis://127.0.0.1/0")).rejects.toThrow(

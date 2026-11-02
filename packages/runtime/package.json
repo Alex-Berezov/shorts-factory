@@ -9,7 +9,12 @@
     "./connection-failure": "./src/connection-failure.ts",
     "./deadline": "./src/deadline.ts",
     "./redis": "./src/redis.ts",
-    "./test-support/recording-logger": "./test-support/recording-logger.ts"
+    "./test-support/recording-logger": "./test-support/recording-logger.ts",
+    "./test-support/within": "./test-support/within.ts",
+    "./test-support/child-run": "./test-support/child-run.ts",
+    "./test-support/dev-command": "./test-support/dev-command.ts",
+    "./test-support/manifest": "./test-support/manifest.ts",
+    "./test-support/redis-clients": "./test-support/redis-clients.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -25,6 +30,7 @@
     "@types/node": "^22.0.0",
     "pino": "^9.4.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.0",
+    "zod": "^3.23.0"
   }
 }

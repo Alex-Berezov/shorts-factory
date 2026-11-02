@@ -40,6 +40,17 @@ export interface UnitTestOptions {
 }
 
 /**
+ * The order of the hooks of a file, in both runs: `beforeAll` in the order
+ * they are registered, `afterAll` in the reverse. A fixture registered first
+ * (`useTestDb` of `@sf/db/test-support/fixture`) opens its handle before the
+ * hooks of the file use it and closes it after their clean-up. It is the
+ * default of vitest 2; written here so that a change of the default, or of
+ * the version, cannot make the clean-up of a file run against a closed handle
+ * (ADR-0011).
+ */
+const HOOK_ORDER = { hooks: "stack" } as const;
+
+/**
  * The unit run of a package (`pnpm test`): every test file but the
  * integration ones, which need the Compose stack and are asked for
  * explicitly.
@@ -52,6 +63,7 @@ export function unitTestConfig(options: UnitTestOptions = {}): ViteUserConfig {
         (dir) => `${dir}/**/*.test.ts`,
       ),
       exclude: [...configDefaults.exclude, INT_TEST_FILES],
+      sequence: { ...HOOK_ORDER },
       ...(options.setupFiles ? { setupFiles: [...options.setupFiles] } : {}),
     },
   };
@@ -118,6 +130,7 @@ export function intTestConfig(options: IntTestOptions): ViteUserConfig {
       setupFiles: [...options.setupFiles],
       globalSetup: [entryCheckModule(options.entryCheck)],
       fileParallelism: false,
+      sequence: { ...HOOK_ORDER },
       ...(options.testTimeout !== undefined
         ? { testTimeout: options.testTimeout }
         : {}),

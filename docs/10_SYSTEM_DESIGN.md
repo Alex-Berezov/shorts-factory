@@ -175,7 +175,7 @@ shorts-factory/
 │   ├── db/         # Drizzle-схема, миграции, репозитории, учёт расхода: `createUsageLogger`, `createBudgetGuard` (E0-09); дескриптор проб с пределом `createProbeDb` (E0-12H, ADR-0002); раннер миграций `migrate.ts` (`migrateDb`, `runMigrations`, подсчёт журнала) и advisory-лок миграций `migration-lock.ts` (лок, сессия, шаги возврата, `MigrationLockTimeoutError`; E0-12S), формулировки сбоев раннера - `failures.ts`
 │   │   └── test-support/ # общая тестовая обвязка int-наборов: страж стека, фикстура базы, реле с `freeze()` для полуоткрытого сокета `test-support/relay` (`@sf/db/test-support/*`, только из тестов; ADR-0011)
 │   ├── config/     # типизированный .env (Zod), константы квот/бюджета
-│   ├── runtime/    # каркас процессов api и worker: опции логгера (белый список `serializers.err`), три Redis-клиента, фабрика `Queue`, остановка, дедлайн (E0-12B, ADR-0012); `test-support/` - рекордер pino для тестов
+│   ├── runtime/    # каркас процессов api и worker: опции логгера (белый список `serializers.err`), три Redis-клиента, фабрика `Queue`, остановка, дедлайн (E0-12B, ADR-0012); `test-support/` - общий test-support api и worker: рекордер pino, ожидание с дедлайном, ребёнок-процесс, команда dev, манифест, `CLIENT LIST` (`@sf/runtime/test-support/*`, только из тестов; ADR-0011)
 │   ├── contracts/  # Zod-схемы запросов/ответов API, общие для api и web (E0-07)
 │   ├── api-client/ # типизированный fetch-клиент по контрактам (E0-07)
 │   ├── storage/    # интерфейс Storage + локальная FS (E9-06), позже S3-совместимое

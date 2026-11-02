@@ -1,5 +1,5 @@
 import { env } from "@sf/config";
-import { closeDb, createBudgetGuard, createUsageLogger } from "@sf/db";
+import { type Db, createBudgetGuard, createUsageLogger } from "@sf/db";
 import { closeRedis } from "@sf/runtime";
 import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -7,10 +7,12 @@ import { z } from "zod";
 import { defineJob } from "../src/lib/define-job.js";
 import { type WorkerRuntime, startWorkerRuntime } from "../src/runtime.js";
 import {
+  keepDatabase,
   obliterateQueues,
-  openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  startedRuntime,
+  useTestDb,
   waitFor,
 } from "./helpers.int.js";
 
@@ -62,33 +64,46 @@ const paidJob = defineJob({
   },
 });
 
-const db = openTestDb();
+const db = useTestDb(
+  { beforeAll, afterAll },
+  { prepare: keepDatabase, beforeClose: deleteGeminiUsage },
+);
 const redis = openTestRedis();
-let runtime: WorkerRuntime;
+/** Unset until the `beforeAll` of the file starts it. */
+let runtime: WorkerRuntime | undefined;
+
+/** The rows the paid job of this file spends. */
+async function deleteGeminiUsage(handle: Db): Promise<void> {
+  await handle.$client`delete from api_usage_log where provider = 'gemini'`;
+}
 
 beforeAll(async () => {
   await obliterateQueues(redis, QUEUES);
-  await db.$client`delete from api_usage_log where provider = 'gemini'`;
-  await seedQueueSwitches(db);
+  await deleteGeminiUsage(db());
+  await seedQueueSwitches(db());
   runtime = await startWorkerRuntime({
     env,
-    db,
+    db: db(),
     redis,
     log: silentLogger(),
     processors: { "system.smoke": paidJob },
     switchIntervalMs: 60_000,
     // The guard of the process, with caps this test can reach; production
     // builds the same object from `env`.
-    budget: createBudgetGuard({ db, limits: LIMITS }),
+    budget: createBudgetGuard({ db: db(), limits: LIMITS }),
   });
 });
 
+// This hook closes what the file opened and never reaches for the database.
+// A hook that throws here skips the afterAll hooks registered before it,
+// `beforeClose`/`closeDb` of `useTestDb` included (vitest 2 stack, E0-12AK).
 afterAll(async () => {
-  await runtime.close();
-  await obliterateQueues(redis, QUEUES);
-  await db.$client`delete from api_usage_log where provider = 'gemini'`;
-  await closeDb(db);
-  await closeRedis(redis);
+  try {
+    await runtime?.close();
+    await obliterateQueues(redis, QUEUES);
+  } finally {
+    await closeRedis(redis);
+  }
 });
 
 describe("a job against an exhausted budget", () => {
@@ -96,16 +111,17 @@ describe("a job against an exhausted budget", () => {
     const marker = `budget-ok-${Date.now()}`;
     // The guard the api asks, built the way the api builds it: no cache, so
     // the answer is the state of the table and not of a key in Redis.
-    const guard = createBudgetGuard({ db, limits: LIMITS });
+    const guard = createBudgetGuard({ db: db(), limits: LIMITS });
     const before = await guard.check("gemini");
 
-    const jobId = await paidJob.enqueue(runtime.queues.get("system.smoke"), {
-      marker,
-    });
+    const jobId = await paidJob.enqueue(
+      startedRuntime(runtime).queues.get("system.smoke"),
+      { marker },
+    );
 
     const row = await waitFor(
       async () => {
-        const rows = await db.$client<{ cost_usd: string }[]>`
+        const rows = await db().$client<{ cost_usd: string }[]>`
           select cost_usd from api_usage_log where job_id = ${jobId}
         `;
         return rows[0];
@@ -128,7 +144,7 @@ describe("a job against an exhausted budget", () => {
   it("stops the next job before the call, on the first attempt, in the dlq", async () => {
     // The row above is already half the daily cap; this one puts the total on
     // it, and the guard refuses at `spent >= cap`.
-    const usage = createUsageLogger(db, { jobId: "fixture/over-cap" });
+    const usage = createUsageLogger(db(), { jobId: "fixture/over-cap" });
     await usage({
       provider: "gemini",
       operation: "generateContent",
@@ -136,11 +152,12 @@ describe("a job against an exhausted budget", () => {
     });
 
     const marker = `budget-over-${Date.now()}`;
-    const jobId = await paidJob.enqueue(runtime.queues.get("system.smoke"), {
-      marker,
-    });
+    const jobId = await paidJob.enqueue(
+      startedRuntime(runtime).queues.get("system.smoke"),
+      { marker },
+    );
 
-    const dlq = runtime.queues.get("system.dlq");
+    const dlq = startedRuntime(runtime).queues.get("system.dlq");
     const record = await waitFor(
       async () => {
         const jobs = await dlq.getJobs(["waiting", "prioritized", "delayed"]);
@@ -170,7 +187,7 @@ describe("a job against an exhausted budget", () => {
     // Refused before the call: no spend row of its own, and exactly one
     // attempt - a cap that is retried five times over twenty minutes blocks
     // the queue behind it for nothing.
-    const rows = await db.$client<{ id: number }[]>`
+    const rows = await db().$client<{ id: number }[]>`
       select id from api_usage_log where job_id = ${jobId}
     `;
     expect(rows).toHaveLength(0);

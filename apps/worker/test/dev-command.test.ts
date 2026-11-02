@@ -1,7 +1,8 @@
+import { watcherScripts } from "@sf/runtime/test-support/dev-command";
 import { describe, expect, it } from "vitest";
 import {
   DEV_COMMAND,
-  isWatcherCommand,
+  devCommandParts,
   manifestScripts,
 } from "./dev-command.js";
 
@@ -19,38 +20,17 @@ describe("worker dev command", () => {
     expect(scripts.dev).toBe(DEV_COMMAND);
   });
 
+  it("is taken apart for a test into the flags of node and the script", () => {
+    // `entry-point.int.test.ts` forks the entry point from these, so what it
+    // proves is the command `pnpm dev` runs.
+    expect(devCommandParts()).toEqual({
+      execArgv: ["--import", "tsx"],
+      script: "src/index.ts",
+    });
+  });
+
   it("starts nothing under a watcher, in any script", () => {
     expect(Object.keys(scripts)).not.toContain("dev:watch");
     expect(watcherScripts(scripts)).toEqual([]);
   });
-
-  it("refuses a watcher in a script other than dev", () => {
-    expect(
-      watcherScripts({ ...scripts, start: "tsx watch src/server.ts" }),
-    ).toEqual(["start"]);
-  });
-
-  it.each([
-    ["tsx watch src/index.ts", true],
-    ["tsx --watch src/index.ts", true],
-    ["node --watch src/index.ts", true],
-    ["node --import tsx --watch-path=src src/index.ts", true],
-    ["turbo watch dev", true],
-    ["bun --watch src/index.ts", true],
-    ["watchexec -- node src/index.ts", true],
-    ["tsx --flag watch src/index.ts", true],
-    ["TSX WATCH src/index.ts", true],
-    ["vitest --watch", true],
-    ["tsx src/cli/watchlist.ts", true],
-    ["node --import tsx src/index.ts", false],
-  ])("takes %j for a watcher: %s", (script, watcher) => {
-    expect(isWatcherCommand(script)).toBe(watcher);
-  });
 });
-
-/** The names of the scripts that start a process under a watcher. */
-function watcherScripts(scripts: Record<string, string>): string[] {
-  return Object.entries(scripts)
-    .filter(([, script]) => isWatcherCommand(script))
-    .map(([name]) => name);
-}

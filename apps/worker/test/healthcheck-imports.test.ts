@@ -1,6 +1,14 @@
-import { readFileSync, realpathSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { repoRoot } from "@sf/config/paths";
+import { readPackageManifest } from "@sf/runtime/test-support/manifest";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -14,10 +22,13 @@ import { z } from "zod";
  * The graph is read from the sources rather than from a running process, so
  * the case says which import pulled the module in. Every file it reads
  * belongs to this app or to a workspace package that is in `dependencies` of
- * this app and has a `test` script: this task depends on its `test` in turbo
- * (`^test`), so a change there is a change of this hash too. The walk throws
- * on any other package - the inputs of this task (`apps/worker/turbo.json`)
- * do not cover it, and a change there would replay a green run.
+ * this app: turbo hashes the files of every internal dependency of a package
+ * into the hash of its task, whether that dependency has a `test` script or
+ * not (measured with `--dry=json` on a change of `@sf/gemini`, which has none:
+ * docs/DECISIONS.md, Р8 E0-12N), so a change there is a change of this hash
+ * too. The walk throws on any other package - the inputs of this task
+ * (`apps/worker/turbo.json`) do not cover it, and a change there would replay
+ * a green run.
  */
 
 const ENTRY_POINTS = [
@@ -29,18 +40,21 @@ const ENTRY_POINTS = [
 const HEAVY = ["bullmq", "pino"];
 
 const ManifestSchema = z.object({
-  name: z.string(),
+  name: z.string().min(1),
   exports: z.record(z.union([z.string(), z.record(z.string())])).optional(),
   main: z.string().optional(),
-  scripts: z.record(z.string()).optional(),
   dependencies: z.record(z.string()).optional(),
 });
 type Manifest = z.infer<typeof ManifestSchema>;
 
+/**
+ * The manifest in `dir`, through the one reader of the tests
+ * (`readPackageManifest`). One that does not have the shape - an empty `name` among
+ * it, which no package link could be checked against - is refused with the
+ * path of the file.
+ */
 function manifestAt(dir: string): Manifest {
-  return ManifestSchema.parse(
-    JSON.parse(readFileSync(join(dir, "package.json"), "utf8")),
-  );
+  return readPackageManifest(dir, ManifestSchema);
 }
 
 /** The workspace dependencies of this app, by their names. */
@@ -50,16 +64,15 @@ const DEPENDENCIES: ReadonlySet<string> = new Set(
 
 function notHashed(name: string): Error {
   return new Error(
-    `${name} is not a dependency of @sf/worker with a test script: its files are not in the hash of @sf/worker#test`,
+    `${name} is not a dependency of @sf/worker: its files are not in the hash of @sf/worker#test`,
   );
 }
 
 /**
  * Throws unless the package `name` with `manifest` is in the hash of this
- * task: one of `dependencies` with a `test` script of its own - and unless
- * `manifest` is the one of `name`: the link of `name` in the node_modules of
- * this app is where the walk looks, and a package renamed there would be
- * read for another.
+ * task: one of `dependencies` - and unless `manifest` is the one of `name`:
+ * the link of `name` in the node_modules of this app is where the walk looks,
+ * and a package renamed there would be read for another.
  */
 function assertHashed(
   name: string,
@@ -74,9 +87,6 @@ function assertHashed(
       `the manifest read for ${name} is the one of ${manifest.name}`,
     );
   }
-  if (manifest.scripts?.test === undefined) {
-    throw notHashed(name);
-  }
 }
 
 /**
@@ -84,15 +94,26 @@ function assertHashed(
  * this app: its link in `apps/worker/node_modules/@sf` (`packages/<name>`,
  * `packages/integrations/<name>`, ...). A package outside `dependencies` is
  * refused before its link is looked up, so it fails with the reason, not with
- * a missing link.
+ * a missing link. A dependency without a link - an install that has not run
+ * since it was added - is refused with what to do about it.
  */
 function packageDirOf(name: string, dependencies: ReadonlySet<string>): string {
   if (!dependencies.has(name)) {
     throw notHashed(name);
   }
-  return realpathSync(
-    join(repoRoot, "apps/worker/node_modules", ...name.split("/")),
-  );
+  try {
+    return realpathSync(
+      join(repoRoot, "apps/worker/node_modules", ...name.split("/")),
+    );
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      throw new Error(
+        `${name} is not linked in apps/worker/node_modules: run pnpm install`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
 }
 
 /** The text of a string literal or a template without substitutions. */
@@ -146,7 +167,7 @@ function typeOnly(node: ts.ImportDeclaration | ts.ExportDeclaration): boolean {
  * package may not import (ADR-0011); it differs in two places: it keeps only
  * what loads at runtime (type-only imports and `typeof import("…")` are
  * dropped, not reported), and a call it cannot read throws instead of coming
- * back as `<dynamic>`. One walk for both is owed (docs/TECH_DEBT.md, E0-12W).
+ * back as `<dynamic>`. One walk for both is owed (docs/TECH_DEBT.md, E0-12AJ).
  */
 function valueImports(source: string, fileName = "module.ts"): string[] {
   const tree = ts.createSourceFile(
@@ -317,25 +338,42 @@ describe("the walk of the healthcheck graph", () => {
     );
   });
 
-  it("refuses a dependency without a test script", () => {
+  it("passes a dependency without a test script: turbo hashes its files all the same", () => {
     expect(() =>
-      assertHashed(
-        "@sf/runtime",
-        { name: "@sf/runtime", scripts: {} },
-        DEPENDENCIES,
-      ),
-    ).toThrow(
-      "@sf/runtime is not a dependency of @sf/worker with a test script",
-    );
+      assertHashed("@sf/gemini", { name: "@sf/gemini" }, DEPENDENCIES),
+    ).not.toThrow();
   });
 
   it("refuses a manifest that is not of the package it was read for", () => {
     expect(() =>
-      assertHashed(
-        "@sf/runtime",
-        { name: "@sf/db", scripts: { test: "vitest run" } },
-        DEPENDENCIES,
-      ),
+      assertHashed("@sf/runtime", { name: "@sf/db" }, DEPENDENCIES),
     ).toThrow("the manifest read for @sf/runtime is the one of @sf/db");
+  });
+
+  it("refuses a dependency that is not linked, saying to run pnpm install", () => {
+    const missing = "@sf/no-such-package";
+
+    let refusal: unknown;
+    try {
+      packageDirOf(missing, new Set([missing]));
+    } catch (error) {
+      refusal = error;
+    }
+
+    expect(refusal).toMatchObject({
+      message: `${missing} is not linked in apps/worker/node_modules: run pnpm install`,
+      cause: expect.objectContaining({ code: "ENOENT" }),
+    });
+  });
+
+  it("refuses a manifest with an empty name, naming its file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sf-healthcheck-manifest-"));
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "" }));
+
+      expect(() => manifestAt(dir)).toThrow(join(dir, "package.json"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

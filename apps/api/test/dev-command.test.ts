@@ -1,8 +1,8 @@
+import { watcherScripts } from "@sf/runtime/test-support/dev-command";
 import { describe, expect, it } from "vitest";
 import {
   DEV_COMMAND,
   devCommandParts,
-  isWatcherCommand,
   manifestScripts,
 } from "./dev-command.js";
 
@@ -31,48 +31,8 @@ describe("api dev command", () => {
     });
   });
 
-  it.each([
-    ["is not node", "tsx src/server.ts"],
-    ["ends in a flag", "node --import tsx --watch"],
-    ["has no script", "node"],
-  ])("refuses a command that %s", (_case, command) => {
-    expect(() => devCommandParts(command)).toThrow(
-      `not a node command with a script: ${command}`,
-    );
-  });
-
   it("starts nothing under a watcher, in any script", () => {
     expect(Object.keys(scripts)).not.toContain("dev:watch");
     expect(watcherScripts(scripts)).toEqual([]);
   });
-
-  it("refuses a watcher in a script other than dev", () => {
-    expect(
-      watcherScripts({ ...scripts, start: "tsx watch src/server.ts" }),
-    ).toEqual(["start"]);
-  });
-
-  it.each([
-    ["tsx watch src/index.ts", true],
-    ["tsx --watch src/index.ts", true],
-    ["node --watch src/index.ts", true],
-    ["node --import tsx --watch-path=src src/index.ts", true],
-    ["turbo watch dev", true],
-    ["bun --watch src/index.ts", true],
-    ["watchexec -- node src/index.ts", true],
-    ["tsx --flag watch src/index.ts", true],
-    ["TSX WATCH src/index.ts", true],
-    ["vitest --watch", true],
-    ["tsx src/cli/watchlist.ts", true],
-    ["node --import tsx src/index.ts", false],
-  ])("takes %j for a watcher: %s", (script, watcher) => {
-    expect(isWatcherCommand(script)).toBe(watcher);
-  });
 });
-
-/** The names of the scripts that start a process under a watcher. */
-function watcherScripts(scripts: Record<string, string>): string[] {
-  return Object.entries(scripts)
-    .filter(([, script]) => isWatcherCommand(script))
-    .map(([name]) => name);
-}

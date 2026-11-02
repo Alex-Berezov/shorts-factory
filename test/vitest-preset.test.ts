@@ -206,6 +206,31 @@ describe("unitTestConfig", () => {
   });
 });
 
+/**
+ * The setting only: that vitest runs a stack as the files need it - a fixture
+ * registered first closes after the clean-up of the file - is held by
+ * `packages/db/test/hook-order.int.test.ts`, against the real hooks.
+ */
+describe("the order of the hooks", () => {
+  it("is asked for as a stack in both runs", () => {
+    const configs = [
+      unitTestConfig(),
+      unitTestConfig({ testDirs: ["test"], setupFiles: ["x"] }),
+      intTestConfig({ setupFiles: [], entryCheck: "postgres" }),
+      intTestConfig({
+        setupFiles: ["x"],
+        entryCheck: "migrated-stack",
+        testTimeout: 1,
+        hookTimeout: 1,
+      }),
+    ];
+
+    for (const config of configs) {
+      expect(config.test?.sequence?.hooks).toBe("stack");
+    }
+  });
+});
+
 describe("configPathOf", () => {
   it.each([
     ["vitest run", "apps/api/vitest.config.ts"],

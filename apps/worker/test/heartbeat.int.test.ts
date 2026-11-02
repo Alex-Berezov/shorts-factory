@@ -1,6 +1,6 @@
 import { env } from "@sf/config";
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SEC } from "@sf/core";
-import { type Db, closeDb } from "@sf/db";
+import { closeDb } from "@sf/db";
 import type { QueueFactory } from "@sf/runtime";
 import { closeRedis } from "@sf/runtime";
 import {
@@ -17,10 +17,12 @@ import { systemHeartbeatJob } from "../src/jobs/system-heartbeat.js";
 import { systemSmokeJob } from "../src/jobs/system-smoke.js";
 import { startWorkerRuntime } from "../src/runtime.js";
 import {
+  keepDatabase,
   obliterateQueues,
   openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  useTestDb,
   workerQueueFactory,
 } from "./helpers.int.js";
 import { recordingUsage, unusedBudget } from "./job-deps.js";
@@ -33,13 +35,14 @@ import { recordingUsage, unusedBudget } from "./job-deps.js";
  *
  * The job cases open only Redis. The database is part of `JobRuntimeDeps`
  * and this job never queries it, and postgres-js connects on the first query -
- * so the handle below stays a handle, and there is nothing to close. A pool
- * opened for a case about Redis is a connection per run that proves nothing.
+ * so the handle of the file below opens no connection for them; `useTestDb`
+ * closes it all the same. A pool opened for a case about Redis is a
+ * connection per run that proves nothing.
  * The start cases are the exception: the runtime reads the queue switches, so
  * each opens a database of its own and closes it, and they leave a heartbeat
  * scheduler and its ticks in Redis, cleared around the file.
  */
-const db: Db = openTestDb();
+const db = useTestDb({ beforeAll, afterAll }, { prepare: keepDatabase });
 const redis = openTestRedis();
 
 const QUEUES = ["system.heartbeat", "system.smoke", "system.dlq"] as const;
@@ -53,16 +56,19 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await obliterateQueues(redis, QUEUES);
-  await redis.del(WORKER_HEARTBEAT_KEY);
-  await closeRedis(redis);
+  try {
+    await obliterateQueues(redis, QUEUES);
+    await redis.del(WORKER_HEARTBEAT_KEY);
+  } finally {
+    await closeRedis(redis);
+  }
 });
 
 /** The heartbeat spends nothing: both spend-related deps refuse to be used. */
 function jobDeps() {
   return {
     log: silentLogger(),
-    db,
+    db: db(),
     redis,
     budget: unusedBudget(),
     createUsage: recordingUsage().createUsage,

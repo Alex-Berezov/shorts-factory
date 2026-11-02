@@ -124,6 +124,12 @@ async function testDatabaseSessions(): Promise<string[]> {
  * lock and its session fails the first read; one that released the lock but
  * never closed its handle fails the second. Both wait: the server ends a
  * closed session, and the lock with it, asynchronously.
+ *
+ * What neither read sees is a failed unlock of a command that did close its
+ * handle: the closed session takes the lock with it, and a read at once finds
+ * it gone as surely as a wait does (run without the unlock, both entry point
+ * cases stay green either way). That unlock is held by the cases of
+ * `migrateDb`, which read the lock while the handle is still open.
  */
 async function expectEntryPointLeftNothing(before: string[]): Promise<void> {
   await expectNoAdvisoryLocks();

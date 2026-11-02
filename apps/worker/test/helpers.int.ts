@@ -5,11 +5,22 @@ import { defaultQueueSwitches } from "@sf/db/test-support/fixture";
 import { suiteRedisUrl } from "@sf/db/test-support/stack-guard";
 import { type QueueFactory, createQueueRedis } from "@sf/runtime";
 import { silentLogger } from "@sf/runtime/test-support/recording-logger";
+import { within } from "@sf/runtime/test-support/within";
 import { Queue } from "bullmq";
 import type { Redis } from "ioredis";
 import { createJobQueueFactory } from "../src/lib/job-policy.js";
+import type { WorkerRuntime } from "../src/runtime.js";
 
-export { openTestDb } from "@sf/db/test-support/fixture";
+/**
+ * `keepDatabase` is the `prepare` of every file of this suite: the suite does
+ * not reset the database - every file cleans the rows it writes and writes
+ * the switch row it needs (`seedQueueSwitches`).
+ */
+export {
+  keepDatabase,
+  openTestDb,
+  useTestDb,
+} from "@sf/db/test-support/fixture";
 
 /**
  * Shared setup for the worker integration tests.
@@ -107,10 +118,30 @@ export async function findUsageRow(
 }
 
 /**
+ * The runtime the `beforeAll` of a file started, for its cases: a case that
+ * runs after that `beforeAll` failed is refused by name, not with a
+ * TypeError on `undefined` that hides the failure.
+ */
+export function startedRuntime(
+  runtime: WorkerRuntime | undefined,
+): WorkerRuntime {
+  if (runtime === undefined) {
+    throw new Error(
+      "the runtime of the file is not started: its beforeAll failed",
+    );
+  }
+  return runtime;
+}
+
+/**
  * Waits until `probe` answers something other than `undefined`, or gives up.
  * Polling rather than an event: what these tests assert is the state that is
  * left behind, and an event that fired before the listener was attached would
  * make the assertion flaky rather than wrong.
+ *
+ * The whole poll is one wait under `timeoutMs` (`within`), a probe that never
+ * answers included: the miss names `what` and the bound, and the poll does
+ * not start another turn after it.
  */
 export async function waitFor<T>(
   probe: () => Promise<T | undefined>,
@@ -118,18 +149,21 @@ export async function waitFor<T>(
 ): Promise<T> {
   const timeoutMs = options.timeoutMs ?? 15_000;
   const intervalMs = options.intervalMs ?? 100;
-  const deadline = Date.now() + timeoutMs;
-
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) {
-      return value;
+  let over = false;
+  const poll = async (): Promise<T> => {
+    while (!over) {
+      const value = await probe();
+      if (value !== undefined) {
+        return value;
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `timed out after ${timeoutMs}ms waiting for ${options.what ?? "a condition"}`,
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    // Nobody reads this: the wait has failed by its deadline already.
+    throw new Error("the poll outlived its wait");
+  };
+  try {
+    return await within(poll(), timeoutMs, options.what ?? "a condition");
+  } finally {
+    over = true;
   }
 }

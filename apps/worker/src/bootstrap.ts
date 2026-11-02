@@ -24,7 +24,7 @@ import type { WorkerRuntime } from "./runtime.js";
  * a shorter grace the container is killed mid-drain and the exit code is not
  * ours: a job in flight comes back through the stalled scan instead.
  */
-const SHUTDOWN_TIMEOUT_MS = 25_000;
+export const SHUTDOWN_TIMEOUT_MS = 25_000;
 
 /**
  * A second Ctrl+C leaves at once: the operator does not want to wait for the

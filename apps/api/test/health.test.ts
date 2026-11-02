@@ -1,5 +1,5 @@
 import { HealthResponseSchema } from "@sf/contracts";
-import { type ProbeDb, closeDb, createDb, createProbeDb, pingDb } from "@sf/db";
+import { type Db, type ProbeDb, createProbeDb, pingDb } from "@sf/db";
 import { describe, expect, it, vi } from "vitest";
 import {
   DEPENDENCY_TIMEOUT_MS,
@@ -18,6 +18,24 @@ vi.mock("@sf/db", async (importOriginal) => {
 
 /** A port nothing listens on, so the probe fails instead of hanging on DNS. */
 const CLOSED_DB_URL = "postgres://sf:sf@127.0.0.1:1/nowhere";
+
+/**
+ * A database handle for a probe whose `pingDb` is mocked: it is only handed
+ * along. The one thing `pingDb` does with a handle - `execute` - throws by
+ * name, so a case that lost the mock fails on the spot instead of dialing a
+ * database on the fake clock. Nothing else of it throws: a failed assertion
+ * prints the calls of the mock, this handle among them, and a handle that
+ * refused to be printed would hide the failure behind its own.
+ */
+function standInDb(): Db {
+  const refuse = (): never => {
+    throw new Error(
+      "the stand-in database was used: pingDb is not mocked in this case",
+    );
+  };
+  const handle: Partial<Db> = { execute: refuse };
+  return handle as Db;
+}
 
 async function healthOf(report: {
   db: "up" | "down";
@@ -121,25 +139,43 @@ describe("GET /health", () => {
   });
 });
 
+describe("the stand-in database", () => {
+  it("refuses the query of pingDb by name and still lets a failed assertion print it", async () => {
+    const { pingDb: realPingDb } =
+      await vi.importActual<typeof import("@sf/db")>("@sf/db");
+
+    await expect(realPingDb(standInDb())).rejects.toThrow(
+      "the stand-in database was used",
+    );
+    expect(() => expect(standInDb()).toBeNull()).toThrow(
+      /expected .* to be null/,
+    );
+  });
+});
+
 describe("createHealthProbes", () => {
   /**
    * Both dependencies silent, on the fake clock: Redis never settles its
    * ping, and the database answers the way `dbAnswer` does - never, unless a
    * case hands in an answer it settles itself.
+   *
+   * Nothing global changes here: the fake clock and the mock of `pingDb` are
+   * put in place by `arm`, which a case calls inside its `try`, so a throw on
+   * the way there leaves neither to the next case - `restore` in its
+   * `finally` takes both back.
    */
   async function hangingDependencies(
     dbAnswer: () => Promise<void> = () => new Promise<void>(() => {}),
   ) {
     const { pingDb: realPingDb } =
       await vi.importActual<typeof import("@sf/db")>("@sf/db");
-    vi.useFakeTimers();
-    vi.mocked(pingDb).mockClear().mockImplementation(dbAnswer);
-    const client = createDb(CLOSED_DB_URL);
     // A handle without a limit of its own: the cases that use it are about
-    // the sharing, and a limit would end the hanging probe under them.
+    // the sharing, and a limit would end the hanging probe under them. No
+    // client behind it either: `pingDb` is mocked and never reads the one it
+    // is handed.
     const db: ProbeDb = {
-      run: (fn) => fn(client),
-      close: ({ timeoutSec }) => closeDb(client, { timeoutSec }),
+      run: (fn) => fn(standInDb()),
+      close: async () => undefined,
     };
     // A socket that is open but silent never settles the promise; without a
     // deadline the check - and with it /health - would never return.
@@ -147,19 +183,23 @@ describe("createHealthProbes", () => {
     return {
       db,
       ping,
-      restore: async (): Promise<void> => {
+      arm: (): void => {
+        vi.useFakeTimers();
+        vi.mocked(pingDb).mockClear().mockImplementation(dbAnswer);
+      },
+      restore: (): void => {
         vi.useRealTimers();
         vi.mocked(pingDb).mockImplementation(realPingDb);
-        await db.close({ timeoutSec: 0 });
       },
     };
   }
 
   it("reports a dependency that never answers as down", async () => {
-    const { db, ping, restore } = await hangingDependencies();
+    const { db, ping, arm, restore } = await hangingDependencies();
     const probes = createHealthProbes({ db, redis: { ping }, timeoutMs: 50 });
 
     try {
+      arm();
       let report: unknown;
       void probes.check().then((value) => {
         report = value;
@@ -170,7 +210,7 @@ describe("createHealthProbes", () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(report).toEqual({ db: "down", redis: "down" });
     } finally {
-      await restore();
+      restore();
     }
   });
 
@@ -181,10 +221,11 @@ describe("createHealthProbes", () => {
    * each.
    */
   it("shares one pair of probes between the calls that arrive while it runs", async () => {
-    const { db, ping, restore } = await hangingDependencies();
+    const { db, ping, arm, restore } = await hangingDependencies();
     const probes = createHealthProbes({ db, redis: { ping }, timeoutMs: 50 });
 
     try {
+      arm();
       let reports: unknown;
       void Promise.all([probes.check(), probes.check(), probes.check()]).then(
         (value) => {
@@ -197,7 +238,7 @@ describe("createHealthProbes", () => {
       expect(ping).toHaveBeenCalledTimes(1);
       expect(pingDb).toHaveBeenCalledTimes(1);
     } finally {
-      await restore();
+      restore();
     }
   });
 
@@ -209,7 +250,7 @@ describe("createHealthProbes", () => {
    */
   it("keeps one hanging probe per dependency however many polls give up on it", async () => {
     let answerDb: () => void = () => {};
-    const { db, ping, restore } = await hangingDependencies(
+    const { db, ping, arm, restore } = await hangingDependencies(
       () =>
         new Promise<void>((resolve) => {
           answerDb = resolve;
@@ -218,6 +259,7 @@ describe("createHealthProbes", () => {
     const probes = createHealthProbes({ db, redis: { ping } });
 
     try {
+      arm();
       for (let poll = 0; poll < 3; poll += 1) {
         const report = probes.check();
         await vi.advanceTimersByTimeAsync(DEPENDENCY_TIMEOUT_MS);
@@ -233,7 +275,7 @@ describe("createHealthProbes", () => {
       expect(pingDb).toHaveBeenCalledTimes(2);
       expect(ping).toHaveBeenCalledTimes(1);
     } finally {
-      await restore();
+      restore();
     }
   });
   /**
@@ -243,11 +285,12 @@ describe("createHealthProbes", () => {
    * socket (docs/TECH_DEBT.md § E0-12H, п.5).
    */
   it("lets a stuck database probe go at its limit and asks again", async () => {
-    const { ping, restore } = await hangingDependencies();
+    const { ping, arm, restore } = await hangingDependencies();
     const db = createProbeDb(CLOSED_DB_URL, PROBE_DB_BOUNDS);
     const probes = createHealthProbes({ db, redis: { ping } });
 
     try {
+      arm();
       // Two polls that give up on it at their deadline, one after the other,
       // join the one stuck probe while it is under the limit.
       for (let poll = 0; poll < 2; poll += 1) {
@@ -266,9 +309,14 @@ describe("createHealthProbes", () => {
         vi.mocked(pingDb).mock.calls[0]?.[0],
       );
     } finally {
-      await vi.advanceTimersByTimeAsync(PROBE_QUERY_LIMIT_MS);
-      await db.close({ timeoutSec: 0 });
-      await restore();
+      // The clock and the mock go back even when the close of the handle
+      // fails: the next case must not start on either.
+      try {
+        await vi.advanceTimersByTimeAsync(PROBE_QUERY_LIMIT_MS);
+        await db.close({ timeoutSec: 0 });
+      } finally {
+        restore();
+      }
     }
   });
 });

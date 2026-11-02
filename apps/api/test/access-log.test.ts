@@ -3,7 +3,10 @@ import { Readable } from "node:stream";
 import { env } from "@sf/config";
 import { REQUEST_ID_HEADER } from "@sf/contracts";
 import { AppError, ValidationError } from "@sf/core";
-import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
+import {
+  recordingLogger,
+  recordingServiceLogger,
+} from "@sf/runtime/test-support/recording-logger";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import {
   afterAll,
@@ -21,7 +24,6 @@ import {
   TEST_PASSWORD,
   basicAuthHeader,
   buildTestApp,
-  recordingServiceLogger,
   unmappableError,
 } from "./helpers.js";
 

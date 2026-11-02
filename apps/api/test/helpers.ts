@@ -1,4 +1,3 @@
-import type { Env } from "@sf/config";
 import {
   type BudgetStatus,
   type BuildInfo,
@@ -8,11 +7,6 @@ import {
   type WorkerStatus,
 } from "@sf/contracts";
 import { QUEUE_NAMES } from "@sf/core";
-import { buildLoggerOptions } from "@sf/runtime";
-import {
-  type Recorder,
-  recordingLogger,
-} from "@sf/runtime/test-support/recording-logger";
 import { type BuildAppOptions, buildApp } from "../src/app.js";
 import type {
   AppDeps,
@@ -23,17 +17,6 @@ import type {
   WorkerProbe,
 } from "../src/deps.js";
 import type { AppInstance } from "../src/lib/app-instance.js";
-
-/**
- * A recorder on the options the service builds its logger from
- * (`buildLoggerOptions`, as `src/server.ts` does) - its serializers and its
- * `redact` - without the transport, which would write to a stream of its own
- * instead of the recorder.
- */
-export function recordingServiceLogger(env: Env): Recorder {
-  const { transport: _unused, ...options } = buildLoggerOptions(env);
-  return recordingLogger(options);
-}
 
 /** Password every test app is built with; the user name is never checked. */
 export const TEST_PASSWORD = "test-admin-password";

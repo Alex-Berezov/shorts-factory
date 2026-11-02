@@ -6,58 +6,81 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SEC } from "@sf/core";
 import { closeRedis } from "@sf/runtime";
+import {
+  type ChildRun,
+  KILL_DEADLINE_MS,
+  collectOutput,
+  endOf,
+  endWithin,
+} from "@sf/runtime/test-support/child-run";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { collectOutput, endOf } from "./child-run.js";
 import { openTestRedis } from "./helpers.int.js";
 
 /**
  * The container healthcheck of the worker, run the way Compose runs it - a
- * separate `node --import tsx` process - against the test Redis and against a
- * port nothing listens on. A fake client could not show the one property that
+ * separate node process with the flags of the healthcheck of the image
+ * (`HEALTHCHECK_EXEC_ARGV`) - against the test Redis and against a port
+ * nothing listens on. A fake client could not show the one property that
  * matters for a dead Redis: that the process ends on its own, with 1, before
  * Docker's own timeout would have to kill it.
  */
 const CLI = fileURLToPath(
   new URL("../src/cli/healthcheck.ts", import.meta.url),
 );
+/**
+ * The flags of node in the healthcheck of the image: `WORKER_HEALTHCHECK` of
+ * `scripts/compose-rules.mjs`, which the root project holds Compose to
+ * (`test/compose-rules.test.ts`). Not the flags of `pnpm dev`: the container
+ * does not run that command, and a flag added to it would reach a healthcheck
+ * that only this test runs.
+ */
+const HEALTHCHECK_EXEC_ARGV = ["--import", "tsx"];
 /** A port nothing listens on; connecting is refused rather than hanging. */
 const DEAD_REDIS = "redis://127.0.0.1:1";
 /** The command's own deadline; Compose gives it 10 s (`timeout:`). */
 const CLI_DEADLINE_MS = 5_000;
 /** Room for starting node with tsx on a slow machine. */
 const SPAWN_ALLOWANCE_MS = 5_000;
+/**
+ * The bound of a case that waits out the deadline of the command: its run
+ * ends within that deadline and the start of node (`endWithin`), a missed
+ * end is followed by a single `SIGKILL` (`KILL_DEADLINE_MS`), and five
+ * seconds of room.
+ */
+const DEADLINE_CASE_MS =
+  CLI_DEADLINE_MS + SPAWN_ALLOWANCE_MS + KILL_DEADLINE_MS + 5_000;
 
 const redis = openTestRedis();
 
-interface Run {
-  code: number | null;
-  signal: NodeJS.Signals | null;
-  stdout: string;
-  stderr: string;
-  elapsedMs: number;
-}
+/**
+ * A run of the command: what it printed on stdout is the `output` of the
+ * run, its stderr - which a case holds to silence or to no secret - is read
+ * on its own, and the time it took is what the cases of a dead Redis bound.
+ */
+type HealthcheckRun = ChildRun & { stderr: string; elapsedMs: number };
 
 async function runHealthcheck(
   env: NodeJS.ProcessEnv = {},
   preload: string[] = [],
-): Promise<Run> {
-  const startedAt = Date.now();
+): Promise<HealthcheckRun> {
+  // Monotonic: a step of the wall clock is no time the run took.
+  const startedAt = performance.now();
   const child = fork(CLI, [], {
-    execArgv: ["--import", "tsx", ...preload],
+    execArgv: [...HEALTHCHECK_EXEC_ARGV, ...preload],
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     env: { ...process.env, ...env },
   });
   const stderr = collectOutput(child, ["stderr"]);
-  const { code, signal, output } = await endOf(
+  const run = await endWithin(
     child,
-    collectOutput(child, ["stdout"]),
+    endOf(child, collectOutput(child, ["stdout"])),
+    CLI_DEADLINE_MS + SPAWN_ALLOWANCE_MS,
+    "the healthcheck",
   );
   return {
-    code,
-    signal,
-    stdout: output,
+    ...run,
     stderr: stderr(),
-    elapsedMs: Date.now() - startedAt,
+    elapsedMs: performance.now() - startedAt,
   };
 }
 
@@ -134,7 +157,7 @@ describe("worker healthcheck", () => {
     const run = await runHealthcheck();
 
     expect(run.code).toBe(0);
-    expect(run.stdout.trim()).toMatch(/^healthy: last heartbeat at /);
+    expect(run.output.trim()).toMatch(/^healthy: last heartbeat at /);
   });
 
   it("reads REDIS_URL alone: a malformed key it does not use changes nothing", async () => {
@@ -152,7 +175,7 @@ describe("worker healthcheck", () => {
     });
 
     expect(run.code).toBe(0);
-    expect(run.stdout.trim()).toMatch(/^healthy: last heartbeat at /);
+    expect(run.output.trim()).toMatch(/^healthy: last heartbeat at /);
   });
 
   it("exits 1 with its own reason when REDIS_URL is not a url", async () => {
@@ -161,7 +184,7 @@ describe("worker healthcheck", () => {
     expect(run.code).toBe(1);
     // The reason whole, with nothing of the parser after it: whatever the
     // parser says may one day name the value.
-    expect(run.stdout.trim()).toBe("unhealthy: REDIS_URL is not a valid url");
+    expect(run.output.trim()).toBe("unhealthy: REDIS_URL is not a valid url");
   });
 
   it.each([
@@ -175,7 +198,7 @@ describe("worker healthcheck", () => {
       const run = await runHealthcheck({ REDIS_URL: value });
 
       expect(run.code).toBe(1);
-      expect(run.stdout.trim()).toBe("unhealthy: REDIS_URL is not set");
+      expect(run.output.trim()).toBe("unhealthy: REDIS_URL is not set");
     },
   );
 
@@ -187,7 +210,7 @@ describe("worker healthcheck", () => {
     });
 
     expect(run.code).toBe(1);
-    expect(run.stdout.trim()).toBe("unhealthy: REDIS_URL is not a valid url");
+    expect(run.output.trim()).toBe("unhealthy: REDIS_URL is not a valid url");
     expect(run.stderr).toBe("");
   });
 
@@ -213,7 +236,7 @@ describe("worker healthcheck", () => {
       );
 
       expect(run.code).toBe(1);
-      expect(run.stdout.trim()).toBe(`unhealthy: ${reason}`);
+      expect(run.output.trim()).toBe(`unhealthy: ${reason}`);
       expect(run.stderr).toBe("");
     },
   );
@@ -226,10 +249,10 @@ describe("worker healthcheck", () => {
 
     expect(run.signal).toBeNull();
     expect(run.code).toBe(1);
-    expect(run.stdout.trim()).toBe(
+    expect(run.output.trim()).toBe(
       "unhealthy: healthcheck failed before reaching redis",
     );
-    expect(run.stdout).not.toContain("secret");
+    expect(run.output).not.toContain("secret");
     expect(run.stderr).not.toContain("secret");
   });
 
@@ -239,17 +262,17 @@ describe("worker healthcheck", () => {
     const run = await runHealthcheck();
 
     expect(run.code).toBe(1);
-    expect(run.stdout.trim()).toBe(
+    expect(run.output.trim()).toBe(
       "unhealthy: heartbeat stamp is not the worker's format",
     );
-    expect(run.stdout).not.toContain("yesterday-ish");
+    expect(run.output).not.toContain("yesterday-ish");
   });
 
   it("exits 1 when the stamp is missing", async () => {
     const run = await runHealthcheck();
 
     expect(run.code).toBe(1);
-    expect(run.stdout.trim()).toBe("unhealthy: no heartbeat stamp in redis");
+    expect(run.output.trim()).toBe("unhealthy: no heartbeat stamp in redis");
   });
 
   it("exits 1 on a stamp older than the TTL", async () => {
@@ -263,7 +286,7 @@ describe("worker healthcheck", () => {
     expect(run.code).toBe(1);
     // The age is counted against the clock of the process, read a moment
     // after the stamp was written here: at least the 60 s past the TTL.
-    const line = run.stdout.trim();
+    const line = run.output.trim();
     const age =
       /^unhealthy: last heartbeat (\d+) s ago at (\S+), worker stopped writing$/.exec(
         line,
@@ -281,10 +304,10 @@ describe("worker healthcheck", () => {
 
       expect(run.signal).toBeNull();
       expect(run.code).toBe(1);
-      expect(run.stdout.trim()).toMatch(/^unhealthy: /);
+      expect(run.output.trim()).toMatch(/^unhealthy: /);
       expect(run.elapsedMs).toBeLessThan(CLI_DEADLINE_MS + SPAWN_ALLOWANCE_MS);
     },
-    CLI_DEADLINE_MS + SPAWN_ALLOWANCE_MS + 10_000,
+    DEADLINE_CASE_MS,
   );
 
   it(
@@ -314,7 +337,7 @@ describe("worker healthcheck", () => {
 
         expect(run.signal).toBeNull();
         expect(run.code).toBe(1);
-        expect(run.stdout.trim()).toBe(
+        expect(run.output.trim()).toBe(
           `unhealthy: no answer from redis within ${CLI_DEADLINE_MS} ms`,
         );
         expect(run.elapsedMs).toBeGreaterThanOrEqual(CLI_DEADLINE_MS);
@@ -330,6 +353,6 @@ describe("worker healthcheck", () => {
         });
       }
     },
-    CLI_DEADLINE_MS + SPAWN_ALLOWANCE_MS + 10_000,
+    DEADLINE_CASE_MS,
   );
 });

@@ -79,6 +79,16 @@ interface FileHooks {
 }
 
 /**
+ * The `prepare` of `useTestDb` that leaves the database as it is, for a file
+ * that cleans only the rows it writes and runs against a schema migrated
+ * before it - by the integration run of `@sf/db` or by `pnpm db:migrate`
+ * against `.env.test`. A file that leaves `prepare` out gets
+ * `resetTestDatabase`, which drops the schemas under the other files of the
+ * run.
+ */
+export async function keepDatabase(): Promise<void> {}
+
+/**
  * The database handle of one integration file. `beforeAll` brings the test
  * database to its starting state (`prepare`, by default `resetTestDatabase`)
  * and opens the handle; `afterAll` runs `beforeClose` and closes it. A

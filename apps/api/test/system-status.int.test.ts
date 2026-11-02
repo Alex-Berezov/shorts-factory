@@ -6,7 +6,7 @@ import {
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_SEC,
 } from "@sf/core";
-import { type Db, type ProbeDb, closeDb, createUsageLogger } from "@sf/db";
+import { type Db, type ProbeDb, createUsageLogger } from "@sf/db";
 import { openRelay } from "@sf/db/test-support/relay";
 import { TEST_REDIS_DATABASE_OF } from "@sf/db/test-support/stack-guard";
 import { closeRedis } from "@sf/runtime";
@@ -24,10 +24,11 @@ import { createWorkerProbe } from "../src/lib/heartbeat.js";
 import { openProbeDbs } from "../src/lib/probe-dbs.js";
 import { type QueueStats, createQueueStats } from "../src/lib/queue-stats.js";
 import {
-  openTestDb,
+  keepDatabase,
   openTestProbeDb,
   openTestQueues,
   openTestRedis,
+  useTestDb,
   whenReady,
 } from "./helpers.int.js";
 import {
@@ -62,27 +63,41 @@ const PAUSE_QUEUE = "radar.snapshot";
 /** Units of the fixture call, large enough to be visible against any total. */
 const SPENT_UNITS = 37;
 
-const db = openTestDb();
+// No reset: the file cleans the rows it writes, by its own job id
+// (`deleteRows`), before the start and before the handle closes.
+const db = useTestDb(
+  { beforeAll, afterAll },
+  { prepare: keepDatabase, beforeClose: deleteRows },
+);
 // The handles the page reads through, as `compose-app.ts` opens them: the
 // fixture above writes and cleans, these only read.
 const healthDb = openTestProbeDb();
 const budgetDb = openTestProbeDb();
 const redis = openTestRedis();
-let queueStats: QueueStats;
-let app: AppInstance;
+/** Unset until the `beforeAll` of the file builds them. */
+let queueStats: QueueStats | undefined;
+let app: AppInstance | undefined;
 
-async function clean(): Promise<void> {
-  // By job id, never by provider: the suites share the table (only their Redis
-  // databases differ), and a delete by provider would take rows of another
-  // suite, left by a crashed run or counted by a case of its own.
-  await db.$client`delete from api_usage_log where job_id = ${JOB_ID}`;
+/**
+ * The rows the file writes. By job id, never by provider: the suites share
+ * the table (only their Redis databases differ), and a delete by provider
+ * would take rows of another suite, left by a crashed run or counted by a
+ * case of its own.
+ */
+async function deleteRows(handle: Db): Promise<void> {
+  await handle.$client`delete from api_usage_log where job_id = ${JOB_ID}`;
+}
+
+/** The keys the file writes in its own Redis database. */
+async function deleteKeys(): Promise<void> {
   await redis.del(WORKER_HEARTBEAT_KEY, `bull:${UNTOUCHED_QUEUE}:meta`);
 }
 
 beforeAll(async () => {
-  await clean();
+  await deleteRows(db());
+  await deleteKeys();
   queueStats = createQueueStats({ connection: redis, log: silentLogger() });
-  app = buildApp(
+  const built = buildApp(
     {
       health: createHealthProbes({ db: healthDb, redis }),
       buildInfo: { version: "int", commit: "int" },
@@ -92,21 +107,34 @@ beforeAll(async () => {
     },
     { adminPassword: TEST_PASSWORD, logger: false },
   );
-  await app.ready();
+  app = built;
+  await built.ready();
 });
 
+// This hook closes what the file opened and never reaches for the database.
+// A hook that throws here skips the afterAll hooks registered before it,
+// `beforeClose`/`closeDb` of `useTestDb` included (vitest 2 stack, E0-12AK).
 afterAll(async () => {
-  await app.close();
-  await queueStats.close();
-  await clean();
-  await closeDb(db);
-  await healthDb.close({ timeoutSec: 1 });
-  await budgetDb.close({ timeoutSec: 1 });
-  await closeRedis(redis);
+  try {
+    await app?.close();
+    await queueStats?.close();
+    // A file whose beforeAll failed before the app ran no case and wrote no
+    // key, and its client - no offline queue - may not even be connected.
+    if (app !== undefined) {
+      await deleteKeys();
+    }
+  } finally {
+    await healthDb.close({ timeoutSec: 1 });
+    await budgetDb.close({ timeoutSec: 1 });
+    await closeRedis(redis);
+  }
 });
 
 /** The page, parsed against the contract rather than read as free JSON. */
-async function readStatus(from: AppInstance = app) {
+async function readStatus(from: AppInstance | undefined = app) {
+  if (from === undefined) {
+    throw new Error("the app of the file is not built: its beforeAll failed");
+  }
   const res = await from.inject({
     method: "GET",
     url: "/system/status",
@@ -125,7 +153,7 @@ describe("GET /system/status against the live stack", () => {
     expect(quota).toBeDefined();
 
     // Written the way a job writes it - through the logger, not through SQL.
-    await createUsageLogger(db, { jobId: JOB_ID })({
+    await createUsageLogger(db(), { jobId: JOB_ID })({
       provider: "youtube_data",
       operation: "videos.list",
       units: SPENT_UNITS,

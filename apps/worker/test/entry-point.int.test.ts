@@ -1,7 +1,17 @@
 import { fork } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { closeDb } from "@sf/db";
 import { SIGINT_REPEAT_WINDOW_MS, closeRedis } from "@sf/runtime";
+import {
+  type ChildRun,
+  KILL_DEADLINE_MS,
+  collectOutput,
+  endOf,
+  endWithin,
+  killed,
+  signalled,
+  startOf,
+} from "@sf/runtime/test-support/child-run";
 import { Queue } from "bullmq";
 import {
   afterAll,
@@ -12,15 +22,20 @@ import {
   expect,
   it,
 } from "vitest";
+import { SHUTDOWN_TIMEOUT_MS } from "../src/bootstrap.js";
 import { systemSmokeJob } from "../src/jobs/system-smoke.js";
-import { type ChildRun, collectOutput, endOf, startOf } from "./child-run.js";
-import { DEV_COMMAND, manifestScripts } from "./dev-command.js";
+import {
+  DEV_COMMAND,
+  devCommandParts,
+  manifestScripts,
+} from "./dev-command.js";
 import {
   deleteSmokeUsage,
+  keepDatabase,
   obliterateQueues,
-  openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  useTestDb,
   waitFor,
 } from "./helpers.int.js";
 
@@ -37,7 +52,9 @@ import {
  * stages and the exit code are the production path from there on.
  *
  * "The way `pnpm dev` starts it" is asserted below rather than claimed here:
- * the fixture runs under `node --import tsx`, and so must the script, because
+ * the fixture runs under the flags of node `DEV_COMMAND` names
+ * (`devCommandParts`) and imports its script, and `pnpm dev` must run that
+ * command, because
  * a watcher in front of the process takes the signal for itself. `tsx watch`
  * relays it with `child.kill(signal)` and follows with SIGKILL five seconds
  * later - on Windows that first call is already `TerminateProcess`, so nothing
@@ -57,6 +74,34 @@ const JOB_COUNT = 30;
 const START_DEADLINE_MS = 20_000;
 /** How much of what a child said goes into the failure of its start. */
 const OUTPUT_TAIL_CHARS = 2_000;
+/** How long a case may wait for one thing the worker does (`waitFor`). */
+const WAIT_DEADLINE_MS = 15_000;
+/** How long the exit of the worker may take once its own stop has ended. */
+const EXIT_ROOM_MS = 5_000;
+/**
+ * How long the worker may take to end once it is signalled: the deadline of
+ * its own stop (`SHUTDOWN_TIMEOUT_MS` of `src/bootstrap.ts`), past which it
+ * exits by itself, and the room for that exit (`EXIT_ROOM_MS`).
+ */
+const SIGNALLED_END_DEADLINE_MS = SHUTDOWN_TIMEOUT_MS + EXIT_ROOM_MS;
+/** Room for the case itself on top of the deadlines of its waits. */
+const CASE_ROOM_MS = 5_000;
+/**
+ * The bound of a case that signals a worker: every wait in it ends by its own
+ * deadline, with its own reason, before the bound would cut it short with
+ * none - the start, the two waits of a case that signals twice and the
+ * repeat window between them, the end after the signal and the kill of a
+ * worker that missed it (`endWithin`, a single `SIGKILL`).
+ */
+const SIGNALLED_CASE_MS =
+  START_DEADLINE_MS +
+  2 * WAIT_DEADLINE_MS +
+  SIGINT_REPEAT_WINDOW_MS +
+  SIGNALLED_END_DEADLINE_MS +
+  KILL_DEADLINE_MS +
+  CASE_ROOM_MS;
+/** The worker as the failures of its start and stop name it. */
+const NAME = "the worker";
 /**
  * The longest the usage table stays locked once the worker is up, whatever
  * happens to the case. Counted from the start of the worker, not from the
@@ -64,15 +109,18 @@ const OUTPUT_TAIL_CHARS = 2_000;
  * sent, or the drain finishes and the case is red for a reason that is not the
  * code. Far above what the case needs after the start (the jobs, the first
  * signal, the repeat window, the second signal); with the start deadline it
- * stays under the 30 s test timeout, so a case that fails or hangs never takes
- * the lock into the next case or the next file. Measured from `armBackstop` to
- * the release, ten runs on the development machine held it 1.19-1.33 s: the
- * bound is six times that, and three times the slowest run would still be
- * under it.
+ * stays under the bound of the case (`SIGNALLED_CASE_MS`), so a case that
+ * fails or hangs never takes the lock into the next case or the next file.
+ * Measured from `armBackstop` to the release, ten runs on the development
+ * machine held it 1.19-1.33 s: the bound is six times that, and three times
+ * the slowest run would still be under it.
  */
 const HOLD_MAX_MS = 8_000;
 
-const db = openTestDb();
+const db = useTestDb(
+  { beforeAll, afterAll },
+  { prepare: keepDatabase, beforeClose: deleteSmokeUsage },
+);
 const redis = openTestRedis();
 const smoke = new Queue("system.smoke", { connection: redis });
 
@@ -85,7 +133,8 @@ const smoke = new Queue("system.smoke", { connection: redis });
  *
  * Whatever fails between the start and the signal - the start deadline, a job
  * never picked up - kills the child before the failure is thrown: a worker
- * left running would keep taking the jobs of the next case.
+ * left running would keep taking the jobs of the next case. So does an end
+ * that does not come within `SIGNALLED_END_DEADLINE_MS` of the signal.
  */
 async function runUnderSignal(
   options: {
@@ -95,7 +144,7 @@ async function runUnderSignal(
   } = {},
 ): Promise<ChildRun> {
   const child = fork(ENTRY, [], {
-    execArgv: ["--import", "tsx"],
+    execArgv: devCommandParts().execArgv,
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     ...(options.env === undefined ? {} : { env: options.env }),
   });
@@ -106,6 +155,7 @@ async function runUnderSignal(
     await startOf(child, output, {
       deadlineMs: START_DEADLINE_MS,
       tailChars: OUTPUT_TAIL_CHARS,
+      name: NAME,
     });
     options.onStarted?.();
 
@@ -116,29 +166,32 @@ async function runUnderSignal(
     }
     await waitFor(
       async () => ((await smoke.getActiveCount()) > 0 ? true : undefined),
-      { what: "the worker to pick a job up" },
+      { what: "the worker to pick a job up", timeoutMs: WAIT_DEADLINE_MS },
     );
 
-    child.send("signal");
+    await signalled(child);
     if (options.twice === true) {
       await waitFor(
         async () =>
           output().includes("shutdown started, draining active jobs")
             ? true
             : undefined,
-        { what: "the first signal to start the stop", intervalMs: 20 },
+        {
+          what: "the first signal to start the stop",
+          intervalMs: 20,
+          timeoutMs: WAIT_DEADLINE_MS,
+        },
       );
       await new Promise((resolve) =>
         setTimeout(resolve, SIGINT_REPEAT_WINDOW_MS + 100),
       );
-      child.send("signal");
+      await signalled(child);
     }
   } catch (err) {
-    child.kill("SIGKILL");
-    await ended.catch(() => undefined);
+    await killed(child, NAME);
     throw err;
   }
-  return await ended;
+  return await endWithin(child, ended, SIGNALLED_END_DEADLINE_MS, NAME);
 }
 
 /**
@@ -169,7 +222,7 @@ async function holdUsageWrites(): Promise<{
     locked = resolve;
     refused = reject;
   });
-  const transaction = db.$client.begin(async (tx) => {
+  const transaction = db().$client.begin(async (tx) => {
     await tx`lock table api_usage_log in exclusive mode`;
     locked();
     await released;
@@ -193,13 +246,13 @@ async function holdUsageWrites(): Promise<{
 
 beforeAll(async () => {
   await obliterateQueues(redis, QUEUES);
-  await seedQueueSwitches(db);
-  await deleteSmokeUsage(db);
+  await seedQueueSwitches(db());
+  await deleteSmokeUsage(db());
 });
 
 /** How many usage rows smoke runs have left in the table. */
 async function countSmokeUsage(): Promise<number> {
-  const rows = await db.$client<{ count: number }[]>`
+  const rows = await db().$client<{ count: number }[]>`
     select count(*)::int as count from api_usage_log
     where provider = 'system' and operation = 'smoke'
   `;
@@ -220,59 +273,76 @@ beforeEach(async () => {
 // holding come back as stalled, and its usage rows stay in the table.
 afterEach(async () => {
   await obliterateQueues(redis, QUEUES);
-  await deleteSmokeUsage(db);
+  await deleteSmokeUsage(db());
 });
 
+// This hook closes what the file opened and never reaches for the database.
+// A hook that throws here skips the afterAll hooks registered before it,
+// `beforeClose`/`closeDb` of `useTestDb` included (vitest 2 stack, E0-12AK).
 afterAll(async () => {
-  await smoke.close();
-  await obliterateQueues(redis, QUEUES);
-  await deleteSmokeUsage(db);
-  await closeDb(db);
-  await closeRedis(redis);
+  try {
+    await smoke.close();
+    await obliterateQueues(redis, QUEUES);
+  } finally {
+    await closeRedis(redis);
+  }
 });
 
 describe("worker entry point under a signal", () => {
-  it("stops in order, keeps the job it was running and leaves with 0", async () => {
-    const run = await runUnderSignal();
+  it(
+    "stops in order, keeps the job it was running and leaves with 0",
+    async () => {
+      const run = await runUnderSignal();
 
-    // Nothing killed it: it decided to leave, and said so.
-    expect(run.signal).toBeNull();
-    expect(run.code).toBe(0);
+      // Nothing killed it: it decided to leave, and said so.
+      expect(run.signal).toBeNull();
+      expect(run.code).toBe(0);
 
-    const stages = [...run.output.matchAll(/"target":"([a-z]+)"/g)].map(
-      (match) => match[1],
-    );
-    expect(stages).toEqual(["workers", "queues", "redis", "db"]);
-    expect(run.output).toContain("shutdown started, draining active jobs");
-    expect(run.output).toContain("shutdown complete");
+      const stages = [...run.output.matchAll(/"target":"([a-z]+)"/g)].map(
+        (match) => match[1],
+      );
+      expect(stages).toEqual(["workers", "queues", "redis", "db"]);
+      expect(run.output).toContain("shutdown started, draining active jobs");
+      expect(run.output).toContain("shutdown complete");
 
-    // The jobs it had taken are finished, not abandoned half-way: an active
-    // job left behind comes back only through the stalled scan, which is what
-    // a graceful stop exists to avoid.
-    expect(await smoke.getActiveCount()).toBe(0);
-    expect(await smoke.getCompletedCount()).toBeGreaterThan(0);
-  });
+      // The jobs it had taken are finished, not abandoned half-way: an active
+      // job left behind comes back only through the stalled scan, which is what
+      // a graceful stop exists to avoid.
+      expect(await smoke.getActiveCount()).toBe(0);
+      expect(await smoke.getCompletedCount()).toBeGreaterThan(0);
+    },
+    SIGNALLED_CASE_MS,
+  );
 
-  it("leaves at once with 130 when the signal comes a second time", async () => {
-    let hold: Awaited<ReturnType<typeof holdUsageWrites>> | undefined;
-    let run: ChildRun;
-    try {
-      hold = await holdUsageWrites();
-      run = await runUnderSignal({ twice: true, onStarted: hold.armBackstop });
-    } catch (err) {
-      // This failure is the one that explains the red case; a release that
-      // fails on top of it must not replace it.
-      await hold?.release().catch(() => undefined);
-      throw err;
-    }
-    await hold.release();
+  it(
+    "leaves at once with 130 when the signal comes a second time",
+    async () => {
+      let hold: Awaited<ReturnType<typeof holdUsageWrites>> | undefined;
+      let run: ChildRun;
+      try {
+        hold = await holdUsageWrites();
+        run = await runUnderSignal({
+          twice: true,
+          onStarted: hold.armBackstop,
+        });
+      } catch (err) {
+        // This failure is the one that explains the red case; a release that
+        // fails on top of it must not replace it.
+        await hold?.release().catch(() => undefined);
+        throw err;
+      }
+      await hold.release();
 
-    // The process chose the code itself; nothing outside killed it.
-    expect(run.signal).toBeNull();
-    expect(run.code).toBe(130);
-    expect(run.output).toContain("shutdown started, draining active jobs");
-    expect(run.output).toContain("forced exit, active jobs return as stalled");
-  });
+      // The process chose the code itself; nothing outside killed it.
+      expect(run.signal).toBeNull();
+      expect(run.code).toBe(130);
+      expect(run.output).toContain("shutdown started, draining active jobs");
+      expect(run.output).toContain(
+        "forced exit, active jobs return as stalled",
+      );
+    },
+    SIGNALLED_CASE_MS,
+  );
 
   it("fails at once, with the reason, when the worker dies on its way up", async () => {
     // A config the worker refuses at import: the child exits with 1 before
@@ -286,49 +356,64 @@ describe("worker entry point under a signal", () => {
     expect(performance.now() - startedAt).toBeLessThan(START_DEADLINE_MS / 2);
   });
 
-  it("hints on Ctrl+C after a failed start and leaves with 1 on the next", async () => {
-    // The stop a failed start began has no jobs to drain and may last until
-    // its deadline; the operator is told how to leave, and leaving still says
-    // the start broke (docs/DECISIONS.md, Р7 E0-12R).
-    const child = fork(FAILED_START, [], {
-      execArgv: ["--import", "tsx"],
-      stdio: ["ignore", "pipe", "pipe", "ipc"],
-    });
-    const output = collectOutput(child);
-    const ended = endOf(child, output);
-    const said = (text: string) => async () =>
-      output().includes(text) ? true : undefined;
-
-    try {
-      await waitFor(said("worker failed to start"), {
-        what: "the start to fail",
-        intervalMs: 20,
+  it(
+    "hints on Ctrl+C after a failed start and leaves with 1 on the next",
+    async () => {
+      // The stop a failed start began has no jobs to drain and may last until
+      // its deadline; the operator is told how to leave, and leaving still says
+      // the start broke (docs/DECISIONS.md, Р7 E0-12R).
+      const child = fork(FAILED_START, [], {
+        execArgv: devCommandParts().execArgv,
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
       });
-      child.send("signal");
-      await waitFor(
-        said(
-          "shutdown after startup failure is already in progress, press Ctrl+C again to exit now",
-        ),
-        { what: "the hint of the first Ctrl+C", intervalMs: 20 },
-      );
-      await new Promise((resolve) =>
-        setTimeout(resolve, SIGINT_REPEAT_WINDOW_MS + 100),
-      );
-      child.send("signal");
-    } catch (err) {
-      child.kill("SIGKILL");
-      await ended.catch(() => undefined);
-      throw err;
-    }
-    const run = await ended;
+      const output = collectOutput(child);
+      const ended = endOf(child, output);
+      const said = (text: string) => async () =>
+        output().includes(text) ? true : undefined;
 
-    expect(run.signal).toBeNull();
-    expect(run.code).toBe(1);
-    expect(run.output).toContain(
-      "forced exit, shutdown after startup failure did not finish",
-    );
-    expect(run.output).not.toContain("shutdown timed out");
-  });
+      try {
+        await waitFor(said("worker failed to start"), {
+          what: "the start to fail",
+          intervalMs: 20,
+          timeoutMs: WAIT_DEADLINE_MS,
+        });
+        await signalled(child);
+        await waitFor(
+          said(
+            "shutdown after startup failure is already in progress, press Ctrl+C again to exit now",
+          ),
+          {
+            what: "the hint of the first Ctrl+C",
+            intervalMs: 20,
+            timeoutMs: WAIT_DEADLINE_MS,
+          },
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, SIGINT_REPEAT_WINDOW_MS + 100),
+        );
+        await signalled(child);
+      } catch (err) {
+        await killed(child, NAME);
+        throw err;
+      }
+      const run = await endWithin(
+        child,
+        ended,
+        SIGNALLED_END_DEADLINE_MS,
+        NAME,
+      );
+
+      expect(run.signal).toBeNull();
+      expect(run.code).toBe(1);
+      expect(run.output).toContain(
+        "forced exit, shutdown after startup failure did not finish",
+      );
+      expect(run.output).not.toContain("shutdown timed out");
+    },
+    // Its start fails and is not waited for: the two waits, the repeat window
+    // between them, the end and a kill of a worker that missed it.
+    SIGNALLED_CASE_MS - START_DEADLINE_MS,
+  );
 
   it("is started by `pnpm dev` exactly the way this test starts it", () => {
     // The DoD names `pnpm --filter @sf/worker dev`, so what that script runs
@@ -336,5 +421,11 @@ describe("worker entry point under a signal", () => {
     // any other parent process would answer the signal itself and kill this
     // one: the drain above would be proven for a command nobody runs.
     expect(manifestScripts().dev).toBe(DEV_COMMAND);
+    // The fixture is that command with the signal relayed: the flags above are
+    // the command's, and the module it loads is the command's script.
+    const { script } = devCommandParts();
+    expect(readFileSync(ENTRY, "utf8")).toContain(
+      `await import("../../${script.replace(/\.ts$/, ".js")}");`,
+    );
   });
 });

@@ -1,6 +1,5 @@
 import { env } from "@sf/config";
 import { jobIds } from "@sf/core";
-import { closeDb } from "@sf/db";
 import { closeRedis } from "@sf/runtime";
 import { silentLogger } from "@sf/runtime/test-support/recording-logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -8,10 +7,12 @@ import { z } from "zod";
 import { defineJob } from "../src/lib/define-job.js";
 import { type WorkerRuntime, startWorkerRuntime } from "../src/runtime.js";
 import {
+  keepDatabase,
   obliterateQueues,
-  openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  startedRuntime,
+  useTestDb,
   waitFor,
 } from "./helpers.int.js";
 
@@ -58,7 +59,7 @@ const failingJob = defineJob({
  * Returns the id the job derived.
  */
 async function addSmoke(marker: string, timestamp: number): Promise<string> {
-  const queue = runtime.queues.get("system.smoke");
+  const queue = startedRuntime(runtime).queues.get("system.smoke");
   return failingJob.enqueue(
     {
       add: (name, data, opts) => queue.add(name, data, { ...opts, timestamp }),
@@ -85,7 +86,7 @@ async function expectRedisMajor7(): Promise<void> {
 
 /** The dlq record of `jobId`, once the failure of the job has copied it. */
 async function dlqRecordOf(jobId: string) {
-  const dlq = runtime.queues.get("system.dlq");
+  const dlq = startedRuntime(runtime).queues.get("system.dlq");
   return waitFor(
     async () => {
       const jobs = await dlq.getJobs(["waiting", "prioritized", "delayed"]);
@@ -97,16 +98,17 @@ async function dlqRecordOf(jobId: string) {
   );
 }
 
-const db = openTestDb();
+const db = useTestDb({ beforeAll, afterAll }, { prepare: keepDatabase });
 const redis = openTestRedis();
-let runtime: WorkerRuntime;
+/** Unset until the `beforeAll` of the file starts it. */
+let runtime: WorkerRuntime | undefined;
 
 beforeAll(async () => {
   await obliterateQueues(redis, QUEUES);
-  await seedQueueSwitches(db);
+  await seedQueueSwitches(db());
   runtime = await startWorkerRuntime({
     env,
-    db,
+    db: db(),
     redis,
     log: silentLogger(),
     processors: { "system.smoke": failingJob },
@@ -115,18 +117,21 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await runtime.close();
-  await obliterateQueues(redis, QUEUES);
-  await closeDb(db);
-  await closeRedis(redis);
+  try {
+    await runtime?.close();
+    await obliterateQueues(redis, QUEUES);
+  } finally {
+    await closeRedis(redis);
+  }
 });
 
 describe("dead letter queue", () => {
   it("copies a job that ran out of attempts, with its queue, id and reason", async () => {
     const marker = `dlq-${Date.now()}`;
-    const jobId = await failingJob.enqueue(runtime.queues.get("system.smoke"), {
-      marker,
-    });
+    const jobId = await failingJob.enqueue(
+      startedRuntime(runtime).queues.get("system.smoke"),
+      { marker },
+    );
 
     const record = await dlqRecordOf(jobId);
     const stored = DlqRecordSchema.parse(record.data);
@@ -143,7 +148,9 @@ describe("dead letter queue", () => {
     // The id of the record is derived, so a second `failed` for the same
     // instance - a worker restarted while the job was dying - leaves one
     // record rather than two.
-    const original = await runtime.queues.get("system.smoke").getJob(jobId);
+    const original = await startedRuntime(runtime)
+      .queues.get("system.smoke")
+      .getJob(jobId);
     expect(original).toBeDefined();
     expect(record.id).toBe(
       jobIds.dlqEntry("system.smoke", jobId, original?.timestamp ?? 0),
@@ -161,7 +168,9 @@ describe("dead letter queue", () => {
 
     const record = await dlqRecordOf(jobId);
 
-    const original = await runtime.queues.get("system.smoke").getJob(jobId);
+    const original = await startedRuntime(runtime)
+      .queues.get("system.smoke")
+      .getJob(jobId);
     expect(original?.timestamp).toBe(2 ** 53);
     expect(record.id).toBe(jobIds.dlqEntry("system.smoke", jobId, 0));
   });
@@ -183,8 +192,8 @@ describe("dead letter queue", () => {
 
     for (const job of jobs) {
       const record = await dlqRecordOf(job.jobId);
-      const original = await runtime.queues
-        .get("system.smoke")
+      const original = await startedRuntime(runtime)
+        .queues.get("system.smoke")
         .getJob(job.jobId);
       expect(original?.timestamp).toBe(job.timestamp);
       expect(record.id).toBe(
@@ -196,7 +205,7 @@ describe("dead letter queue", () => {
   it("keeps a job that still has attempts out of the dlq", async () => {
     // The `failed` event fires after every attempt; without the check the same
     // job would be copied four times before it even succeeds.
-    const dlq = runtime.queues.get("system.dlq");
+    const dlq = startedRuntime(runtime).queues.get("system.dlq");
     const before = await dlq.getJobCountByTypes("waiting");
 
     const retried = defineJob({
@@ -209,7 +218,9 @@ describe("dead letter queue", () => {
       opts: { attempts: 3, backoff: { type: "fixed", delay: 30_000 } },
     });
     const marker = `retry-${Date.now()}`;
-    await retried.enqueue(runtime.queues.get("system.smoke"), { marker });
+    await retried.enqueue(startedRuntime(runtime).queues.get("system.smoke"), {
+      marker,
+    });
 
     // Long enough for the first attempt to fail; the second is half a minute
     // away, so a copy appearing here could only be the wrong one.

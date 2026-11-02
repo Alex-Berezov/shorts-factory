@@ -29,13 +29,18 @@ describe("loadRedisUrl", () => {
     ).toBe("redis://redis:6379");
   });
 
-  it("refuses a missing or blank REDIS_URL", () => {
-    expect(() => loadRedisUrl({})).toThrow();
-    expect(() => loadRedisUrl({ REDIS_URL: "  " })).toThrow();
+  it("refuses a missing or blank REDIS_URL as not set", () => {
+    for (const source of [{}, { REDIS_URL: "  " }]) {
+      expect(() => loadRedisUrl(source)).toThrow(RedisUrlRefusedError);
+      expect(() => loadRedisUrl(source)).toThrow("REDIS_URL is not set");
+    }
   });
 
-  it("refuses what the full schema refuses", () => {
-    expect(() => loadRedisUrl({ REDIS_URL: "not a url" })).toThrow();
+  it("refuses what the full schema refuses as not a valid url", () => {
+    const source = { REDIS_URL: "not a url" };
+
+    expect(() => loadRedisUrl(source)).toThrow(RedisUrlRefusedError);
+    expect(() => loadRedisUrl(source)).toThrow("REDIS_URL is not a valid url");
   });
 
   /** The refusal of `loadRedisUrl` for `source`. */

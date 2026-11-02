@@ -1,6 +1,5 @@
 import { env } from "@sf/config";
 import type { QueueName } from "@sf/core";
-import { closeDb } from "@sf/db";
 import type { QueueFactory } from "@sf/runtime";
 import { closeRedis } from "@sf/runtime";
 import { silentLogger } from "@sf/runtime/test-support/recording-logger";
@@ -10,10 +9,11 @@ import { z } from "zod";
 import { defineJob } from "../src/lib/define-job.js";
 import { startWorkerRuntime } from "../src/runtime.js";
 import {
+  keepDatabase,
   obliterateQueues,
-  openTestDb,
   openTestRedis,
   seedQueueSwitches,
+  useTestDb,
   waitFor,
   workerQueueFactory,
 } from "./helpers.int.js";
@@ -102,28 +102,30 @@ function clientMarks(factory: QueueFactory): boolean {
   return factory.clientErrors.has(err);
 }
 
-const db = openTestDb();
+const db = useTestDb({ beforeAll, afterAll }, { prepare: keepDatabase });
 const redis = openTestRedis();
 /** Read side, opened by the test: the runtime closes its own queues. */
 const dlqReader = new Queue("system.dlq", { connection: redis });
 
 beforeAll(async () => {
   await obliterateQueues(redis, QUEUES);
-  await seedQueueSwitches(db);
+  await seedQueueSwitches(db());
 });
 
 afterAll(async () => {
-  await dlqReader.close();
-  await obliterateQueues(redis, QUEUES);
-  await closeDb(db);
-  await closeRedis(redis);
+  try {
+    await dlqReader.close();
+    await obliterateQueues(redis, QUEUES);
+  } finally {
+    await closeRedis(redis);
+  }
 });
 
 describe("worker runtime", () => {
   it("waits for a dead letter copy that is still in flight", async () => {
     const runtime = await startWorkerRuntime({
       env,
-      db,
+      db: db(),
       redis,
       log: silentLogger(),
       processors: { "system.smoke": failingJob },
@@ -190,7 +192,7 @@ describe("worker runtime", () => {
     await expect(
       startWorkerRuntime({
         env,
-        db,
+        db: db(),
         redis,
         log: silentLogger(),
         processors: { "system.smoke": failingJob },
@@ -222,7 +224,7 @@ describe("worker runtime", () => {
     };
     const runtime = await startWorkerRuntime({
       env,
-      db,
+      db: db(),
       redis,
       log: silentLogger(),
       processors: { "system.smoke": failingJob },
@@ -249,7 +251,7 @@ describe("worker runtime", () => {
     // closed the factory under the copy on its way to `system.dlq`.
     const runtime = await startWorkerRuntime({
       env,
-      db,
+      db: db(),
       redis,
       log: silentLogger(),
       processors: { "system.smoke": failingJob },
@@ -288,7 +290,7 @@ describe("worker runtime", () => {
   it("throws the refusals of every worker that refused to close, not the first one", async () => {
     const runtime = await startWorkerRuntime({
       env,
-      db,
+      db: db(),
       redis,
       log: silentLogger(),
       processors: {
@@ -329,7 +331,7 @@ describe("worker runtime", () => {
     };
     const runtime = await startWorkerRuntime({
       env,
-      db,
+      db: db(),
       redis,
       log: silentLogger(),
       processors: { "system.smoke": failingJob },
@@ -361,7 +363,7 @@ describe("worker runtime", () => {
     // dies on a processor that is not there.
     const runtime = await startWorkerRuntime({
       env,
-      db,
+      db: db(),
       redis,
       log: silentLogger(),
       processors: {

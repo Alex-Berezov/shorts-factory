@@ -14,7 +14,7 @@ import type { Logger } from "pino";
  */
 
 /** How long the worker is given before the run is called a failure. */
-const SMOKE_DEADLINE_MS = 30_000;
+export const SMOKE_DEADLINE_MS = 30_000;
 /** Backstop for the event stream: the state is also polled this often. */
 const SMOKE_POLL_INTERVAL_MS = 500;
 /** How long the verdict waits for Redis to say whether the queue is paused. */

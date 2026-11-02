@@ -3,13 +3,14 @@ import { QUEUE_NAMES } from "@sf/core";
 import { suiteRedisUrl } from "@sf/db/test-support/stack-guard";
 import { createQueueFactory, createRequestRedis } from "@sf/runtime";
 import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
+import { within } from "@sf/runtime/test-support/within";
 import type { Redis } from "ioredis";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEPENDENCY_TIMEOUT_MS } from "../src/lib/dependency-timeout.js";
 
-/** How many refusals of the client the log holds so far. */
-function refusalsIn(lines: readonly { msg?: unknown }[]): number {
-  return lines.filter((line) => line.msg === "redis client error").length;
+/** The refusals of the client the log holds so far. */
+function refusalsIn<T extends { msg?: unknown }>(lines: readonly T[]): T[] {
+  return lines.filter((line) => line.msg === "redis client error");
 }
 
 /** How long the verdict on the `init()` of one queue may take. */
@@ -19,31 +20,16 @@ const VERDICT_DEADLINE_MS = 5_000;
  * Waits for the verdict on the `init()` of `queue`, whichever it is, or fails
  * naming the queue that gave none - rather than the whole case timing out.
  */
-async function verdictOn(queue: {
+function verdictOn(queue: {
   readonly name: string;
   waitUntilReady(): Promise<unknown>;
 }): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        new Error(
-          `no verdict on the init() of queue ${queue.name} within ${VERDICT_DEADLINE_MS} ms`,
-        ),
-      );
-    }, VERDICT_DEADLINE_MS);
-  });
-  try {
-    await Promise.race([
-      queue.waitUntilReady().then(
-        () => undefined,
-        () => undefined,
-      ),
-      deadline,
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
+  const settled = (): void => undefined;
+  return within(
+    queue.waitUntilReady().then(settled, settled),
+    VERDICT_DEADLINE_MS,
+    `the verdict on the init() of queue ${queue.name}`,
+  );
 }
 
 /**
@@ -93,12 +79,12 @@ describe("the errors of the shared client on real queues", () => {
       // is written before the turn of the loop that brought the refusal ends
       // - no window of the factory to wait out.
       await Promise.all(queues.map(verdictOn));
-      const settled = refusalsIn(lines);
+      const settled = refusalsIn(lines).length;
 
       // Two refusals after the verdicts, each heard by every queue.
       await vi.waitFor(
         () => {
-          expect(refusalsIn(lines)).toBeGreaterThanOrEqual(settled + 2);
+          expect(refusalsIn(lines).length).toBeGreaterThanOrEqual(settled + 2);
         },
         { timeout: 10_000, interval: 50 },
       );
@@ -109,7 +95,7 @@ describe("the errors of the shared client on real queues", () => {
       await factory.close();
     }
 
-    const refusals = lines.filter((line) => line.msg === "redis client error");
+    const refusals = refusalsIn(lines);
     expect(refusals[0]).toMatchObject({
       level: "error",
       err: expect.objectContaining({

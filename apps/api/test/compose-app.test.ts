@@ -1,7 +1,10 @@
 import { type Env, loadEnv } from "@sf/config";
 import { QUEUE_NAMES } from "@sf/core";
 import { createRequestRedis } from "@sf/runtime";
-import { recordingLogger } from "@sf/runtime/test-support/recording-logger";
+import {
+  recordingLogger,
+  recordingServiceLogger,
+} from "@sf/runtime/test-support/recording-logger";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +17,6 @@ import {
 } from "../src/compose-app.js";
 import { type QueueStats, createQueueStats } from "../src/lib/queue-stats.js";
 import { dependencyFailureCode } from "../src/lib/system-status.js";
-import { recordingServiceLogger } from "./helpers.js";
 
 /**
  * Nothing listens on port 1. The database client does not connect until it is
