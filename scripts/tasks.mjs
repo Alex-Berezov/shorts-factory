@@ -2,7 +2,11 @@
 /**
  * Task tracker CLI — single source of truth is docs/tasks/tasks.json.
  * Renders docs/00_STATUS.md (human + agent dashboard) after every mutation.
- * No dependencies; works on Node >= 20.
+ * `next`, `list` and `show` run on Node alone, before `pnpm install`. Every
+ * other command reads the section of a task or writes the links of
+ * docs/00_STATUS.md, both made by scripts/lib/tracker-doc.mjs with packages
+ * of the root (markdown-it, github-slugger, gemoji): it loads that module
+ * when it runs, and without the packages it says so and writes nothing.
  *
  *   node scripts/tasks.mjs next [n]            what to take next (deps satisfied)
  *   node scripts/tasks.mjs start <id>          mark in_progress
@@ -14,8 +18,9 @@
  *   node scripts/tasks.mjs list [epic]         table of tasks
  *   node scripts/tasks.mjs render              regenerate docs/00_STATUS.md only
  *   node scripts/tasks.mjs add <id> "<title>"  new task [--epic E?] [--est "1 д"] [--deps a,b] [--doc f.md]
- *   node scripts/tasks.mjs set <id> [--title "<title>"] [--doc f.md]
- *                                              change the title or the document of a task
+ *   node scripts/tasks.mjs set <id> [--title "<title>"] [--doc f.md] [--deps a,b] [--est "1 д"]
+ *                                              change the title, the document, the
+ *                                              dependencies or the estimate of a task
  *
  * `--doc` is a path from docs/ (`TECH_DEBT.md`, not `docs/TECH_DEBT.md`) and
  * must name a file there; `render --check` holds every task to the same.
@@ -24,7 +29,13 @@
  * `E<n>-<n>[A-Z...]` or `ADHOC-<yyyymmdd>-<n>`, the epic that goes with it
  * (`--epic` in any case, and only the one the id gives) and `--deps` of the
  * tracker only (scripts/lib/tracker-task.mjs); `set` refuses values the task
- * already has, and `--doc 00_STATUS.md` for a task that is not of the owner.
+ * already has (deps in another order are the same), `--doc 00_STATUS.md` for
+ * a task that is not of the owner, and `--deps` that name a task not in the
+ * tracker or make a cycle, the task itself in them too (`--deps ""` clears
+ * them). `add` and `set` take a title of one line (with no blank at its
+ * ends for a task with a section) and an `--est` in days (`1 д`, `0.5-1 д`,
+ * a note in parentheses after it, a `|` in which the cell of
+ * docs/00_STATUS.md escapes; or `?`), and refuse a flag given twice.
  *
  *   node scripts/tasks.mjs --root=<dir> <command> ...
  *                                              the same on the tracker, docs/ and journal
@@ -36,16 +47,9 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { codeOf } from "./lib/files.mjs";
 import { repoRoot } from "./lib/paths.mjs";
-import {
-  DEFAULT_DOC,
-  badDocs,
-  badSections,
-  docProblem,
-  sectionProblem,
-  slug,
-} from "./lib/tracker-doc.mjs";
 import {
   ADHOC,
   epicOf,
@@ -158,6 +162,11 @@ const COMMANDS = [
   "add",
   "set",
 ];
+/**
+ * The commands that read no document of a task and write no status: they do
+ * not load scripts/lib/tracker-doc.mjs, so they run before `pnpm install`.
+ */
+const ON_NODE_ALONE = ["next", "list", "show"];
 
 // ---------- io ----------
 /** @returns {Task[]} */
@@ -195,9 +204,79 @@ const available = (tasks) =>
 const pendingDeps = (tasks, t) =>
   t.deps.filter((d) => tasks.find((x) => x.id === d)?.status !== "done");
 
+// ---------- the document of a task ----------
+/**
+ * Why scripts/lib/tracker-doc.mjs did not load, from the message of the
+ * `ERR_MODULE_NOT_FOUND` of Node, with what to do: a package of the root
+ * (a bare specifier, `Cannot find package 'gemoji'`) is installed by
+ * `pnpm install`; a file that is not there is one of the scripts of the
+ * tracker, or of a package installed only in part, and is named from the
+ * root - an absolute path says where the checkout is and nothing more.
+ *
+ * @param {string} command
+ * @param {string} message
+ * @returns {string}
+ */
+function notLoaded(command, message) {
+  const alone = `${ON_NODE_ALONE.join(", ")} run without them`;
+  const missing = /^Cannot find (?:package|module) '([^']+)'/.exec(
+    message,
+  )?.[1];
+  // A bare specifier is a package; Node names a file of a package installed
+  // in part (its `main` gone) "package" too, by its absolute path.
+  if (missing !== undefined && !isAbsolute(missing)) {
+    return `${command} needs the package ${missing} of the root, which is not installed: run pnpm install; ${alone}`;
+  }
+  const named = missing === undefined ? undefined : relative(repoRoot, missing);
+  const where =
+    named === undefined || named.startsWith("..") || isAbsolute(named)
+      ? "a module it imports"
+      : named.split(sep).join("/");
+  if (where.split("/").includes("node_modules")) {
+    return `${command} needs the packages of the root, and ${where} of one is not there: run pnpm install; ${alone}`;
+  }
+  return `${command} cannot load scripts/lib/tracker-doc.mjs: ${where} is not there, and the scripts of the tracker need it - restore it from git`;
+}
+
+/**
+ * scripts/lib/tracker-doc.mjs, loaded only by a command that needs it: its
+ * packages are those of the root, and a module that is not there is refused
+ * with what to do (`notLoaded`), not thrown.
+ *
+ * @param {string} command
+ * @returns {Promise<typeof import("./lib/tracker-doc.mjs")>}
+ */
+async function importTrackerDoc(command) {
+  try {
+    return await import("./lib/tracker-doc.mjs");
+  } catch (error) {
+    if (codeOf(error) !== "ERR_MODULE_NOT_FOUND") throw error;
+    const [message = ""] = String(
+      error instanceof Error ? error.message : error,
+    ).split("\n");
+    return die(notLoaded(command, message));
+  }
+}
+
+const [cmd = "next", ...args] = argv;
+/** @type {typeof import("./lib/tracker-doc.mjs") | undefined} */
+const loadedTrackerDoc =
+  COMMANDS.includes(cmd) && !ON_NODE_ALONE.includes(cmd)
+    ? await importTrackerDoc(cmd)
+    : undefined;
+/**
+ * The module of the document of a task. A command of `ON_NODE_ALONE` that
+ * asks for it is a mistake of this script, not of the tracker.
+ */
+const trackerDoc = () =>
+  loadedTrackerDoc ??
+  die(
+    `${cmd} is one of ${ON_NODE_ALONE.join(", ")}, which do not load scripts/lib/tracker-doc.mjs`,
+  );
+
 // ---------- markdown helpers ----------
 /** @type {(t: Task) => string} */
-const link = (t) => `[${t.id}](${t.doc}#${slug(t.id, t.title)})`;
+const link = (t) => `[${t.id}](${t.doc}#${trackerDoc().slug(t.id, t.title)})`;
 /** @type {(done: number, total: number, width?: number) => string} */
 const bar = (done, total, width = 20) => {
   const filled = total ? Math.round((done / total) * width) : 0;
@@ -360,7 +439,7 @@ function render(tasks, opts = {}) {
     } catch {
       cur = "";
     }
-    const broken = badDocs(tasks, DOCS_DIR);
+    const broken = trackerDoc().badDocs(tasks, DOCS_DIR);
     if (broken.length) {
       console.error(
         [
@@ -371,13 +450,13 @@ function render(tasks, opts = {}) {
       );
       process.exit(1);
     }
-    const misplaced = badSections(tasks, DOCS_DIR);
+    const misplaced = trackerDoc().badSections(tasks, DOCS_DIR);
     if (misplaced.length) {
       console.error(
         [
           "docs/tasks/tasks.json names tasks whose section is not where docs/00_STATUS.md links:",
           ...misplaced.map((line) => `  ${line}`),
-          "each line ends with the fix: the title of the section to give, or the section to write",
+          "each task names its fix: the section to write or the one of them to keep, the heading to write as plain text or to give a text of its own, or the title to give, which the line after it holds",
         ].join("\n"),
       );
       process.exit(1);
@@ -406,7 +485,6 @@ function worklog(line) {
 }
 
 // ---------- commands ----------
-const [cmd = "next", ...args] = argv;
 const tasks = load();
 /**
  * A word shaped as a flag (`--doc`, `--epc`): a value or an argument that is
@@ -415,10 +493,18 @@ const tasks = load();
  * @type {(value: string) => boolean}
  */
 const isFlag = (value) => /^--[a-z][a-z-]*$/.test(value);
-/** @type {(name: string) => string | undefined} */
+/**
+ * The value of the flag `name`, undefined when it is not given. A flag given
+ * twice is refused: which of the two values counts is not for the CLI to
+ * guess.
+ * @type {(name: string) => string | undefined}
+ */
 const opt = (name) => {
   const i = args.indexOf(name);
   if (i === -1) return undefined;
+  if (args.indexOf(name, i + 1) !== -1) {
+    die(`${name} is given twice: give it once`);
+  }
   const value = args[i + 1];
   if (value === undefined || isFlag(value)) {
     die(`${name} needs a value`);
@@ -439,27 +525,164 @@ const positional = (value, what) => {
  * The section `### <id>. <title>` the doc of a task must hold: the check of
  * `render --check`, made before anything is written; the reason names the
  * fix `command` can make.
- * @type {(task: Task, command: "add" | "set") => void}
+ * @type {(task: Task, command: "add" | "set" | "set-title") => void}
  */
 const checkSection = (task, command) => {
-  const problem = sectionProblem(task, DOCS_DIR, command);
+  const problem = trackerDoc().sectionProblem(task, DOCS_DIR, command);
   if (problem !== undefined) die(problem);
 };
 /** @type {(doc: string) => void} */
 const checkDoc = (doc) => {
-  const problem = docProblem(doc, DOCS_DIR);
+  const problem = trackerDoc().docProblem(doc, DOCS_DIR);
   if (problem !== undefined) die(problem);
 };
 /**
- * A title is one line with text in it: a row of docs/00_STATUS.md and a line
- * of the journal take it as it is.
- * @type {(title: string) => void}
+ * A value a row of docs/00_STATUS.md and a line of the journal take as it is
+ * is one line with text in it; `what` names it in the refusal.
+ * @type {(value: string, what: string) => void}
  */
-const checkTitle = (title) => {
-  if (title.trim() === "") die("title is empty");
-  if (/[\r\n]/.test(title)) {
+const checkLine = (value, what) => {
+  if (value.trim() === "") die(`${what} is empty`);
+  if (/[\r\n]/.test(value)) {
     die(
-      "title has a line break: a row of docs/00_STATUS.md and a line of the journal take it on one line",
+      `${what} has a line break: a row of docs/00_STATUS.md and a line of the journal take it on one line`,
+    );
+  }
+};
+/**
+ * A title is one line; that of a task with a section (a `doc` other than
+ * docs/00_STATUS.md) has no blank at either end too: the heading of a section
+ * has none (the renderer cuts them), so a title with one is never that of a
+ * section, nor is the section the refusal would tell to write. A task of
+ * docs/00_STATUS.md has no section, and its title is taken as it is.
+ * @type {(title: string, doc: string) => void}
+ */
+const checkTitle = (title, doc) => {
+  checkLine(title, "title");
+  if (doc !== trackerDoc().DEFAULT_DOC && title.trim() !== title) {
+    die(
+      "title starts or ends with a blank: the heading of a section has none; give the title without it",
+    );
+  }
+};
+/**
+ * An estimate in days: `<n> д` or a range `<n>-<n> д` (a dash or an en
+ * dash), a note in parentheses after it if any, a dot for a fraction
+ * (`0.5`); or `?` for none. The note is one pair of parentheses to the end,
+ * with none inside and more than blanks in it: `1 д (a) 3 д (b)` holds a
+ * second estimate and is refused rather than summed as the first, and
+ * `1 д ()` notes nothing. Anything else - `0,5 д`, hours, a number
+ * in words - is refused rather than read as some other number of days. One
+ * rule for `add` and `set`; a range from more to less is refused in
+ * `checkEstimate`.
+ */
+const ESTIMATE =
+  /^(\d+(?:\.\d+)?)(?:\s*[-–]\s*(\d+(?:\.\d+)?))?\s*д(\s*\([^()]*[^()\s][^()]*\))?$/;
+/**
+ * An estimate is one line, as a title is, in the grammar of `ESTIMATE`.
+ * @type {(estimate: string) => void}
+ */
+const checkEstimate = (estimate) => {
+  checkLine(estimate, "--est");
+  if (estimate === "?") return;
+  const found = ESTIMATE.exec(estimate);
+  if (found === null) {
+    die(
+      `--est "${estimate}" is not an estimate in days: give "<n> д" or "<n>-<n> д" (a dot for a fraction, a note of text in parentheses after it if any), or "?"`,
+    );
+  }
+  const [, low, high, note = ""] = found;
+  if (high !== undefined && Number(low) > Number(high)) {
+    die(
+      `--est "${estimate}" is a range from more days to less: give it as "${high}-${low} д${note}"`,
+    );
+  }
+};
+/**
+ * The estimate as given (`1 д`, `0.5-1 д`) and the days the status sums: the
+ * larger end of a range, none for `?`; a note in parentheses counts for
+ * nothing. Only an estimate `checkEstimate` takes comes here.
+ * @type {(estimate: string) => { estimate: string, estimate_days: number | null }}
+ */
+const estimateOf = (estimate) => {
+  const found = ESTIMATE.exec(estimate);
+  if (found === null) return { estimate, estimate_days: null };
+  const ends = [found[1], found[2]]
+    .filter((end) => end !== undefined)
+    .map(Number);
+  return { estimate, estimate_days: Math.max(...ends) };
+};
+/**
+ * The ids of `--deps a,b`, upper case, each once, in the order given; `""`
+ * is none.
+ * @type {(value: string) => string[]}
+ */
+const depsOf = (value) => [
+  ...new Set(
+    value
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean),
+  ),
+];
+/**
+ * Whether two lists of deps are the same: the order is no change, a task
+ * named twice is (the deps given are each once, so deps written with a
+ * repeat are changed to them).
+ * @type {(a: readonly string[], b: readonly string[]) => boolean}
+ */
+const sameDeps = (a, b) =>
+  a.length === b.length &&
+  [...a].sort().every((id, i) => id === [...b].sort()[i]);
+/** @type {(deps: string[]) => void} */
+const checkDeps = (deps) => {
+  const missing = missingDeps(deps, new Set(tasks.map((t) => t.id)));
+  if (missing.length) {
+    die(
+      `--deps names tasks that are not in the tracker: ${missing.join(", ")}`,
+    );
+  }
+};
+/**
+ * A cycle of the deps of the tracker with `task` as it would be that runs
+ * through `task`, the ids along it and the first again at the end
+ * (`E0-01 → E0-02 → E0-01`); `[]` for none. A task of a cycle waits for
+ * itself: `next` never offers it, and nothing says why. The walk starts at
+ * `task` and goes along deps from it; a cycle of others that it reaches (the
+ * tracker had it, a merge) is not its cycle and refuses nothing. A task
+ * depending on itself is a cycle of one.
+ * @type {(task: Task) => string[]}
+ */
+const cycleWith = (task) => {
+  /** @type {Map<string, readonly string[]>} */
+  const deps = new Map(tasks.map((t) => [t.id, t.deps]));
+  deps.set(task.id, task.deps);
+  /** @type {Set<string>} */
+  const done = new Set();
+  /** @type {string[]} */
+  const path = [];
+  /** @type {(id: string) => string[]} */
+  const walk = (id) => {
+    if (done.has(id)) return [];
+    const at = path.indexOf(id);
+    if (at !== -1) return at === 0 ? [...path, id] : [];
+    path.push(id);
+    for (const dep of deps.get(id) ?? []) {
+      const cycle = walk(dep);
+      if (cycle.length) return cycle;
+    }
+    path.pop();
+    done.add(id);
+    return [];
+  };
+  return walk(task.id);
+};
+/** @type {(task: Task) => void} */
+const checkCycle = (task) => {
+  const cycle = cycleWith(task);
+  if (cycle.length) {
+    die(
+      `--deps makes a cycle of dependencies, ${cycle.join(" → ")}: no task of it can start`,
     );
   }
 };
@@ -528,7 +751,7 @@ switch (cmd) {
     render(tasks);
     // A task of the default document has no section: its title is the spec.
     console.log(
-      t.doc === DEFAULT_DOC
+      t.doc === trackerDoc().DEFAULT_DOC
         ? `🔄 ${t.id} started — spec: the title, no section of its own`
         : `🔄 ${t.id} started — spec: docs/${t.doc} (### ${t.id})`,
     );
@@ -570,28 +793,22 @@ switch (cmd) {
     // add <id> "<title>" [--epic E?] [--est "1 д"] [--deps E0-01,E0-02] [--doc file.md]
     const id = positional(args[0], "task id").toUpperCase();
     const title = positional(args[1], "title");
-    checkTitle(title);
-    const doc = opt("--doc") ?? DEFAULT_DOC;
+    const doc = opt("--doc") ?? trackerDoc().DEFAULT_DOC;
+    checkTitle(title, doc);
     // Before anything else: a doc the readers cannot open is refused even
     // for a task that turns out to exist.
     checkDoc(doc);
     if (tasks.some((t) => t.id === id)) die(`${id} already exists`);
     const epic = opt("--epic")?.toUpperCase() ?? epicOf(id);
-    const estimate = opt("--est") ?? "?";
-    const nums = [...estimate.matchAll(/\d+(?:\.\d+)?/g)].map((m) =>
-      Number(m[0]),
-    );
+    const est = opt("--est");
+    if (est !== undefined) checkEstimate(est);
     /** @type {Task} */
     const added = {
       id,
       epic,
       title,
-      estimate,
-      estimate_days: nums.length ? Math.max(...nums) : null,
-      deps: (opt("--deps") ?? "")
-        .split(",")
-        .map((s) => s.trim().toUpperCase())
-        .filter(Boolean),
+      ...estimateOf(est ?? "?"),
+      deps: depsOf(opt("--deps") ?? ""),
       doc,
       status: "todo",
       added_at: today(),
@@ -600,12 +817,8 @@ switch (cmd) {
     // rule, before it is written.
     const idWrong = idProblem(id) ?? epicProblem(id, epic);
     if (idWrong !== undefined) die(idWrong);
-    const missing = missingDeps(added.deps, new Set(tasks.map((t) => t.id)));
-    if (missing.length) {
-      die(
-        `--deps names tasks that are not in the tracker: ${missing.join(", ")}`,
-      );
-    }
+    checkDeps(added.deps);
+    checkCycle(added);
     // The section is written before the task: the tracker never names one
     // that is not there.
     checkSection(added, "add");
@@ -618,16 +831,27 @@ switch (cmd) {
   }
 
   case "set": {
-    // set <id> [--title "..."] [--doc file.md]
+    // set <id> [--title "..."] [--doc file.md] [--deps a,b] [--est "1 д"]
     const title = opt("--title");
     const doc = opt("--doc");
-    if (title === undefined && doc === undefined)
-      die("nothing to set: give --title and/or --doc");
-    if (title !== undefined) checkTitle(title);
+    const depsArg = opt("--deps");
+    const deps = depsArg === undefined ? undefined : depsOf(depsArg);
+    const est = opt("--est");
+    if (
+      title === undefined &&
+      doc === undefined &&
+      deps === undefined &&
+      est === undefined
+    )
+      die("nothing to set: give --title, --doc, --deps and/or --est");
+    if (title !== undefined) checkLine(title, "title");
+    if (est !== undefined) checkEstimate(est);
     // The values first, the task second: a bad value is refused whatever
     // the id.
     if (doc !== undefined) checkDoc(doc);
+    if (deps !== undefined) checkDeps(deps);
     const t = find(tasks, positional(args[0], "task id"));
+    const { DEFAULT_DOC } = trackerDoc();
     // The default document holds no section: a task of an epic sent there
     // would only drop the check of its section.
     if (doc === DEFAULT_DOC && epicOf(t.id) !== ADHOC) {
@@ -635,18 +859,33 @@ switch (cmd) {
         `--doc ${DEFAULT_DOC} is for a task of the owner (ADHOC-<yyyymmdd>-<n>) only: ${t.id} keeps a document with its section`,
       );
     }
+    // The blanks at the ends of a title are a matter of the section, and so
+    // of the document the task has once set: known only with the task.
+    if (title !== undefined) checkTitle(title, doc ?? t.doc);
     // A value the task already has is no change: the journal records only
-    // what the tracker no longer holds.
+    // what the tracker no longer holds. Another order of deps is none; a
+    // repeat in the deps written is one (`sameDeps`).
     const newTitle = title !== t.title ? title : undefined;
     const newDoc = doc !== t.doc ? doc : undefined;
-    if (newTitle === undefined && newDoc === undefined) {
-      die(`nothing to change: ${t.id} already has that title and doc`);
+    const newDeps =
+      deps !== undefined && !sameDeps(deps, t.deps) ? deps : undefined;
+    const newEst = est !== t.estimate ? est : undefined;
+    if (
+      newTitle === undefined &&
+      newDoc === undefined &&
+      newDeps === undefined &&
+      newEst === undefined
+    ) {
+      die(`nothing to change: ${t.id} already has the values given`);
     }
+    // Only deps that change can make a cycle: a task a merge left in one
+    // keeps the deps it has and takes another estimate or title.
+    if (newDeps !== undefined) checkCycle({ ...t, deps: newDeps });
     // The task as it would be: refused here, nothing is written. A doc it
     // keeps is held to a file first - one gone from disk is named, not thrown.
     const candidate = { ...t, title: title ?? t.title, doc: doc ?? t.doc };
     if (doc === undefined) checkDoc(t.doc);
-    checkSection(candidate, "set");
+    checkSection(candidate, title === undefined ? "set" : "set-title");
     /** @type {string[]} */
     const changed = [];
     if (newTitle !== undefined) {
@@ -656,6 +895,16 @@ switch (cmd) {
     if (newDoc !== undefined) {
       changed.push(`doc docs/${t.doc} → docs/${newDoc}`);
       t.doc = newDoc;
+    }
+    if (newDeps !== undefined) {
+      changed.push(
+        `зависимости «${t.deps.join(", ") || "—"}» → «${newDeps.join(", ") || "—"}»`,
+      );
+      t.deps = newDeps;
+    }
+    if (newEst !== undefined) {
+      changed.push(`оценка «${t.estimate}» → «${newEst}»`);
+      Object.assign(t, estimateOf(newEst));
     }
     save(tasks);
     worklog(

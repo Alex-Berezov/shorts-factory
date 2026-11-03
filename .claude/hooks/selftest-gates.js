@@ -112,7 +112,10 @@ function registerGateProbes(ctx, deps) {
    * на каждом прогоне, но их правка гейт не выбирает (E0-12N). Список из двух гейтов - решение Q12
    * техлида (docs/DECISIONS.md, 18.10.2026, E0-12F): пути, которые читает when/cmd гейта-владельца
    * note, selftest не выбирают, иначе selftest идёт на каждой задаче; подтверждено решением ОВ1
-   * E0-12N (21.10.2026). Расширять список или when harness-selftest - только новым решением техлида.
+   * E0-12N (21.10.2026). Исключение - модули, которые проба грузит сама прямым require
+   * (tracker-fixture.mjs, tracker-doc.mjs, markdown.mjs); их транзитивные импорты под glob гейта
+   * tracker selftest не выбирают (docs/DECISIONS.md, 03.11.2026, E0-12AM, круг 8, вариант B).
+   * Расширять список или when harness-selftest - только новым решением техлида.
    */
   const NOTE_SELECTING_GATES = ['compose', 'tracker'];
 
@@ -639,12 +642,12 @@ function registerGateProbes(ctx, deps) {
     ],
   });
 
-  // текст как литерал регулярного выражения: id и doc задачи из tasks.json
-  const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Строка раздела задачи и документ по умолчанию - из самого scripts/lib/tracker-doc.mjs
-  // (sectionHeading, DEFAULT_DOC), а не копии литералов: смена формы раздела в модуле не оставляет
-  // пробу сверять прежнюю (E0-12X, круг ревью 2).
+  // Строка раздела задачи, документ по умолчанию, тексты отказов и дерево копии - из самого
+  // scripts/lib/tracker-doc.mjs и scripts/lib/tracker-fixture.mjs, а не копии литералов: смена формы
+  // раздела или причины в модуле не оставляет пробу сверять прежнюю (E0-12X, круг ревью 2; E0-12AM).
   const trackerDoc = () => require(path.join(ROOT, 'scripts', 'lib', 'tracker-doc.mjs'));
+  const trackerFixture = () => require(path.join(ROOT, 'scripts', 'lib', 'tracker-fixture.mjs'));
+  const markdown = () => require(path.join(ROOT, 'scripts', 'lib', 'markdown.mjs'));
   // Копия трекера во временной папке: tasks.json как есть, документ каждой задачи несёт раздел
   // «### <id>. <title>» каждой своей задачи (render --check сверяет и его, E0-12X), статус
   // отрисован, render --check на полной копии зелёный - это проба пропуска. fn получает копию
@@ -653,21 +656,15 @@ function registerGateProbes(ctx, deps) {
     const tmp = tempDir('tracker');
     try {
       const { sectionHeading, DEFAULT_DOC } = trackerDoc();
-      const tasks = readJson(path.join(ROOT, 'docs', 'tasks', 'tasks.json'));
-      fs.mkdirSync(path.join(tmp, 'docs', 'tasks'), { recursive: true });
-      fs.copyFileSync(path.join(ROOT, 'docs', 'tasks', 'tasks.json'), path.join(tmp, 'docs', 'tasks', 'tasks.json'));
-      // doc из tasks.json не должен уводить запись и удаление за tmp (`..`, абсолютный путь)
-      const outside = (d) => {
-        if (typeof d !== 'string' || !d) return true;
-        const rel = path.relative(path.join(tmp, 'docs'), path.resolve(tmp, 'docs', ...d.split('/')));
-        return rel.startsWith('..') || path.isAbsolute(rel);
-      };
-      const bad = tasks.map((t) => t.doc).find(outside);
-      if (bad !== undefined || tasks.some((t) => outside(t.doc))) return 'doc вне tmp: ' + JSON.stringify(bad);
-      const section = (t) => sectionHeading(t.id, t.title) + '\n';
-      for (const d of new Set(tasks.map((t) => t.doc))) {
-        put(tmp, 'docs/' + d, tasks.filter((t) => t.doc === d).map(section).join('\n'));
+      const json = fs.readFileSync(path.join(ROOT, 'docs', 'tasks', 'tasks.json'), 'utf8');
+      const tasks = JSON.parse(json);
+      // doc из tasks.json не должен уводить запись и удаление за tmp: фикстура отказывает сама
+      try {
+        trackerFixture().writeTrackerTree(tmp, tasks, { json });
+      } catch (error) {
+        return 'дерево копии: ' + (error && error.message);
       }
+      const section = (t) => sectionHeading(t.id, t.title) + '\n';
       const cli = (...args) => run(process.execPath, [path.join(ROOT, 'scripts', 'tasks.mjs'), '--root=' + tmp].concat(args), { cwd: ROOT });
       const said = (r) => 'код ' + r.status + ' ' + String(r.stderr || r.stdout || (r.error && r.error.message)).trim().slice(0, 160);
       const render = cli('render');
@@ -694,6 +691,8 @@ function registerGateProbes(ctx, deps) {
       'docs/30_E0_TASKS.md',
       'docs/43_E13_TASKS.md',
       'docs/TECH_DEBT.md',
+      'package.json',
+      'pnpm-lock.yaml',
       'scripts/tasks.mjs',
       'scripts/lib/paths.mjs',
       'scripts/lib/tracker-doc.mjs',
@@ -722,8 +721,13 @@ function registerGateProbes(ctx, deps) {
       { name: 'пути файлов в его note на диске', fn: ({ gate }) => notePathsOnDisk(gate) },
       // Проба отказа: when без маски tracker-doc.mjs не выбирает гейт на этом файле (E0-12M).
       refusalExtra('scripts/lib/tracker-doc.mjs', 'scripts/tasks.mjs', 'when без scripts/lib/tracker-doc.mjs не выбирает его на этом файле (проба отказа)'),
+      refusalExtra('package.json', 'scripts/tasks.mjs', 'when без package.json не выбирает его на этом файле (пины markdown-it, github-slugger, gemoji; проба отказа)'),
+      refusalExtra('pnpm-lock.yaml', 'scripts/tasks.mjs', 'when без pnpm-lock.yaml не выбирает его на этом файле (проба отказа)'),
       neighboursExtra(['docs/*_TASKS.md']),
       importGraphExtra('scripts/tasks.mjs'),
+      // when не шире файлов выбора на всём дереве git, как у compose: маска файла, который скрипт
+      // трекера не читает, краснеет здесь (E0-12AM, круг 5). Документы задач - маска docs/*_TASKS.md целиком.
+      trackedOutsideExtra(['docs/*_TASKS.md']),
       // when - перечень документов задач на сегодня: doc новой задачи вне него краснеет здесь,
       // а не молчит до первого переименования этого документа (E0-12M, B11).
       {
@@ -737,55 +741,96 @@ function registerGateProbes(ctx, deps) {
       },
       // Выбор на документе задачи обещает, что render --check его читает: на копии трекера с
       // удалённым документом задачи гейт красный и называет его, на полной копии - зелёный.
+      // Текст отказа - docProblem из scripts/lib/tracker-doc.mjs: проба проверяет проводку гейта,
+      // а не правило (его держат юнит-кейсы test/tracker-doc.test.ts).
       {
         name: 'render --check краснеет на удалённом документе задачи и зелёный на полной копии',
         fn: () =>
           withTrackerCopy((copy) => {
             // документ - doc задачи из самого tasks.json, а не имя из головы: смена doc не роняет пробу
-            // по чужой причине; текст отказа - docProblem из scripts/lib/tracker-doc.mjs
+            // по чужой причине
             const doc = copy.tasks[0] && copy.tasks[0].doc;
             if (typeof doc !== 'string' || !doc) return 'у первой задачи tasks.json нет doc - удалять нечего';
             fs.rmSync(path.join(copy.tmp, 'docs', ...doc.split('/')));
+            const problem = trackerDoc().docProblem(doc, path.join(copy.tmp, 'docs'));
+            if (problem === undefined) return 'docProblem не видит отказа для удалённого docs/' + doc;
+            // метка ветки «нет файла на диске», как у отказов раздела ниже
+            if (!problem.includes('is not on disk')) return 'docProblem даёт причину не этой ветки для удалённого docs/' + doc + ': ' + JSON.stringify(problem);
             const red = copy.cli('render', '--check');
-            const gone = new RegExp('docs/' + escapeRe(doc) + ' is not on disk');
-            if (red.status === 0 || !gone.test(String(red.stderr))) return 'render --check без docs/' + doc + ': ' + copy.said(red);
+            if (red.status === 0 || !String(red.stderr).includes(copy.tasks[0].id + ': ' + problem)) {
+              return 'render --check без docs/' + doc + ': ' + copy.said(red);
+            }
             return { note: 'красный: docs/' + doc };
           }),
       },
-      // note гейта обещает сверку раздела «### <id>. <title>» (E0-12X): на копии, где заголовок
-      // раздела переписан, где раздела нет и где разделов два, гейт красный и называет задачу;
+      // note гейта обещает сверку раздела «### <id>. <title>» (E0-12X, E0-12AM): на копии, где заголовок
+      // раздела переписан, где раздела нет, где разделов два, где в заголовке разметка, где якорь
+      // раздела есть у заголовка выше (другого уровня и setext - GitHub нумерует раздел) и где выше
+      // раздела заголовок с emoji (якорь не моделируется), гейт красный и называет задачу;
+      // разметка - весь заголовок в *…*: текст рендера совпадает с названием в трекере, и отказ даёт
+      // именно ветка разметки, а не расхождение названия;
       // пропуск - зелёный render --check на полной копии в withTrackerCopy. Задача - первая с doc не
-      // по умолчанию из самого tasks.json, текст отказа - sectionProblem из scripts/lib/tracker-doc.mjs.
+      // по умолчанию из самого tasks.json, текст отказа - sectionProblem из scripts/lib/tracker-doc.mjs
+      // (не литерал и не регулярное выражение из головы: проба проверяет, что гейт правило применяет,
+      // а само правило держат юнит-кейсы test/tracker-doc.test.ts). Ветку держит метка - кусок
+      // текста именно её причины: согласованная поломка модуля, что отдаёт одну причину за другую,
+      // пробу не проходит (E0-12AM, ревью З6). Повтор якоря выше раздела - ветка «GitHub gives the
+      // section» (якорь с -1), у двух видов заголовка одна метка: вид держит их выбор (заголовок выше,
+      // а не ниже раздела), а не текст причины (E0-12AM, ревью Б3-7). Пропуск ветвей, что смотрят только выше
+      // раздела: тот же повтор якоря и тот же emoji ниже раздела - зелёный render --check (E0-12AM, ревью
+      // круг 4). Текст заголовка без «### » - из разбора markdown.mjs (headingsOf), а не срез строки.
       {
-        name: 'render --check краснеет на разделе задачи, который не совпал, на документе без раздела и на двух разделах',
+        name: 'render --check краснеет на разделе задачи, который не совпал, на документе без раздела, на двух разделах, на разметке, на повторе якоря выше раздела и на emoji выше раздела, и зелёный на них ниже раздела',
         fn: () =>
           withTrackerCopy((copy) => {
             const task = copy.tasks.find((t) => typeof t.doc === 'string' && t.doc !== copy.DEFAULT_DOC);
             if (!task) return 'в tasks.json нет задачи с doc не по умолчанию - сверять нечего';
             const others = copy.tasks.filter((t) => t.doc === task.doc && t !== task);
-            const write = (own) => put(copy.tmp, 'docs/' + task.doc, others.map(copy.section).concat(own).join('\n'));
+            const write = (blocks) => put(copy.tmp, 'docs/' + task.doc, others.map(copy.section).concat(blocks).join('\n'));
+            const { sectionProblem } = trackerDoc();
             const reasons = [];
-            write([copy.sectionHeading(task.id, task.title + ' (переписан)') + '\n']);
-            const retitled = copy.cli('render', '--check');
-            const notMatched = new RegExp(escapeRe(task.id) + ': title .* does not match the section');
-            if (retitled.status === 0 || !notMatched.test(String(retitled.stderr))) {
-              return 'render --check на переписанном заголовке ' + task.id + ': ' + copy.said(retitled);
-            }
-            reasons.push('заголовок ' + task.id);
-            write([]);
-            const missing = copy.cli('render', '--check');
-            const noSection = new RegExp(escapeRe(task.id) + ': no section');
-            if (missing.status === 0 || !noSection.test(String(missing.stderr))) {
-              return 'render --check без раздела ' + task.id + ': ' + copy.said(missing);
-            }
-            reasons.push('нет раздела ' + task.id);
-            write([copy.section(task), copy.section(task)]);
-            const twice = copy.cli('render', '--check');
-            const twoSections = new RegExp(escapeRe(task.id) + ': 2 sections');
-            if (twice.status === 0 || !twoSections.test(String(twice.stderr))) {
-              return 'render --check на двух разделах ' + task.id + ': ' + copy.said(twice);
-            }
-            reasons.push('два раздела ' + task.id);
+            // ветка: документ записан blocks; гейт красный ровно с причиной sectionProblem из модуля,
+            // и причина - этой ветки (mark)
+            const refuses = (what, blocks, mark) => {
+              write(blocks);
+              const problem = sectionProblem(task, path.join(copy.tmp, 'docs'), 'check');
+              if (problem === undefined) return 'sectionProblem не видит отказа: ' + what + ' ' + task.id;
+              if (!problem.includes(mark)) return 'sectionProblem даёт причину не этой ветки: ' + what + ' ' + task.id + ' - нет «' + mark + '» в ' + JSON.stringify(problem);
+              const red = copy.cli('render', '--check');
+              if (red.status === 0 || !String(red.stderr).includes(task.id + ': ' + problem)) {
+                return 'render --check: ' + what + ' ' + task.id + ': ' + copy.said(red);
+              }
+              reasons.push(what);
+              return undefined;
+            };
+            // пропуск: документ записан blocks; sectionProblem отказа не видит, render --check зелёный
+            const takes = (what, blocks) => {
+              write(blocks);
+              const problem = sectionProblem(task, path.join(copy.tmp, 'docs'), 'check');
+              if (problem !== undefined) return 'sectionProblem отказывает: ' + what + ' ' + task.id + ': ' + JSON.stringify(problem);
+              const green = copy.cli('render', '--check');
+              if (green.status !== 0) return 'render --check: ' + what + ' ' + task.id + ' не зелёный: ' + copy.said(green);
+              reasons.push(what + ' (зелёный)');
+              return undefined;
+            };
+            const [parsed] = markdown().headingsOf(copy.section(task));
+            if (!parsed) return 'headingsOf не видит заголовка раздела ' + task.id;
+            const source = parsed.source;
+            const failed =
+              refuses('переписанный заголовок', [copy.sectionHeading(task.id, task.title + ' (переписан)') + '\n'], 'does not match the section') ||
+              refuses('нет раздела', [], 'no section') ||
+              refuses('два раздела', [copy.section(task), copy.sectionHeading(task.id, task.title + ' (второй)') + '\n'], '2 sections') ||
+              refuses('разметка в заголовке', [copy.sectionHeading(task.id, '*' + task.title + '*') + '\n'], 'has emphasis (*)') ||
+              refuses('повтор якоря в заголовке другого уровня выше раздела', ['## ' + source + '\n', copy.section(task)], 'GitHub gives the section') ||
+              refuses('повтор якоря в заголовке setext выше раздела', [source + '\n---\n', copy.section(task)], 'GitHub gives the section') ||
+              refuses('emoji в заголовке выше раздела', ['## Итоги :tada:\n', copy.section(task)], 'whose anchor is not worked out') ||
+              takes('повтор якоря в заголовке другого уровня ниже раздела', [copy.section(task), '## ' + source + '\n']) ||
+              takes('emoji в заголовке ниже раздела', [copy.section(task), '## Итоги :tada:\n']);
+            if (failed) return failed;
+            // пропуск: документ с тем же разделом, записанный заново, снова зелёный
+            write([copy.section(task)]);
+            const green = copy.cli('render', '--check');
+            if (green.status !== 0) return 'render --check на восстановленном разделе ' + task.id + ' не зелёный: ' + copy.said(green);
             return { note: 'красный: ' + reasons.join(', ') + ' (docs/' + task.doc + ')' };
           }),
       },
@@ -1162,6 +1207,11 @@ function registerGateProbes(ctx, deps) {
       'test/imports.ts',
       '.env.test',
       'test/container.test.ts',
+      // проба гейта tracker пишет им копию трекера и берёт из модулей раздела и markdown строку
+      // раздела и тексты отказов: прямой require пробы, E0-12AM
+      'scripts/lib/tracker-fixture.mjs',
+      'scripts/lib/tracker-doc.mjs',
+      'scripts/lib/markdown.mjs',
     ],
     mustSkip: [
       'apps/web/next.config.ts',
@@ -1171,8 +1221,11 @@ function registerGateProbes(ctx, deps) {
       'scripts/tasks.mjs',
       'scripts/compose-rules.mjs',
       'scripts/lib/paths.mjs',
+      // транзитивные импорты модулей пробы - под glob гейта tracker, rules.sf.json:207
+      // (docs/DECISIONS.md, 03.11.2026, E0-12AM, круг 8, вариант B)
+      'scripts/lib/tracker-task.mjs',
       'scripts/lib/files.mjs',
-      // проба-близнец workspacePatterns грузит его (Р4 техлида E0-12T), как files.mjs - близнец trackedFiles
+      // проба-близнец workspacePatterns грузит его (Р4 техлида E0-12T)
       'scripts/lib/manifest.mjs',
       'apps/api/.env.test',
       // join(repoRoot, ".env") - не чтение (JOINED_NOT_READ, Р2 техлида E0-12T)

@@ -8,13 +8,14 @@ import { readRepoJson } from "./repo-files.js";
 
 /**
  * The shape of docs/tasks/tasks.json for the tests of the root project, one
- * schema for every reader: `scripts/tasks.mjs` writes the file without one (it
- * has no dependencies), and a hand edit or a merge can still leave a misspelt
- * field, a status the CLI does not know, a duplicate id or a dependency on a
- * task that is not there - each of them passes the CLI and breaks a reader
- * later. The id, the epic and the dependencies are held to the rule `add`
- * holds them to (`scripts/lib/tracker-task.mjs`), so the CLI writes nothing
- * the schema refuses.
+ * schema for every reader: `scripts/tasks.mjs` writes the file without one
+ * (`tasks.mjs` loads the packages of the root for the commands that need
+ * them, and zod is none of those), and a hand edit or a merge can still
+ * leave a misspelt field, a status the CLI does not know, a duplicate id or
+ * a dependency on a task that is not there - each of them passes the CLI and
+ * breaks a reader later. The id, the epic and the dependencies are held to
+ * the rule `add` holds them to (`scripts/lib/tracker-task.mjs`), so the CLI
+ * writes nothing the schema refuses.
  */
 
 /** The statuses of a task; the CLI has the same keys in `ICON`. */
@@ -22,16 +23,21 @@ export const STATUSES = ["todo", "in_progress", "blocked", "done"] as const;
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * A value a row of docs/00_STATUS.md takes as it is: one line with text in
+ * it, as `checkLine` of scripts/tasks.mjs holds `--title` and `--est` to.
+ */
+const oneLine = (what: string) =>
+  z.string().refine((value) => value.trim() !== "" && !/[\r\n]/.test(value), {
+    message: `${what} is empty or has a line break`,
+  });
+
 export const TaskSchema = z
   .object({
     id: z.string(),
     epic: z.string(),
-    title: z
-      .string()
-      .refine((title) => title.trim() !== "" && !/[\r\n]/.test(title), {
-        message: "title is empty or has a line break",
-      }),
-    estimate: z.string(),
+    title: oneLine("title"),
+    estimate: oneLine("estimate"),
     estimate_days: z.number().nullable(),
     deps: z.array(z.string()),
     doc: z.string().min(1),

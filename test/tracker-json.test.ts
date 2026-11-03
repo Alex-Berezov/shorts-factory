@@ -105,6 +105,16 @@ describe("docs/tasks/tasks.json", () => {
       [entry({ title: "First\nline" })],
       /^0\.title: title is empty or has a line break$/,
     ],
+    [
+      "an empty estimate",
+      [entry({ estimate: " " })],
+      /^0\.estimate: estimate is empty or has a line break$/,
+    ],
+    [
+      "an estimate with a line break",
+      [entry({ estimate: "1\nд" })],
+      /^0\.estimate: estimate is empty or has a line break$/,
+    ],
     ["an empty doc", [entry({ doc: "" })], /^0\.doc: /],
     [
       "estimate_days as text",

@@ -211,7 +211,7 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
   такой же, копию политики ловит `test/vitest-preset.test.ts`.
 - Корневой проект `test/` держит тесты репозитория, которые не принадлежат ни одному пакету: CI
   (`ci-config`), образы и Compose (`container`, `dockerfile`, `compose-rules`, `probe-image`),
-  корневые скрипты (`check-no-search-list`, `tasks-cli`, `paths`), входы turbo (`turbo-inputs`).
+  корневые скрипты (`check-no-search-list`, `tasks-cli`, `tracker-doc`, `tracker-fixture` - фикстура трекера `scripts/lib/tracker-fixture.mjs`, `markdown`, `paths`), входы turbo (`turbo-inputs`).
   Корень репозитория скрипты и корневые тесты берут из `scripts/lib/paths.mjs` (`repoRoot`),
   пакеты - из `@sf/config/paths`; перекрёстных импортов нет. Файлы репозитория корневые тесты
   читают через `test/repo-files.ts` - только те, что входят в хеш: отслеживаемые git и
@@ -271,13 +271,20 @@ _Дата: 2026-10-10 (E0-13). Как поднять окружение - `READM
     `scripts/lib/json.mjs`
     (Docker Compose 5.x, `infra/README.md`); новый Compose-файл стека - в `include`, `COMPOSE_SOURCES` и `when` сразу;
     tracker - `docs/tasks/tasks.json`, `docs/00_STATUS.md`, `docs/*_TASKS.md`, `docs/TECH_DEBT.md`,
-    `scripts/tasks.mjs`, `scripts/lib/paths.mjs`, `scripts/lib/tracker-doc.mjs`, `scripts/lib/tracker-task.mjs`,
-    `scripts/lib/markdown.mjs`, `scripts/lib/files.mjs`; harness-selftest - `.claude/**`,
-    файлы, названные в `note` гейтов compose и tracker, но не выбирающие сам этот гейт (его
-    `when`/`cmd`; сегодня - `test/compose-rules.test.ts`, `test/container.test.ts`), и файлы проекта, которые читают пробы
-    гейтов build и test:int (манифесты, конфиги сборки и int-тестов, `.env.test`; точный glob -
-    гейт `harness-selftest` в `rules.sf.json`, E0-01A, E0-02A; `turbo.json` пробы не читают, на нём
-    гейт не выбирается). Нет совпадения - гейт молча пропущен,
+    `package.json`, `pnpm-lock.yaml`, `scripts/tasks.mjs`, `scripts/lib/paths.mjs`, `scripts/lib/tracker-doc.mjs`, `scripts/lib/tracker-task.mjs`,
+    `scripts/lib/markdown.mjs`, `scripts/lib/files.mjs`; harness-selftest - `.claude/**`;
+    файлы, из которых turbo строит граф проб build и test:int (корневые `package.json`,
+    `pnpm-workspace.yaml`, `turbo.json`, `turbo.jsonc`; `package.json`, `turbo.json` и `turbo.jsonc`
+    пакетов `apps/**` и `packages/**`); входы пробы test:int (`vitest.int.config.*` пакетов,
+    `packages/config/vitest/**`, `packages/db/test-support/entry-check/**`, `packages/config/src/paths.ts`,
+    `vitest.preset.ts`, `test/imports.ts`, `.env.test`); файлы, названные в `note` гейтов compose и
+    tracker, но не выбирающие сам этот гейт (его `when`/`cmd`; сегодня - `test/compose-rules.test.ts`,
+    `test/container.test.ts`); модули, которые проба гейта tracker грузит прямым `require`
+    (`scripts/lib/tracker-fixture.mjs`, `scripts/lib/tracker-doc.mjs`, `scripts/lib/markdown.mjs`; их
+    транзитивные импорты `scripts/lib/tracker-task.mjs`, `scripts/lib/files.mjs` - под glob tracker,
+    `docs/DECISIONS.md`, 03.11.2026, E0-12AM, круг 8); боевые формы роута
+    `apps/api/src/routes/health/index.ts`, `apps/api/src/routes/system/index.ts` (точный glob -
+    гейт `harness-selftest` в `rules.sf.json`, E0-01A, E0-02A, E0-12L, E0-12T). Нет совпадения - гейт молча пропущен,
     так что exit 0 не значит, что compose или tracker проверены;
   - build выбирается по glob (дословно - `rules.sf.json`, гейт `build`):
     `{apps/web/**,packages/api-client/**,packages/config/**,packages/contracts/**,packages/core/**,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,turbo.json,tsconfig*.json}`

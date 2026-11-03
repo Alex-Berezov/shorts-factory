@@ -125,3 +125,5 @@ _Добавляется автоматически командами `node scri
 - 2026-11-02 ➕ **E0-12AM** tracker-doc: заголовок раздела по CommonMark - одно правило поиска и повторов (добавлена в трекер)
 - 2026-11-02 ✅ **E0-12X** Трекер и ссылки на долг: opt/set, якорь render --check, Zod tasks.json, fileLineRefs, форма ссылок на TECH_DEBT — Трекер отказывает на флаге вместо значения, журнал set хранит прежние значения, render --check сверяет раздел и якорь GitHub, tasks.json под Zod, ссылки на долг одной формой под замком; хвосты - E0-12AM
 - 2026-11-02 ⛔ **E0-12AM** blocked — stop 3: review round 4 blockers after two fix rounds and techlead fix 3 (set hint repeats --title, debt table across cut lines, GitHub custom emoji); diff on wip/E0-12AM
+- 2026-11-03 ➕ **E0-12AN** tasks.mjs: один разбор аргументов CLI, эпик из перечня, документ по умолчанию, ссылка ADHOC (добавлена в трекер)
+- 2026-11-03 ✎ **E0-12AN** tasks.mjs: один разбор аргументов CLI, эпик из перечня, документ по умолчанию, ссылка ADHOC (изменена в трекере: зависимости «—» → «E0-12AM», оценка «?» → «1 д»)

@@ -2221,8 +2221,21 @@
       "E0-12X"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "blocked",
+    "status": "in_progress",
     "added_at": "2026-11-02",
-    "blocked_reason": "stop 3: review round 4 blockers after two fix rounds and techlead fix 3 (set hint repeats --title, debt table across cut lines, GitHub custom emoji); diff on wip/E0-12AM"
+    "started_at": "2026-11-03"
+  },
+  {
+    "id": "E0-12AN",
+    "epic": "E0",
+    "title": "tasks.mjs: один разбор аргументов CLI, эпик из перечня, документ по умолчанию, ссылка ADHOC",
+    "estimate": "1 д",
+    "estimate_days": 1,
+    "deps": [
+      "E0-12AM"
+    ],
+    "doc": "TECH_DEBT.md",
+    "status": "todo",
+    "added_at": "2026-11-03"
   }
 ]
