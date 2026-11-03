@@ -127,3 +127,4 @@ _Добавляется автоматически командами `node scri
 - 2026-11-02 ⛔ **E0-12AM** blocked — stop 3: review round 4 blockers after two fix rounds and techlead fix 3 (set hint repeats --title, debt table across cut lines, GitHub custom emoji); diff on wip/E0-12AM
 - 2026-11-03 ➕ **E0-12AN** tasks.mjs: один разбор аргументов CLI, эпик из перечня, документ по умолчанию, ссылка ADHOC (добавлена в трекер)
 - 2026-11-03 ✎ **E0-12AN** tasks.mjs: один разбор аргументов CLI, эпик из перечня, документ по умолчанию, ссылка ADHOC (изменена в трекере: зависимости «—» → «E0-12AM», оценка «?» → «1 д»)
+- 2026-11-03 ✅ **E0-12AM** tracker-doc: заголовок раздела по CommonMark - одно правило поиска и повторов — раздел задачи по CommonMark и якорь по правилу GitHub, set --deps/--est, подсказки отказов без команды для оболочки

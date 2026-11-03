@@ -2221,9 +2221,11 @@
       "E0-12X"
     ],
     "doc": "TECH_DEBT.md",
-    "status": "in_progress",
+    "status": "done",
     "added_at": "2026-11-02",
-    "started_at": "2026-11-03"
+    "started_at": "2026-11-03",
+    "done_at": "2026-11-03",
+    "note": "раздел задачи по CommonMark и якорь по правилу GitHub, set --deps/--est, подсказки отказов без команды для оболочки"
   },
   {
     "id": "E0-12AN",
